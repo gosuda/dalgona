@@ -202,15 +202,43 @@ type syncOrderCase struct {
 	dirs    []string
 }
 
+func backupsRemain(t *testing.T, cwd string) bool {
+	t.Helper()
+	for _, pattern := range []string{"*.dalgona-backup-*", "*/*.dalgona-backup-*"} {
+		matches, err := filepath.Glob(filepath.Join(cwd, pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(matches) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func requireFinalSyncObservedBackupsGone(t *testing.T, seen map[string][]bool) {
+	t.Helper()
+	if len(seen) == 0 {
+		t.Fatal("no directory sync was observed")
+	}
+	for dir, observations := range seen {
+		if observations[len(observations)-1] {
+			t.Errorf("the final sync of %s still observed backup files", dir)
+		}
+	}
+}
+
 func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase) {
 	t.Helper()
 	f := newOutcomeFixture(t)
 	twoFiles(t, f)
 	calls := 0
 	synced := make(map[string]int)
+	backupSeen := make(map[string][]bool)
 	stubDirectorySync(t, func(pin *dirPin) error {
 		calls++
 		synced[pin.file.Name()]++
+		backupSeen[pin.file.Name()] = append(backupSeen[pin.file.Name()], backupsRemain(t, f.cwd))
 		requireTargetsAtSync(t, f.cwd, test.targets)
 		requireNoScratchAtSync(t, f.cwd)
 		return nil
@@ -224,6 +252,7 @@ func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase
 	if test.dirs != nil {
 		requireDirSyncCounts(t, f.cwd, synced, test.dirs)
 	}
+	requireFinalSyncObservedBackupsGone(t, backupSeen)
 	requireNoResidue(t, f.cwd)
 }
 
@@ -247,11 +276,11 @@ func requireDirSyncCounts(t *testing.T, cwd string, synced map[string]int, dirs 
 
 func TestDirectorySyncRunsAfterTheLastOperation(t *testing.T) {
 	tests := []syncOrderCase{
-		{"IO-05/two updates", twoFileEdit, map[string]string{"a.txt": "a-after\n", "b.txt": "b-after\n"}, 2, nil},
-		{"IO-05/rename in place", "[a.txt@{refA}]\nMV z.txt\n", map[string]string{"a.txt": absent, "z.txt": "a-before\n", "b.txt": "b-before\n"}, 2, nil},
-		{"IO-05/rename into a new directory", "[a.txt@{refA}]\nMV sub/z.txt\n", map[string]string{"a.txt": absent, "sub/z.txt": "a-before\n"}, 3, []string{"", "sub", ""}},
-		{"IO-05/move into nested missing directories", "[a.txt@{refA}]\nMV out/generated/a.txt\n", map[string]string{"a.txt": absent, "out/generated/a.txt": "a-before\n"}, 4, []string{"out/generated", "", "out", ""}},
-		{"IO-05/delete", "[a.txt@{refA}]\nREM\n", map[string]string{"a.txt": absent, "b.txt": "b-before\n"}, 1, nil},
+		{"IO-05/two updates", twoFileEdit, map[string]string{"a.txt": "a-after\n", "b.txt": "b-after\n"}, 4, nil},
+		{"IO-05/rename in place", "[a.txt@{refA}]\nMV z.txt\n", map[string]string{"a.txt": absent, "z.txt": "a-before\n", "b.txt": "b-before\n"}, 4, nil},
+		{"IO-05/rename into a new directory", "[a.txt@{refA}]\nMV sub/z.txt\n", map[string]string{"a.txt": absent, "sub/z.txt": "a-before\n"}, 6, []string{"", "sub", "", "", "sub", ""}},
+		{"IO-05/move into nested missing directories", "[a.txt@{refA}]\nMV out/generated/a.txt\n", map[string]string{"a.txt": absent, "out/generated/a.txt": "a-before\n"}, 8, []string{"out/generated", "", "out", "", "out/generated", "", "out", ""}},
+		{"IO-05/delete", "[a.txt@{refA}]\nREM\n", map[string]string{"a.txt": absent, "b.txt": "b-before\n"}, 2, nil},
 	}
 	for _, test := range tests {
 		for _, style := range profileStyles {

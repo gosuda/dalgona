@@ -86,6 +86,13 @@ func settleCommit(ctx context.Context, env tool.Env, batch stagedBatch, states [
 		return syncFailure(ctx, env, batch.files, states, err)
 	}
 	cleanupBackupStates(ctx, env, states)
+	// The backup removals are the last operations on their directories, so
+	// they need a sync of their own: without it a crash can leave a backup
+	// behind even though the patch succeeded. A failure here keeps the
+	// installed targets and reports write_error; it never rolls back.
+	if err := syncStates(states); err != nil {
+		return syncFailure(ctx, env, batch.files, states, err)
+	}
 	return appliedOutcome, nil
 }
 
