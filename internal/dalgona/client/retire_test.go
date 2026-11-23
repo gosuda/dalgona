@@ -16,16 +16,16 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
-func serveFakeDaemon(t *testing.T, sock string, handler rpc.Handler) net.Listener {
-	t.Helper()
+func listenFakeDaemon(t *testing.T, sock string) (net.Listener, error) {
 	listener, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(sock, 0o600); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	return listener, os.Chmod(sock, 0o600)
+}
+
+func serveFakeDaemon(t *testing.T, listener net.Listener, handler rpc.Handler) {
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -37,7 +37,6 @@ func serveFakeDaemon(t *testing.T, sock string, handler rpc.Handler) net.Listene
 			context.AfterFunc(t.Context(), func() { _ = served.Close() })
 		}
 	}()
-	return listener
 }
 
 func fakeIdentity(t *testing.T, info Info, retire func()) rpc.Handler {
@@ -56,6 +55,22 @@ func fakeIdentity(t *testing.T, info Info, retire func()) rpc.Handler {
 	}
 }
 
+func replaceAfterIdentity(t *testing.T, old net.Listener, sock string, answer, replacement rpc.Handler) rpc.Handler {
+	var swapped atomic.Bool
+	return func(ctx context.Context, method string, params jsontext.Value) (jsontext.Value, error) {
+		if method == MethodIdentity && swapped.CompareAndSwap(false, true) {
+			_ = old.Close()
+			next, err := listenFakeDaemon(t, sock)
+			if err != nil {
+				t.Errorf("start the replacement daemon: %v", err)
+				return nil, err
+			}
+			serveFakeDaemon(t, next, replacement)
+		}
+		return answer(ctx, method, params)
+	}
+}
+
 func TestRetireNeverReachesAReplacementDaemon(t *testing.T) {
 	home := shortHome(t)
 	if err := TightenHome(home); err != nil {
@@ -65,16 +80,13 @@ func TestRetireNeverReachesAReplacementDaemon(t *testing.T) {
 	running := Info{Build: "00112233445566aa", PID: os.Getpid(), Version: "old", StartedAt: time.Unix(1_700_000_000, 0).UTC()}
 	replacement := Info{Build: "00112233445566bb", PID: os.Getpid(), Version: "new", StartedAt: running.StartedAt.Add(time.Minute)}
 	var oldRetired, replacementRetired atomic.Bool
-	var old net.Listener
-	var swapped atomic.Bool
+	old, err := listenFakeDaemon(t, sock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	answer := fakeIdentity(t, running, func() { oldRetired.Store(true) })
-	old = serveFakeDaemon(t, sock, func(ctx context.Context, method string, params jsontext.Value) (jsontext.Value, error) {
-		if method == MethodIdentity && swapped.CompareAndSwap(false, true) {
-			_ = old.Close()
-			serveFakeDaemon(t, sock, fakeIdentity(t, replacement, func() { replacementRetired.Store(true) }))
-		}
-		return answer(ctx, method, params)
-	})
+	replacing := fakeIdentity(t, replacement, func() { replacementRetired.Store(true) })
+	serveFakeDaemon(t, old, replaceAfterIdentity(t, old, sock, answer, replacing))
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
 	retired, err := Retire(ctx, home, running)
@@ -98,7 +110,11 @@ func TestRetireRefusesADaemonThatChanged(t *testing.T) {
 	now := seen
 	now.StartedAt = seen.StartedAt.Add(time.Second)
 	var retiredAny atomic.Bool
-	serveFakeDaemon(t, SocketPath(home), fakeIdentity(t, now, func() { retiredAny.Store(true) }))
+	listener, err := listenFakeDaemon(t, SocketPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveFakeDaemon(t, listener, fakeIdentity(t, now, func() { retiredAny.Store(true) }))
 	retired, err := Retire(t.Context(), home, seen)
 	if _, ok := errors.AsType[*ReplacedError](err); !ok || retired {
 		t.Fatalf("Retire = %v, %v; want ReplacedError", retired, err)
