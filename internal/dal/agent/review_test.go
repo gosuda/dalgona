@@ -210,8 +210,12 @@ func judgedAfterCompletion(events []event.Seqd, callID string) bool {
 func requireCompletedOK(t *testing.T, events []event.Seqd, callID string) {
 	t.Helper()
 	index := completedIndex(events, callID)
-	if index < 0 || !events[index].Event.(event.ToolCompleted).OK {
-		t.Fatalf("tool.completed for %s is missing or not OK", callID)
+	if index < 0 {
+		t.Fatalf("tool.completed for %s is missing", callID)
+	}
+	completed := events[index].Event.(event.ToolCompleted)
+	if !completed.OK {
+		t.Fatalf("tool.completed for %s failed: %+v", callID, completed)
 	}
 }
 
