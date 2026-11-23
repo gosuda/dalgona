@@ -301,6 +301,10 @@ func (m *model) slashEnter() tea.Cmd {
 			return command
 		}
 	}
+	return m.enterPrompt()
+}
+
+func (m *model) enterPrompt() tea.Cmd {
 	if m.input.composer.continueLine() {
 		return nil
 	}
