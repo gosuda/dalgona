@@ -356,7 +356,7 @@ just verify
 
 `just verify` runs formatting checks, vet, lint, race-enabled tests, vulnerability checks, the hashline model, specification style, web checks, and Cloudflare checks.
 
-[CI](docs/dal/spec/ci.md) runs the shared checks once, then the Go checks on Linux, macOS, and Windows with the same built web assets.
+[CI](docs/dal/spec/ci.md) runs the Go checks and the shared checks as four Linux jobs on Depot runners.
 
 Without `uv`, `hashline-model` and `spec-style` skip locally and fail when `CI=true`. A skipped check is not a pass.
 
