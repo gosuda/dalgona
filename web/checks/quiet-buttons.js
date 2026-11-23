@@ -28,11 +28,13 @@
 				".thread, .thread-choice, .model-button, .request-actions button",
 			),
 	);
+	const inFlight = (el) =>
+		el.disabled || el.getAttribute("aria-disabled") === "true";
 	const size = resolve("fontSize", "--size-label");
 	const weight = resolve("fontWeight", "--weight-control");
 	for (const el of typed) {
 		const style = getComputedStyle(el);
-		const name = `${el.textContent.trim()}${el.disabled ? " (disabled)" : ""}`;
+		const name = `${el.textContent.trim()}${inFlight(el) ? " (disabled)" : ""}`;
 		const want = (what, got, wanted, token) => {
 			if (got !== wanted)
 				failures.push(`${name}: ${what} ${got} (want ${token} ${wanted})`);
@@ -49,7 +51,7 @@
 	const clear = "rgba(0, 0, 0, 0)";
 	for (const el of buttons) {
 		const style = getComputedStyle(el);
-		const label = `${el.textContent.trim()}${el.disabled ? " (disabled)" : ""}`;
+		const label = `${el.textContent.trim()}${inFlight(el) ? " (disabled)" : ""}`;
 		const fail = (text) => failures.push(`${label}: ${text}`);
 		const want = (what, got, wanted, name) => {
 			if (got !== wanted) fail(`${what} ${got} (want ${name} ${wanted})`);
@@ -66,7 +68,7 @@
 				);
 			continue;
 		}
-		if (el.disabled) {
+		if (inFlight(el)) {
 			want(
 				"fill",
 				style.backgroundColor,

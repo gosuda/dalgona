@@ -266,12 +266,16 @@ func (m *model) popupKey(msg tea.KeyPressMsg) (tea.Cmd, bool) {
 		m.completePopup()
 		return nil, true
 	case "enter":
-		if len(popup.items) == 0 {
-			return nil, popup.kind == popupFile
-		}
-		return m.runPopup(), true
+		return m.popupEnter(popup)
 	}
 	return nil, false
+}
+
+func (m *model) popupEnter(popup *completion) (tea.Cmd, bool) {
+	if len(popup.items) == 0 {
+		return nil, popup.kind == popupFile
+	}
+	return m.runPopup(), true
 }
 
 func (m *model) completePopup() {

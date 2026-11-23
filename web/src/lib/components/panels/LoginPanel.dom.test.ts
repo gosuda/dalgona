@@ -182,6 +182,42 @@ describe("login panel", () => {
 		);
 	});
 
+	test("focus moves to Cancel when Continue gives way to the waiting view", async () => {
+		const answer = Promise.withResolvers<unknown>();
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "chatgpt", login: "browser", signedIn: false },
+			]),
+		});
+		const call = rpc.call.bind(rpc);
+		vi.spyOn(rpc, "call").mockImplementation((method, params, parse) => {
+			if (method !== "account/login/start") return call(method, params, parse);
+			return answer.promise.then(() =>
+				parse({
+					type: "chatgpt",
+					loginId: "login-1",
+					authUrl: "https://auth.example/start",
+				}),
+			);
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/chatgpt/));
+		const button = screen.getByRole("button", { name: "Continue" });
+		button.focus();
+		expect(document.activeElement).toBe(button);
+		await userEvent.click(button);
+		await screen.findByText("Waiting for sign-in…");
+		await vi.waitFor(() =>
+			expect(document.activeElement).toBe(
+				screen.getByRole("button", { name: "Cancel" }),
+			),
+		);
+		answer.resolve(null);
+	});
+
 	test("a failed login keeps the panel open with Try again", async () => {
 		const { session } = await connected({
 			"dalgona/account/providers/list": providers([
