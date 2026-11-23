@@ -526,6 +526,7 @@ func removeScratch(ctx context.Context, env tool.Env, states []*writeState) {
 		cleanupBackupState(ctx, env, state)
 	}
 }
+
 func cleanupTempStates(ctx context.Context, env tool.Env, states []*writeState) {
 	for _, state := range states {
 		cleanupTempState(ctx, env, state)
