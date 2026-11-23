@@ -86,15 +86,24 @@ func settleCommit(ctx context.Context, env tool.Env, batch stagedBatch, states [
 		return syncFailure(ctx, env, batch.files, states, err)
 	}
 	cleanupBackupStates(ctx, env, states)
+	if err := syncStates(states); err != nil {
+		return syncFailureAfterCleanup(ctx, env, batch.files, states, err)
+	}
 	return appliedOutcome, nil
 }
 
-func syncFailure(ctx context.Context, env tool.Env, files []*stagedFile, states []*writeState, cause error) (tool.Outcome, error) {
+func syncFailureOutcome(ctx context.Context, env tool.Env, files []*stagedFile, states []*writeState, cause error) (tool.Outcome, string) {
 	paths := verifiedStates(ctx, env, writtenPaths(files))
 	outcome := writeOutcome(paths, len(states), 0)
 	invalidateAll(env, outcome.Paths)
+	head := fmt.Sprintf("patch: the files were written but a directory sync failed: %s. Affected paths: %s.", cause, strings.Join(affectedPaths(states), ", "))
+	return outcome, head
+}
+
+func syncFailure(ctx context.Context, env tool.Env, files []*stagedFile, states []*writeState, cause error) (tool.Outcome, error) {
+	outcome, head := syncFailureOutcome(ctx, env, files, states, cause)
 	var out strings.Builder
-	fmt.Fprintf(&out, "patch: the files were written but a directory sync failed: %s. Affected paths: %s.", cause, strings.Join(affectedPaths(states), ", "))
+	out.WriteString(head)
 	if outcome.Commit == tool.CommitUnknown {
 		for _, state := range states {
 			if state.backup == "" {
@@ -106,6 +115,56 @@ func syncFailure(ctx context.Context, env tool.Env, files []*stagedFile, states 
 	}
 	cleanupBackupStates(ctx, env, states)
 	return outcome, errors.New(out.String())
+}
+
+type keptBackup struct {
+	path string
+	file string
+}
+
+func syncFailureAfterCleanup(ctx context.Context, env tool.Env, files []*stagedFile, states []*writeState, cause error) (tool.Outcome, error) {
+	outcome, head := syncFailureOutcome(ctx, env, files, states, cause)
+	var out strings.Builder
+	out.WriteString(head)
+	if outcome.Commit == tool.CommitUnknown {
+		kept, failures := retainCleanupBackups(ctx, env, states)
+		for _, backup := range kept {
+			fmt.Fprintf(&out, "\nRetained backup for %s: %s", backup.path, backup.file)
+		}
+		for _, failure := range failures {
+			fmt.Fprintf(&out, "\n%s", failure)
+		}
+	}
+	return outcome, errors.New(out.String())
+}
+
+func retainCleanupBackups(ctx context.Context, env tool.Env, states []*writeState) (kept []keptBackup, failures []string) {
+	for _, state := range states {
+		if state.backup == "" {
+			continue
+		}
+		if !backupPresent(ctx, env, state) {
+			if err := state.stageWrite(ctx, env, state.src, state.backup, state.file.before); err != nil {
+				failures = append(failures, fmt.Sprintf("patch: cannot restore the backup for %s: %v", state.file.path, err))
+				continue
+			}
+		}
+		if backupPresent(ctx, env, state) {
+			kept = append(kept, keptBackup{path: state.file.path, file: state.backup})
+			continue
+		}
+		failures = append(failures, fmt.Sprintf("patch: cannot restore the backup for %s", state.file.path))
+	}
+	return kept, failures
+}
+
+func backupPresent(ctx context.Context, env tool.Env, state *writeState) bool {
+	if state.src != nil {
+		present, err := state.src.leafExists(filepath.Base(state.backup))
+		return err == nil && present
+	}
+	_, err := env.Runner.Stat(ctx, state.backup)
+	return err == nil
 }
 
 var syncPinnedDir = func(p *dirPin) error { return p.syncDir() }

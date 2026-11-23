@@ -412,7 +412,7 @@ are outside these budgets. Total RSS is not promised to fit in 96 MiB.
 
 Retain source ceilings: input 8 MiB, 1-64 edits, 64 canonical paths, 16 MiB per file,
 64 MiB staged before-plus-after bytes per call. The canonical paths of a call total at most 16 KiB. Check before allocation.
-Admission also bounds the encoded size. The JSON-encoded paths plus 30 bytes per path entry total at most 20 KiB.
+Admission also bounds the encoded size. The JSON-encoded paths (quotes included) plus 28 bytes per path entry total at most 20 KiB.
 These are individual ceilings, not a promise every combination can fit concurrently.
 Metadata can reduce usable capacity. The store has no limit per path or per consumer.
 Each thread store keeps at most 512 entries.
