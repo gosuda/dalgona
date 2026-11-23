@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
-	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/fake"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/registry"
 )
 
 type fakeBox struct {
@@ -48,7 +48,7 @@ func newFakeBinder(t *testing.T, store *journal.Store) (*Binder, *fakeBox) {
 		Journal: store,
 		Logger:  slog.New(box.logs),
 	})
-	b.newSvc = func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) { return box.svc, nil }
+	b.services = registryOf(func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) { return box.svc, nil })
 	b.upload = func(context.Context, runner.Runner, string) (string, error) {
 		box.uploads++
 		return "baseline-1", nil
@@ -137,9 +137,9 @@ func TestCreateRecoversBoxLeftByCrash(t *testing.T) {
 	b, box := newFakeBinder(t, store)
 	_, err := box.svc.Create(ctx, sandboxsvc.Spec{Name: "dalgona-thread-c"})
 	must(t, err)
-	b.newSvc = func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
+	b.services = registryOf(func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
 		return duplicateRefusing{box.svc}, nil
-	}
+	})
 	startThread(t, store, "thread-c", t.TempDir())
 	box.use(ctx, t, "thread-c")
 	requireBindings(t, store, "thread-c", event.RunnerBound{Runner: "box", Service: "fake", BoxID: "dalgona-thread-c", Baseline: "baseline-1"})
@@ -164,7 +164,7 @@ func TestReplacementUpdatesEveryThreadOnTheBox(t *testing.T) {
 	_, err := box.svc.Create(ctx, sandboxsvc.Spec{Name: "box-x"})
 	must(t, err)
 	replacing := &replacingService{Service: box.svc, from: "box-x", to: "box-x-2"}
-	b.newSvc = func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) { return replacing, nil }
+	b.services = registryOf(func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) { return replacing, nil })
 	old := event.RunnerBound{Runner: "box", Service: "fake", BoxID: "box-x", Baseline: "base"}
 	for _, thread := range []string{"thread-a", "thread-b", "thread-c"} {
 		startThread(t, store, thread, t.TempDir())
@@ -199,19 +199,6 @@ func (s *replacingService) Attach(ctx context.Context, id string) (string, error
 	}
 	s.replacements++
 	return s.Create(ctx, sandboxsvc.Spec{Name: s.to})
-}
-
-func TestTokenIgnoresProviderAPIKeyEnvironment(t *testing.T) {
-	home := t.TempDir()
-	store, err := auth.Load(home)
-	must(t, err)
-	must(t, store.SetAPIKey("cloudflare", "worker-secret"))
-	t.Setenv("CLOUDFLARE_API_KEY", "account-key")
-	t.Setenv("DALGONA_CLOUDFLARE_TOKEN", "")
-	b := NewBinder(Options{Config: config.Config{Home: home}, Auth: store})
-	if got, err := b.token("cloudflare", "DALGONA_CLOUDFLARE_TOKEN"); err != nil || got != "worker-secret" {
-		t.Fatalf("token = %q, %v; want the auth.json key", got, err)
-	}
 }
 
 func requireGC(ctx context.Context, t *testing.T, b *Binder, wantListed int) []Box {
@@ -255,7 +242,7 @@ func TestRunnerRecoversAfterRestart(t *testing.T) {
 	must(t, first.Close())
 
 	restarted, _ := newFakeBinder(t, store)
-	restarted.newSvc = b.newSvc
+	restarted.services = b.services
 	second := openRunner(ctx, t, restarted, "thread-r")
 	defer func() { _ = second.Close() }()
 	if out := waitOutput(ctx, t, second, "call-1"); out != "done\n" {
@@ -316,10 +303,10 @@ func TestCloudMainRefusesCloudflareUp(t *testing.T) {
 	created := 0
 	code := CloudMain(t.Context(), Options{
 		Config: cfg,
-		NewService: func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
+		Services: registryOf(func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
 			created++
 			return nil, errors.New("service factory reached")
-		},
+		}),
 	}, []string{"up", "edge"}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
 	if code != 1 {
 		t.Fatalf("CloudMain exit = %d, want 1", code)
@@ -373,4 +360,8 @@ func waitOutput(ctx context.Context, t *testing.T, r runner.Runner, id string) s
 		case <-ticker.C:
 		}
 	}
+}
+
+func registryOf(build registry.BuildFunc) *registry.Registry {
+	return registry.New(registry.Options{Build: build})
 }

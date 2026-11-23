@@ -1,4 +1,4 @@
-package remote
+package registry
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc"
 )
@@ -36,10 +37,10 @@ type outcome struct {
 	err error
 }
 
-func bindAsync(ctx context.Context, b *Binder, spec config.RunnerSpec) <-chan outcome {
+func bindAsync(ctx context.Context, b *Registry, spec config.RunnerSpec) <-chan outcome {
 	ch := make(chan outcome, 1)
 	go func() {
-		svc, err := b.service(ctx, spec)
+		svc, err := b.Service(ctx, spec)
 		ch <- outcome{svc: svc, err: err}
 	}()
 	return ch
@@ -71,11 +72,9 @@ type blockingService struct {
 	fast    stubService
 }
 
-func blockingBinder() (*Binder, *blockingService) {
+func blockingRegistry() (*Registry, *blockingService) {
 	svc := &blockingService{release: make(chan struct{}), entered: make(chan struct{}, 1)}
-	b := NewBinder(Options{Config: config.Config{}})
-	b.newSvc = svc.build
-	return b, svc
+	return New(Options{Build: svc.build}), svc
 }
 
 func (s *blockingService) build(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
@@ -108,7 +107,7 @@ func (s *blockingService) constructed() int {
 }
 
 func TestServiceSharesInFlightConstructionPerSpec(t *testing.T) {
-	b, svc := blockingBinder()
+	b, svc := blockingRegistry()
 	slow := config.RunnerSpec{Service: "slow"}
 	first := bindAsync(t.Context(), b, slow)
 	<-svc.entered
@@ -127,7 +126,7 @@ func TestServiceSharesInFlightConstructionPerSpec(t *testing.T) {
 }
 
 func TestServiceConstructionDoesNotBlockOtherSpecs(t *testing.T) {
-	b, svc := blockingBinder()
+	b, svc := blockingRegistry()
 	ctx, cancel := context.WithCancel(t.Context())
 	slowDone := bindAsync(ctx, b, config.RunnerSpec{Service: "slow"})
 	<-svc.entered
@@ -145,7 +144,7 @@ func TestServiceConstructionDoesNotBlockOtherSpecs(t *testing.T) {
 
 func TestServiceCancelledBuilderDoesNotPoisonWaiter(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b, svc := blockingBinder()
+		b, svc := blockingRegistry()
 		slow := config.RunnerSpec{Service: "slow"}
 		builderCtx, cancel := context.WithCancel(t.Context())
 		first := bindAsync(builderCtx, b, slow)
@@ -162,4 +161,21 @@ func TestServiceCancelledBuilderDoesNotPoisonWaiter(t *testing.T) {
 			t.Fatalf("constructed %d services, want 2", got)
 		}
 	})
+}
+
+func TestTokenIgnoresProviderAPIKeyEnvironment(t *testing.T) {
+	home := t.TempDir()
+	store, err := auth.Load(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAPIKey("cloudflare", "worker-secret"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLOUDFLARE_API_KEY", "account-key")
+	t.Setenv("DALGONA_CLOUDFLARE_TOKEN", "")
+	r := New(Options{Auth: store})
+	if got, err := r.token("cloudflare", "DALGONA_CLOUDFLARE_TOKEN"); err != nil || got != "worker-secret" {
+		t.Fatalf("token = %q, %v; want the auth.json key", got, err)
+	}
 }

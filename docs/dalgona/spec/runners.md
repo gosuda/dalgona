@@ -4,7 +4,7 @@ Package `internal/dalgona/remote` binds threads to boxes. Mode A runs exec and s
 
 ## Services
 
-A `[runners.<name>]` entry MUST name one service: `docker`, `sprites`, `modal`, `sandbox0`, or `cloudflare`. The binder MUST build one service per distinct runner entry and reuse it.
+A `[runners.<name>]` entry MUST name one service: `docker`, `sprites`, `modal`, `sandbox0`, or `cloudflare`. The binder MUST get each service from the registry in `internal/dalgona/sandboxsvc/registry`. The registry MUST build one service per distinct runner entry and reuse it.
 
 | Service | Constructor | Credential |
 |---|---|---|
