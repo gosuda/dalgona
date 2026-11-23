@@ -45,10 +45,11 @@ Those tests MUST run once on Linux. They do not certify a live browser or Cloudf
 ## Failure reporting
 
 A step in the `web` job MUST run when the steps it needs succeeded, even if an unrelated step failed.
-The docs and specs, web, and worker steps are unrelated to each other.
+Each check command in the `web` job MUST be its own step, because a failing command ends the rest of its step.
+The docs and specs checks, the web checks, and the worker checks are unrelated to each other.
 A step MUST be skipped only when a step it needs failed or the run was cancelled.
 Cancellation MUST still stop the job.
-One run then lists the web and worker test failures together.
+One run then lists every failing check that does not depend on a failed step.
 
 ## Native lanes
 

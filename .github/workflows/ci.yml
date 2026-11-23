@@ -60,14 +60,21 @@ jobs:
       - name: Corepack pnpm
         id: corepack
         run: corepack enable && corepack prepare pnpm@12.21.0 --activate && pnpm --version
-      - name: Docs and specs
+      - name: Hashline model
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: |
-          python3 docs/dal/spec/hashline/verify_model.py | cmp - docs/dal/spec/hashline/verification.json
-          python3 docs/dal/spec/check_style.py docs/dal/spec
-          python3 docs/dal/spec/check_style.py docs/dalgona/spec
-          python3 docs/dal/spec/check_style_test.py
-          python3 docs/check_links.py
+        run: python3 docs/dal/spec/hashline/verify_model.py | cmp - docs/dal/spec/hashline/verification.json
+      - name: Spec style
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 docs/dal/spec/check_style.py docs/dal/spec
+      - name: Dalgona spec style
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 docs/dal/spec/check_style.py docs/dalgona/spec
+      - name: Spec style tests
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 docs/dal/spec/check_style_test.py
+      - name: Docs links
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: python3 docs/check_links.py
       - name: Web install
         id: web-install
         if: ${{ !cancelled() && steps.corepack.outcome == 'success' }}
@@ -76,11 +83,12 @@ jobs:
         id: web-build
         if: ${{ !cancelled() && steps.web-install.outcome == 'success' }}
         run: pnpm -C web build
-      - name: Web lint and typecheck
+      - name: Web lint
         if: ${{ !cancelled() && steps.web-build.outcome == 'success' }}
-        run: |
-          pnpm -C web exec biome ci
-          pnpm -C web exec svelte-check
+        run: pnpm -C web exec biome ci
+      - name: Web typecheck
+        if: ${{ !cancelled() && steps.web-build.outcome == 'success' }}
+        run: pnpm -C web exec svelte-check
       - name: Web tests
         if: ${{ !cancelled() && steps.web-build.outcome == 'success' }}
         run: pnpm -C web exec vitest run
@@ -88,12 +96,15 @@ jobs:
         id: worker-install
         if: ${{ !cancelled() && steps.corepack.outcome == 'success' }}
         run: pnpm -C deploy/cloudflare install --frozen-lockfile
-      - name: Worker typecheck and lint
+      - name: Worker typecheck
         if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
-        run: |
-          pnpm -C deploy/cloudflare exec tsc --noEmit
-          pnpm -C deploy/cloudflare exec tsc --noEmit -p tsconfig.test.json
-          pnpm -C deploy/cloudflare exec biome ci .
+        run: pnpm -C deploy/cloudflare exec tsc --noEmit
+      - name: Worker test typecheck
+        if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
+        run: pnpm -C deploy/cloudflare exec tsc --noEmit -p tsconfig.test.json
+      - name: Worker lint
+        if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
+        run: pnpm -C deploy/cloudflare exec biome ci .
       - name: Worker tests
         if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
         run: pnpm -C deploy/cloudflare test
