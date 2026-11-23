@@ -467,8 +467,8 @@ or a skipped call. The object MUST stay under 48 KiB.
 
 Recovery respects current read permission and reveals no foreign consumer data.
 A refusal shows no source rows. `ranges` names the whole current mapped span
-of the refused target, so one fresh read shows every line the replacement
-touches under a single new reference. `ranges` names at most 40 lines to read,
+of the refused target, so one fresh read shows every touched line under a
+single new reference. `ranges` names at most 40 lines to read,
 and `remaining` names the rest of that span. `remaining` holds at most
 64 ranges, and its last range runs through the final mapped line. Only the
 final delivery establishes future coverage. No internal fetch, automatic retag,
