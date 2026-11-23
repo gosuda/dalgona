@@ -324,3 +324,46 @@ func TestLegacyStylesDoNotSyncDirectories(t *testing.T) {
 		requireNoResidue(t, cwd)
 	})
 }
+
+func TestDirectorySyncFailureAfterCleanupRestoresBackups(t *testing.T) {
+	for _, style := range profileStyles {
+		t.Run("IO-05/cleanup sync failure restores backups/"+string(style), func(t *testing.T) {
+			requireCleanupSyncFailure(t, style)
+		})
+	}
+}
+
+func requireCleanupSyncFailure(t *testing.T, style Style) {
+	t.Helper()
+	f := newOutcomeFixture(t)
+	twoFiles(t, f)
+	calls := 0
+	stubDirectorySync(t, func(*dirPin) error {
+		calls++
+		if calls <= 2 {
+			return nil
+		}
+		if calls == 3 {
+			writeFixture(t, f.cwd, "b.txt", "b-other\n")
+		}
+		return errInjectedDirSync
+	})
+	before := mintedSequence(t, f.env.Snapshots)
+	err := f.run(t, style, twoFileEdit)
+	if err == nil {
+		t.Fatal("the call succeeded although its cleanup sync failed")
+	}
+	requireWrappedOutcome(t, err, style, withPaths(commitUnknown, "a.txt", "after", "b.txt", "unknown"))
+	requireNothingMinted(t, f.env.Snapshots, before)
+	if !strings.Contains(err.Error(), ". Affected paths: a.txt, b.txt.") {
+		t.Fatalf("error does not name the affected paths: %q", err.Error())
+	}
+	requireBackupHolds(t, err.Error(), "a.txt", "a-before\n")
+	requireBackupHolds(t, err.Error(), "b.txt", "b-before\n")
+	if actual := readFixture(t, f.cwd, "a.txt"); actual != "a-after\n" {
+		t.Fatalf("a.txt = %q, want the installed bytes", actual)
+	}
+	if actual := readFixture(t, f.cwd, "b.txt"); actual != "b-other\n" {
+		t.Fatalf("b.txt = %q, want the concurrent writer's bytes", actual)
+	}
+}
