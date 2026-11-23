@@ -39,6 +39,18 @@ const (
 	ProbePreIdentity
 )
 
+var errUnidentified = errors.New("cannot safely identify the old daemon; stop it manually and retry dalgona restart")
+
+type ReplacedError struct {
+	Seen    Info
+	Running Info
+}
+
+func (e *ReplacedError) Error() string {
+	return fmt.Sprintf("daemon changed before restart: saw pid %d build %s, now pid %d build %s; reconnect and retry",
+		e.Seen.PID, e.Seen.Build, e.Running.PID, e.Running.Build)
+}
+
 type BuildMismatchError struct {
 	Running string
 	Own     string
@@ -79,21 +91,45 @@ func CheckBuild(ctx context.Context, home, own string) (Info, error) {
 	return info, nil
 }
 
-func Retire(ctx context.Context, home string) error {
+func Retire(ctx context.Context, home string, running Info) (bool, error) {
 	conn, err := dialPeer(SocketPath(home))
 	if err != nil {
-		return err
+		return false, nil
 	}
-	defer conn.Close()
 	client := rpc.Dial(ctx, conn, daemonClient{})
-	defer func() { _ = client.Close() }()
+	err = retireIdentified(ctx, client, running)
+	_ = client.Close()
+	_ = conn.Close()
+	if err != nil {
+		return false, err
+	}
+	if !waitSocketGone(ctx, home) {
+		return false, errors.New("daemon did not stop after retire")
+	}
+	return true, nil
+}
+
+func retireIdentified(ctx context.Context, client *rpc.Conn, running Info) error {
+	info, probe, err := identify(ctx, client)
+	switch {
+	case err != nil:
+		return err
+	case probe == ProbePreIdentity, !VerifiedPID(info.PID):
+		return errUnidentified
+	case !sameDaemon(running, info):
+		return &ReplacedError{Seen: running, Running: info}
+	}
 	if err := client.Call(ctx, MethodRetire, nil, nil); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 		return err
 	}
 	return nil
 }
 
-func WaitSocketGone(ctx context.Context, home string) bool {
+func sameDaemon(a, b Info) bool {
+	return a.PID == b.PID && a.Build == b.Build && a.StartedAt.Equal(b.StartedAt)
+}
+
+func waitSocketGone(ctx context.Context, home string) bool {
 	sock := SocketPath(home)
 	deadline := time.Now().Add(socketGoneTimeout)
 	for {

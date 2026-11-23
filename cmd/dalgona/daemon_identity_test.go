@@ -300,14 +300,12 @@ func retireSpawnedDaemon(t *testing.T, home string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, probe, _ := client.ProbeDaemon(ctx, home); probe != client.ProbeReady {
+	running, probe, _ := client.ProbeDaemon(ctx, home)
+	if probe != client.ProbeReady {
 		return
 	}
-	if err := client.Retire(ctx, home); err != nil {
+	if _, err := client.Retire(ctx, home, running); err != nil {
 		t.Errorf("retire spawned daemon: %v", err)
-	}
-	if !client.WaitSocketGone(ctx, home) {
-		t.Error("spawned daemon did not stop")
 	}
 }
 

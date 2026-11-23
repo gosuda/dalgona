@@ -8,24 +8,11 @@ import (
 	"sync"
 )
 
-var (
-	ErrSessionClosed = errors.New("client: session closed")
-	errUnidentified  = errors.New("cannot safely identify the old daemon; stop it manually and retry dalgona restart")
-)
+var ErrSessionClosed = errors.New("client: session closed")
 
 type Endpoint struct {
 	Home   string
 	Remote string
-}
-
-type ReplacedError struct {
-	Seen    Info
-	Running Info
-}
-
-func (e *ReplacedError) Error() string {
-	return fmt.Sprintf("daemon changed before restart: saw pid %d build %s, now pid %d build %s; reconnect and retry",
-		e.Seen.PID, e.Seen.Build, e.Running.PID, e.Running.Build)
 }
 
 type Session struct {
@@ -123,7 +110,7 @@ func (s *Session) Restart(ctx context.Context, running Info) (bool, error) {
 	}
 	defer s.leave()
 	home := s.endpoint.Home
-	retired, err := retireNamed(ctx, home, running)
+	retired, err := Retire(ctx, home, running)
 	if err != nil {
 		return false, err
 	}
@@ -132,32 +119,6 @@ func (s *Session) Restart(ctx context.Context, running Info) (bool, error) {
 		return false, err
 	}
 	return retired, conn.Close()
-}
-
-func retireNamed(ctx context.Context, home string, running Info) (bool, error) {
-	info, probe, err := ProbeDaemon(ctx, home)
-	if err != nil {
-		return false, err
-	}
-	switch {
-	case probe == ProbeAbsent:
-		return false, nil
-	case probe == ProbePreIdentity, !VerifiedPID(info.PID):
-		return false, errUnidentified
-	case !sameDaemon(running, info):
-		return false, &ReplacedError{Seen: running, Running: info}
-	}
-	if err := Retire(ctx, home); err != nil {
-		return false, err
-	}
-	if !WaitSocketGone(ctx, home) {
-		return false, errors.New("daemon did not stop after retire")
-	}
-	return true, nil
-}
-
-func sameDaemon(a, b Info) bool {
-	return a.PID == b.PID && a.Build == b.Build && a.StartedAt.Equal(b.StartedAt)
 }
 
 func (s *Session) Close() error {

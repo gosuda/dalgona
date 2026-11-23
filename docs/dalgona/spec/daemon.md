@@ -34,7 +34,7 @@ A terminal client MUST ask with this prompt:
 daemon <home> runs build <running>; this client is build <own>. Restart the daemon? Running turns stop and recover. [y/N]
 ```
 
-The answer `y` MUST restart through the session with the identity the mismatch reported. The restart MUST probe the daemon again and retire it only when its pid, build, and start time still match. It MUST then wait up to five seconds for the socket to go and run `Ensure` with the backend. A daemon that changed since the mismatch MUST stay running, and the client MUST answer:
+The answer `y` MUST restart through the session with the identity the mismatch reported. The restart MUST probe the daemon again and retire it only when its pid, build, and start time still match. It MUST send the retire request on the connection that answered that probe and MUST NOT redial for it. It MUST then wait up to five seconds for the socket to go and run `Ensure` with the backend. A daemon that changed since the mismatch MUST stay running, and the client MUST answer:
 
 ```text
 daemon changed before restart: saw pid <pid> build <build>, now pid <pid> build <build>; reconnect and retry

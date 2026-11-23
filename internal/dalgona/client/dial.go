@@ -33,6 +33,10 @@ func ProbeConn(ctx context.Context, conn net.Conn) (Info, Probe, error) {
 		_ = client.Close()
 		_ = conn.Close()
 	}()
+	return identify(ctx, client)
+}
+
+func identify(ctx context.Context, client *rpc.Conn) (Info, Probe, error) {
 	var info Info
 	callErr := client.Call(ctx, MethodIdentity, nil, &info)
 	if callErr == nil {

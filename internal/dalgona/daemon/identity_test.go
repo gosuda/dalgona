@@ -23,12 +23,13 @@ type identityReply struct {
 }
 
 func identityServe(build string, pid int, retireCancel func()) func(context.Context, io.ReadWriteCloser, *agent.Host) error {
+	startedAt := time.Now().Format(time.RFC3339Nano)
 	return func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 		extensions := map[string]rpcserver.Extension{}
 		if build != "" {
 			extensions[client.MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
 				reply, err := json.Marshal(identityReply{
-					Build: build, PID: pid, Version: "test", StartedAt: time.Now().Format(time.RFC3339Nano),
+					Build: build, PID: pid, Version: "test", StartedAt: startedAt,
 				})
 				if err != nil {
 					return nil, err
@@ -103,8 +104,12 @@ func TestRetireCancelsDaemonContext(t *testing.T) {
 		cancelDaemon()
 	}))
 	defer cancel()
-	if err := client.Retire(t.Context(), home); err != nil {
-		t.Fatalf("Retire: %v", err)
+	running, _, err := client.ProbeDaemon(t.Context(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := client.Retire(t.Context(), home, running); !retired || err != nil {
+		t.Fatalf("Retire = %v, %v; want retired", retired, err)
 	}
 	select {
 	case <-retired:
