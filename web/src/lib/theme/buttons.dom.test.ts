@@ -57,9 +57,23 @@ describe("notice buttons", () => {
 
 describe("button hover", () => {
 	test("hover uses the mapped border and tone, and leaves the point fill alone", () => {
-		const rule = appliedRule("button:not(:disabled):not(.point):hover");
+		const rule = appliedRule(
+			'button:not(:disabled):not([aria-disabled="true"]):not(.point):hover',
+		);
 		expect(rule.style.getPropertyValue("border-color")).toBe("var(--strong)");
 		expect(rule.style.getPropertyValue("background")).toBe("var(--tone)");
+	});
+
+	test("hover skips aria-disabled controls, which keep the disabled styling", () => {
+		const rule = appliedRule('button:is(:disabled, [aria-disabled="true"])');
+		expect(rule.style.getPropertyValue("cursor")).toBe("not-allowed");
+		expect(rule.style.getPropertyValue("color")).toBe("var(--dim)");
+		expect(rule.style.getPropertyValue("border-color")).toBe("var(--line)");
+		for (const selector of ruleSelectors()) {
+			if (selector.includes("button") && selector.includes(":hover")) {
+				expect(selector.includes('[aria-disabled="true"]')).toBe(true);
+			}
+		}
 	});
 });
 
@@ -77,7 +91,9 @@ describe("quiet button", () => {
 	});
 
 	test("disabled keeps the tone fill, the line edge and the dim label", () => {
-		const rule = appliedRule("button.quiet:disabled");
+		const rule = appliedRule(
+			'button.quiet:is(:disabled, [aria-disabled="true"])',
+		);
 		expect(rule.style.getPropertyValue("border-color")).toBe("var(--line)");
 		expect(rule.style.getPropertyValue("background")).toBe("var(--tone)");
 		expect(rule.style.getPropertyValue("color")).toBe("var(--dim)");

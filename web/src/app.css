@@ -73,8 +73,12 @@ button,
 	font-family: var(--face-title);
 }
 
-button:disabled,
-button[aria-disabled="true"],
+button:is(:disabled, [aria-disabled="true"]) {
+	cursor: not-allowed;
+	color: var(--dim);
+	border-color: var(--line);
+}
+
 select:disabled,
 textarea:disabled {
 	cursor: not-allowed;
@@ -99,8 +103,7 @@ button.quiet:not(.danger) {
 	padding: 0 var(--space-3);
 }
 
-button.quiet:disabled,
-button.quiet[aria-disabled="true"] {
+button.quiet:is(:disabled, [aria-disabled="true"]) {
 	border-color: var(--line);
 	background: var(--tone);
 	color: var(--dim);
