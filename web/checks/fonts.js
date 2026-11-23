@@ -30,6 +30,10 @@
 		["text probe", text, "Hanken Grotesk Variable"],
 		["title probe", title, "Bricolage Grotesque Variable"],
 	];
+	const heading = document.querySelector("h1, h2, h3");
+	if (heading !== null)
+		used.push(["heading", heading, "Bricolage Grotesque Variable"]);
+	used.push(["body", document.body, "Hanken Grotesk Variable"]);
 	const code = document.querySelector("code, pre, .command");
 	if (code !== null) used.push(["code", code, "ui-monospace"]);
 	for (const glyph of document.querySelectorAll(".glyph"))
