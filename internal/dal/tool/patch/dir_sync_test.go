@@ -181,15 +181,7 @@ func requireTargetsAtSync(t *testing.T, cwd string, want map[string]string) {
 
 func requireNoScratchAtSync(t *testing.T, cwd string) {
 	t.Helper()
-	var left []string
-	for _, pattern := range []string{"*.dalgona-tmp-*", "*/*.dalgona-tmp-*"} {
-		matches, err := filepath.Glob(filepath.Join(cwd, pattern))
-		if err != nil {
-			t.Error(err)
-		}
-		left = append(left, matches...)
-	}
-	if len(left) != 0 {
+	if left := scratchFiles(t, cwd, ".dalgona-tmp-"); len(left) != 0 {
 		t.Errorf("at sync time temporary files remain: %v", left)
 	}
 }
@@ -204,16 +196,7 @@ type syncOrderCase struct {
 
 func backupsRemain(t *testing.T, cwd string) bool {
 	t.Helper()
-	for _, pattern := range []string{"*.dalgona-backup-*", "*/*.dalgona-backup-*"} {
-		matches, err := filepath.Glob(filepath.Join(cwd, pattern))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(matches) != 0 {
-			return true
-		}
-	}
-	return false
+	return len(scratchFiles(t, cwd, ".dalgona-backup-")) != 0
 }
 
 func requireFinalSyncObservedBackupsGone(t *testing.T, seen map[string][]bool) {

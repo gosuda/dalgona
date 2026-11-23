@@ -162,14 +162,28 @@ func requireStatesMatchDisk(t *testing.T, cwd string, paths []tool.PathState, im
 	}
 }
 
-func requireNoResidue(t *testing.T, cwd string) {
+func scratchFiles(t *testing.T, cwd, marker string) []string {
 	t.Helper()
-	matches, err := filepath.Glob(filepath.Join(cwd, "*.dalgona-*"))
+	var found []string
+	err := filepath.WalkDir(cwd, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.Contains(entry.Name(), marker) {
+			found = append(found, path)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 0 {
-		t.Fatalf("patch residue remains: %v", matches)
+	return found
+}
+
+func requireNoResidue(t *testing.T, cwd string) {
+	t.Helper()
+	if left := scratchFiles(t, cwd, ".dalgona-"); len(left) != 0 {
+		t.Fatalf("patch residue remains: %v", left)
 	}
 }
 
