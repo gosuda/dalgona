@@ -23,6 +23,7 @@ func TestEnsureTimeout(t *testing.T) {
 	ensureTimeout = 20 * time.Millisecond
 	defer func() { ensureTimeout = old }()
 	home := shortHome(t)
+	t.Cleanup(func() { waitForDaemonLogRelease(t, home) })
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -31,5 +32,22 @@ func TestEnsureTimeout(t *testing.T) {
 	_, err = Ensure(t.Context(), home, exe)
 	if err == nil || err.Error() != fmt.Sprintf("daemon did not start: see %s", filepath.Join(home, "daemon.log")) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func waitForDaemonLogRelease(t *testing.T, home string) {
+	t.Helper()
+	path := filepath.Join(home, "daemon.log")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := os.Remove(path)
+		if err == nil || os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("daemon log still in use: %v", err)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
