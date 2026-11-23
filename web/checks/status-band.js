@@ -13,11 +13,12 @@
 	}
 	const band = document.querySelector(".status-band");
 	if (!band) return { ok: false, failures: ["status band: not found"] };
-	if (innerWidth > 640)
+	const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+	if (innerWidth > 40 * rem)
 		return {
 			ok: false,
 			failures: [
-				`viewport: ${innerWidth}x${innerHeight} (want a window of 640px or narrower)`,
+				`viewport: ${innerWidth}x${innerHeight} (want 40rem or narrower)`,
 			],
 		};
 	const shown = (id) => {
@@ -28,9 +29,21 @@
 		if (!shown(id))
 			failures.push(`${id}: not visible at ${innerWidth}px (want visible)`);
 	}
-	for (const id of ["folder", "queue"]) {
-		if (shown(id))
-			failures.push(`${id}: visible at ${innerWidth}px (want dropped)`);
+	const bandRem = band.getBoundingClientRect().width / rem;
+	for (const [id, below] of [
+		["folder", 30],
+		["queue", 26],
+		["effort", 16],
+		["mark", 12],
+	]) {
+		const item = band.querySelector(`[data-item="${id}"]`);
+		if (item === null) continue;
+		const visible = getComputedStyle(item).display !== "none";
+		const want = bandRem <= below ? "dropped" : "visible";
+		if (visible !== (want === "visible"))
+			failures.push(
+				`${id}: ${visible ? "visible" : "dropped"} at band width ${bandRem.toFixed(2)}rem (want ${want})`,
+			);
 	}
 	const shell = document.querySelector(".shell");
 	if (shell && shell.scrollWidth > window.innerWidth) {

@@ -264,10 +264,7 @@ func (m *model) keyCommand(msg tea.KeyPressMsg) tea.Cmd {
 func (m *model) promptKey(msg tea.KeyPressMsg, key string) tea.Cmd {
 	switch key {
 	case "enter":
-		if m.input.composer.continueLine() {
-			return nil
-		}
-		return m.submitPrompt()
+		return m.enterPrompt()
 	case "alt+enter":
 		return m.queueFollowup()
 	case "ctrl+v":

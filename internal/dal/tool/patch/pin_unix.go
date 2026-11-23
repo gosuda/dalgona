@@ -17,6 +17,7 @@ import (
 type dirPin struct {
 	file    *os.File
 	missing []string
+	parents []*dirPin
 }
 
 func pinVerifiedComponents(env tool.Env, display, absolute string) (*dirPin, error) {
@@ -85,11 +86,18 @@ func (p *dirPin) mkdirChain(display string, perm fs.FileMode) error {
 			return fmt.Errorf("patch: inspect path %s: %w", display, err)
 		}
 		next := os.NewFile(uintptr(fd), filepath.Join(p.file.Name(), component))
-		_ = p.file.Close()
+		p.parents = append(p.parents, &dirPin{file: p.file})
 		p.file = next
 	}
 	p.missing = nil
 	return nil
+}
+
+func (p *dirPin) parentPins() []*dirPin {
+	if p == nil {
+		return nil
+	}
+	return p.parents
 }
 
 func (p *dirPin) writeFileAt(base string, data []byte, perm fs.FileMode) error {
@@ -194,7 +202,14 @@ func (p *dirPin) syncDir() error {
 }
 
 func (p *dirPin) close() {
-	if p == nil || p.file == nil {
+	if p == nil {
+		return
+	}
+	for _, parent := range p.parents {
+		parent.close()
+	}
+	p.parents = nil
+	if p.file == nil {
 		return
 	}
 	_ = p.file.Close()

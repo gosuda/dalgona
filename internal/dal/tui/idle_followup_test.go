@@ -105,3 +105,39 @@ func TestIdleAltEnterQueuesPlainDraftAsFollowup(t *testing.T) {
 	runCommand(t, m, command, "idle alt+enter on plain text started nothing")
 	requireLastPrompt(t, caller.calls, 1, "turn/start", "hello there")
 }
+
+func TestIdleAltEnterRunsPaletteCompletion(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := idleFollowupModel(caller, "")
+	m = typeKeys(t, m, "/mo")
+	if m.input.popup == nil || len(m.input.popup.items) == 0 {
+		t.Fatalf("palette did not open for /mo: %+v", m.input.popup)
+	}
+	m, command := drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	if command != nil {
+		m, _ = drive(t, m, command())
+	}
+	if got := m.input.composer.Value(); got != "/model " {
+		t.Fatalf("idle alt+enter on /mo gave %q, want %q", got, "/model ")
+	}
+	if len(caller.calls) != 0 || len(m.queue) != 0 {
+		t.Fatalf("calls %#v and queue %q, want neither", caller.calls, queuedTexts(m.queue))
+	}
+}
+
+func TestIdleAltEnterContinuesLineAfterBackslash(t *testing.T) {
+	t.Parallel()
+	caller := new(fakeCaller)
+	m := idleFollowupModel(caller, "//example\\")
+	m, command := drive(t, m, press(tea.KeyEnter, tea.ModAlt, ""))
+	if command != nil {
+		m, _ = drive(t, m, command())
+	}
+	if got, want := m.input.composer.Value(), "//example\n"; got != want {
+		t.Fatalf("idle alt+enter on a trailing backslash gave %q, want %q", got, want)
+	}
+	if len(caller.calls) != 0 || len(m.queue) != 0 {
+		t.Fatalf("calls %#v and queue %q, want neither", caller.calls, queuedTexts(m.queue))
+	}
+}

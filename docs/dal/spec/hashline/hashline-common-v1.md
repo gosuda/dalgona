@@ -412,6 +412,7 @@ are outside these budgets. Total RSS is not promised to fit in 96 MiB.
 
 Retain source ceilings: input 8 MiB, 1-64 edits, 64 canonical paths, 16 MiB per file,
 64 MiB staged before-plus-after bytes per call. The canonical paths of a call total at most 16 KiB. Check before allocation.
+Admission also bounds the encoded size. The JSON-encoded paths (quotes included) plus 28 bytes per path entry total at most 20 KiB.
 These are individual ceilings, not a promise every combination can fit concurrently.
 Metadata can reduce usable capacity. The store has no limit per path or per consumer.
 Each thread store keeps at most 512 entries.
@@ -466,9 +467,11 @@ A pre-plan decline carries none. Recovery and turn end write none for a decline
 or a skipped call. The object MUST stay under 48 KiB.
 
 Recovery respects current read permission and reveals no foreign consumer data.
-A refusal shows no source rows. `ranges` names at most 40 uncovered lines to
-read, and `remaining` names the other uncovered ranges. `remaining` holds at most
-64 ranges, and its last range runs through the final uncovered line. Only the
+A refusal shows no source rows. `ranges` names the whole current mapped span
+of the refused target, so one fresh read shows every touched line under a
+single new reference. `ranges` names at most 40 lines to read,
+and `remaining` names the rest of that span. `remaining` holds at most
+64 ranges, and its last range runs through the final mapped line. Only the
 final delivery establishes future coverage. No internal fetch, automatic retag,
 or automatic destructive retry.
 

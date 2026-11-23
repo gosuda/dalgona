@@ -100,7 +100,7 @@ func TestRecoveryRangesAreBoundedTo40Lines(t *testing.T) {
 		shown := []snapshot.Range{{Start: 1, End: 10}, {Start: 31, End: 40}}
 		ref := env.Snapshots.Put("f.txt", []byte(source), shown)
 		failure := refusalOf(t, env, HashlineEnhanced, profileInput("f.txt", ref, "PUT 1-100:\n+x\n"))
-		requireRecovery(t, failure, knownRead("f.txt", lineRanges(11, 30, 41, 60), lineRanges(61, 100)))
+		requireRecovery(t, failure, knownRead("f.txt", lineRanges(1, 40), lineRanges(41, 100)))
 	})
 	t.Run("OBS-10/one row of 20 KiB is listed and nothing is captured", func(t *testing.T) {
 		env, cwd := editTestEnv(t)
@@ -121,7 +121,7 @@ func TestRecoveryRangesAreBoundedTo40Lines(t *testing.T) {
 	})
 }
 
-func TestRecoveryRemainingIsCappedAt64Ranges(t *testing.T) {
+func TestRecoveryRemainingHoldsTheSpanTail(t *testing.T) {
 	t.Run("C15/200 alternating rows", func(t *testing.T) {
 		env, cwd := editTestEnv(t)
 		source := numberedLines(400)
@@ -132,17 +132,9 @@ func TestRecoveryRemainingIsCappedAt64Ranges(t *testing.T) {
 		}
 		ref := env.Snapshots.Put("f.txt", []byte(source), shown)
 		failure := refusalOf(t, env, HashlineEnhanced, profileInput("f.txt", ref, "PUT 1-400:\n+x\n"))
-		var wantRanges, wantRemaining []tool.LineRange
-		for k := range 40 {
-			wantRanges = append(wantRanges, tool.LineRange{First: 2*k + 1, Last: 2*k + 1})
-		}
-		for k := 40; k < 103; k++ {
-			wantRemaining = append(wantRemaining, tool.LineRange{First: 2*k + 1, Last: 2*k + 1})
-		}
-		wantRemaining = append(wantRemaining, tool.LineRange{First: 207, Last: 399})
-		requireRecovery(t, failure, knownRead("f.txt", wantRanges, wantRemaining))
-		if got := len(failure.Outcome.Recovery.Remaining); got != 64 {
-			t.Fatalf("remaining holds %d ranges, want 64", got)
+		requireRecovery(t, failure, knownRead("f.txt", lineRanges(1, 40), lineRanges(41, 400)))
+		if got := len(failure.Outcome.Recovery.Remaining); got != 1 {
+			t.Fatalf("remaining holds %d ranges, want 1", got)
 		}
 	})
 }
@@ -189,12 +181,13 @@ func TestRecoveryMappingUnknownPresentsNoCoordinates(t *testing.T) {
 			t.Fatalf("recovery %+v, want %+v", got, readUnknown("f.txt"))
 		}
 	})
-	t.Run("C15/nothing is left uncovered", func(t *testing.T) {
+	t.Run("C15/a fully covered span still names the whole span", func(t *testing.T) {
 		env, _ := editTestEnv(t)
 		ref := env.Snapshots.Put("f.txt", []byte(outcomeSource), []snapshot.Range{{Start: 1, End: 3}})
 		got := recoveryFor(env, requestedCoverage(ref, 1, 3, []byte(outcomeSource)))
-		if !reflect.DeepEqual(got, readUnknown("f.txt")) {
-			t.Fatalf("recovery %+v, want %+v", got, readUnknown("f.txt"))
+		want := knownRead("f.txt", lineRanges(1, 3), nil)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("recovery %+v, want %+v", got, want)
 		}
 	})
 	t.Run("C15/no store", func(t *testing.T) {
@@ -277,40 +270,36 @@ func TestRefusalTextStillEndsWithTheEnhancedPhrase(t *testing.T) {
 	})
 }
 
-func TestUncoveredReturnsTheGapsOfARange(t *testing.T) {
-	tests := []struct {
-		name        string
-		shown       []snapshot.Range
-		first, last int
-		want        []snapshot.Range
-	}{
-		{"nothing shown", nil, 3, 9, []snapshot.Range{{Start: 3, End: 9}}},
-		{"fully covered", []snapshot.Range{{Start: 1, End: 10}}, 3, 9, nil},
-		{"covered prefix", []snapshot.Range{{Start: 1, End: 5}}, 3, 9, []snapshot.Range{{Start: 6, End: 9}}},
-		{"covered suffix", []snapshot.Range{{Start: 7, End: 12}}, 3, 9, []snapshot.Range{{Start: 3, End: 6}}},
-		{"covered middle", []snapshot.Range{{Start: 5, End: 6}}, 3, 9, []snapshot.Range{{Start: 3, End: 4}, {Start: 7, End: 9}}},
-		{"shown outside", []snapshot.Range{{Start: 20, End: 30}}, 3, 9, []snapshot.Range{{Start: 3, End: 9}}},
-		{"shown before", []snapshot.Range{{Start: 1, End: 2}}, 3, 9, []snapshot.Range{{Start: 3, End: 9}}},
-		{
-			"several",
-			[]snapshot.Range{{Start: 4, End: 4}, {Start: 6, End: 7}},
-			3, 9,
-			[]snapshot.Range{{Start: 3, End: 3}, {Start: 5, End: 5}, {Start: 8, End: 9}},
-		},
-		{
-			"unsorted",
-			[]snapshot.Range{{Start: 6, End: 7}, {Start: 4, End: 4}},
-			3, 9,
-			[]snapshot.Range{{Start: 3, End: 3}, {Start: 5, End: 5}, {Start: 8, End: 9}},
-		},
-		{"single row", []snapshot.Range{{Start: 1, End: 1}, {Start: 3, End: 3}}, 2, 2, []snapshot.Range{{Start: 2, End: 2}}},
+func TestRecoveryReadsTheWholeMappedSpan(t *testing.T) {
+	t.Run("partly observed replacement retries under one fresh reference", func(t *testing.T) {
+		env, cwd := editTestEnv(t)
+		source := numberedLines(10)
+		writeFixture(t, cwd, "f.txt", source)
+		shown := []snapshot.Range{{Start: 1, End: 3}, {Start: 8, End: 10}}
+		ref := env.Snapshots.Put("f.txt", []byte(source), shown)
+		patch := profileInput("f.txt", ref, "PUT 1-10:\n+x\n")
+		failure := refusalOf(t, env, HashlineEnhanced, patch)
+		want := knownRead("f.txt", lineRanges(1, 10), nil)
+		requireRecovery(t, failure, want)
+
+		fresh, ok := env.Snapshots.Capture("f.txt", []byte(source), readShown(t, failure))
+		if !ok {
+			t.Fatal("the recovery read captured no reference")
+		}
+		if _, err := runPatch(t, env, HashlineEnhanced, profileInput("f.txt", fresh.Ref, "PUT 1-10:\n+x\n")); err != nil {
+			t.Fatalf("resend under the fresh reference: %v", err)
+		}
+		if got := readFixture(t, cwd, "f.txt"); got != "x\n" {
+			t.Fatalf("file %q, want %q", got, "x\n")
+		}
+	})
+}
+
+func readShown(t *testing.T, failure *tool.OutcomeError) []snapshot.Range {
+	t.Helper()
+	var out []snapshot.Range
+	for _, item := range append(slices.Clone(failure.Outcome.Recovery.Ranges), failure.Outcome.Recovery.Remaining...) {
+		out = append(out, snapshot.Range{Start: item.First, End: item.Last})
 	}
-	for _, test := range tests {
-		t.Run("INV-COVERAGE/"+test.name, func(t *testing.T) {
-			got := uncovered(test.shown, test.first, test.last)
-			if !slices.Equal(got, test.want) {
-				t.Fatalf("uncovered(%v, %d, %d) = %v, want %v", test.shown, test.first, test.last, got, test.want)
-			}
-		})
-	}
+	return out
 }
