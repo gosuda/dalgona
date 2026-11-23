@@ -49,7 +49,7 @@ Each check command in the `web` job MUST be its own step, because a failing comm
 The docs and specs checks, the web checks, and the worker checks are unrelated to each other.
 A step MUST be skipped only when a step it needs failed or the run was cancelled.
 Cancellation MUST still stop the job.
-One run then lists every failing check that does not depend on a failed step.
+One `web` job run then lists every failing check that does not depend on a failed step.
 
 ## Native lanes
 
