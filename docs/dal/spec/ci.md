@@ -29,8 +29,6 @@ The CI jobs MUST together run every check from the full verification command.
 | `vuln` | `vuln` |
 | `web` | `hashline-model`, `spec-style`, `docs-links`, `web-check`, `cf-check` |
 
-The native macOS and Windows lanes are not implemented yet. The current workflow runs the Linux Depot jobs only. Restoring them MUST keep CI in the one workflow.
-
 Go tests MUST keep the race detector and `-count=1`.
 The `test` job MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
 A failing job MUST NOT cancel the other jobs.
@@ -51,6 +49,25 @@ The docs and specs, web, and worker steps are unrelated to each other.
 A step MUST be skipped only when a step it needs failed or the run was cancelled.
 Cancellation MUST still stop the job.
 One run then lists the web and worker test failures together.
+
+## Native lanes
+
+The native macOS and Windows lanes are not implemented yet. The current workflow runs the Linux Depot jobs only. Restoring them MUST keep CI in the one workflow.
+Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
+Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
+A failing native job MUST NOT cancel the other native jobs.
+
+The `web` job MUST upload `internal/dalgona/webui/dist` only after all its checks pass.
+The artifact MUST include hidden files and MUST come from the same workflow run as its consumers.
+An upload with no files MUST fail.
+Each native job MUST download the artifact before Go verification so compilation embeds the same built assets.
+The artifact MUST expire after seven days.
+Rerunning the `web` job MUST replace its previous artifact.
+After expiry, a rerun MUST include the `web` job to rebuild the artifact.
+
+The native jobs MUST use the check names `Verify (macos-latest)` and `Verify (windows-latest)`.
+If the `web` job fails or skips, each native check MUST fail before tool setup.
+Workflow cancellation MUST still cancel the native jobs.
 
 ## Box image
 
