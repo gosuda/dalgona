@@ -86,6 +86,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	if len(args) != 0 {
 		return usage(std, "daemon")
 	}
+	build := client.Build()
 	cfg, err := loadConfig()
 	if err != nil {
 		return fail(std, 1, err)
@@ -112,7 +113,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	serve := func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 		extensions := maps.Clone(remotes)
 		extensions[methodScriptRun] = scriptExtension(host, batteries)
-		extensions[client.MethodIdentity] = identityExtension(startedAt)
+		extensions[client.MethodIdentity] = identityExtension(build, startedAt)
 		extensions[client.MethodRetire] = retireExtension(retireDaemon)
 		options := rpcserver.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
 		return rpcserver.ServeWith(ctx, conn, host, options)
@@ -123,13 +124,13 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	return 0
 }
 
-func identityExtension(startedAt time.Time) rpcserver.Extension {
+func identityExtension(build string, startedAt time.Time) rpcserver.Extension {
 	return func(context.Context, jsontext.Value) (jsontext.Value, error) {
 		var out bytes.Buffer
 		encoder := jsontext.NewEncoder(&out)
 		tokens := []jsontext.Token{
 			jsontext.BeginObject,
-			jsontext.String("build"), jsontext.String(client.Build()),
+			jsontext.String("build"), jsontext.String(build),
 			jsontext.String("pid"), jsontext.Int(int64(os.Getpid())),
 			jsontext.String("version"), jsontext.String(config.Version()),
 			jsontext.String("startedAt"), jsontext.String(startedAt.Format(time.RFC3339Nano)),
