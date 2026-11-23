@@ -3,6 +3,8 @@ package patch
 import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,6 +116,9 @@ func requireVanishedMeta(t *testing.T) {
 	result, err := plan.Apply(t.Context())
 	if err == nil {
 		t.Fatal("apply succeeded")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("vanished target error reports %v, want an fs.ErrNotExist chain", err)
 	}
 	object := requireMetaStatus(t, result.Meta, HashlineLight, "conflict", "none")
 	requireReason(t, result.Meta, object, "path_changed", "stale")

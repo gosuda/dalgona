@@ -244,7 +244,7 @@ func verifySource(ctx context.Context, env tool.Env, file *stagedFile) error {
 	current, err := readPinned(ctx, env, file.pin, file.absolute)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s changed while you were approving. Nothing was written. Try again", file.path))
+			return reasoned(tool.ReasonPathChanged, fmt.Errorf("patch: %s changed while you were approving. Nothing was written. Try again: %w", file.path, err))
 		}
 		return fmt.Errorf("patch: cannot read %s before commit: %w", file.path, err)
 	}
