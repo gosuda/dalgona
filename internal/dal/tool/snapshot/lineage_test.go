@@ -175,50 +175,6 @@ func TestSpanLineageShiftsOnlyAtStart(t *testing.T) {
 	}
 }
 
-func TestResolveSpansMatchesPerSpanCalls(t *testing.T) {
-	store := New()
-	before := []byte("a\nb\n")
-	ref := store.Put("f.txt", before, nil)
-	shifted := []byte("Z\na\nb\n")
-	if store.Record("f.txt", before, shifted, []Splice{{Start: 0, End: 0, Inserted: 1}}) == "" {
-		t.Fatal("record failed")
-	}
-	mid := []byte("Z\na\nM\nb\n")
-	if store.Record("f.txt", shifted, mid, []Splice{{Start: 2, End: 2, Inserted: 1}}) == "" {
-		t.Fatal("second record failed")
-	}
-	targets := []Span{{Start: 0, End: 1}, {Start: 1, End: 2}, {Start: 2, End: 3}, {Start: 3, End: 3}}
-	got, err := store.ResolveSpans(ref, "f.txt", mid, targets)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, target := range targets {
-		mapped, mapErr := store.ResolveSpan(ref, "f.txt", mid, target)
-		if mapErr != nil {
-			t.Fatal(mapErr)
-		}
-		if got[i] != mapped {
-			t.Fatalf("span %d: batch %+v, single %+v", i, got[i], mapped)
-		}
-	}
-}
-
-func TestResolveSpansAgreesWithPerSpanErrors(t *testing.T) {
-	store := New()
-	before := []byte("a\nb\nc\nd\n")
-	ref := store.Put("g.txt", before, nil)
-	after := []byte("a\nX\nc\nd\n")
-	store.Record("g.txt", before, after, []Splice{{Start: 1, End: 2, Inserted: 1}})
-	conflict := []Span{{Start: 0, End: 1}, {Start: 1, End: 2}}
-	for i, target := range conflict {
-		_, mapErr := store.ResolveSpan(ref, "g.txt", after, target)
-		_, batchErr := store.ResolveSpans(ref, "g.txt", after, []Span{target})
-		if (mapErr != nil) != (batchErr != nil) {
-			t.Fatalf("span %d: single %v batch %v", i, mapErr, batchErr)
-		}
-	}
-}
-
 func TestSpanAndGapConflicts(t *testing.T) {
 	before := []byte("a\nb\n")
 	inserted := []byte("a\nZ\nb\n")

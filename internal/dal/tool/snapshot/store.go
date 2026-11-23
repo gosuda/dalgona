@@ -325,22 +325,6 @@ func (s *Store) ResolveSpan(ref, path string, current []byte, target Span) (Span
 	return mapSpan(target, edges)
 }
 
-func (s *Store) ResolveSpans(ref, path string, current []byte, targets []Span) ([]Span, error) {
-	edges, err := s.lineage(ref, path, current)
-	if err != nil {
-		return nil, err
-	}
-	mapped := make([]Span, len(targets))
-	for i, target := range targets {
-		span, err := mapSpan(target, edges)
-		if err != nil {
-			return nil, err
-		}
-		mapped[i] = span
-	}
-	return mapped, nil
-}
-
 func mapSpan(target Span, edges []Edge) (Span, error) {
 	mapped := target
 	for _, edge := range edges {
