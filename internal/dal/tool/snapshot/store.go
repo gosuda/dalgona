@@ -322,6 +322,10 @@ func (s *Store) ResolveSpan(ref, path string, current []byte, target Span) (Span
 	if err != nil {
 		return Span{}, err
 	}
+	return mapSpan(target, edges)
+}
+
+func mapSpan(target Span, edges []Edge) (Span, error) {
 	mapped := target
 	for _, edge := range edges {
 		for _, splice := range edge.Splices {

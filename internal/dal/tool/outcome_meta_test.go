@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"bytes"
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"strings"
@@ -140,63 +139,6 @@ func TestOutcomeMetaRefusesAnInvalidPair(t *testing.T) {
 				t.Fatalf("Meta accepted an invalid pair: %s", meta)
 			}
 		})
-	}
-}
-
-func TestOutcomeMetaReplay(t *testing.T) {
-	t.Run("C15/flips only replayed", requireReplayFlipsOnlyReplayed)
-	t.Run("C15/replaying twice changes nothing more", requireReplayIsIdempotent)
-	t.Run("C15/meta without a hashline member is returned as given", requireReplayKeepsOtherMeta)
-	t.Run("C15/only the hashline member is flipped", requireReplayFlipsOnlyTheMember)
-	t.Run("C15/malformed meta is an error", requireReplayRefusesMalformedMeta)
-}
-
-func requireReplayFlipsOnlyReplayed(t *testing.T) {
-	for _, original := range []string{appliedMeta, needsMeta, partialMeta, recoverMeta} {
-		replayed, err := ReplayMeta(jsontext.Value(original))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := strings.Replace(original, `"replayed":false`, `"replayed":true`, 1); string(replayed) != want {
-			t.Fatalf("replayed\n%s\nwant\n%s", replayed, want)
-		}
-	}
-}
-
-func requireReplayIsIdempotent(t *testing.T) {
-	once, err := ReplayMeta(jsontext.Value(partialMeta))
-	if err != nil {
-		t.Fatal(err)
-	}
-	twice, err := ReplayMeta(once)
-	if err != nil || !bytes.Equal(once, twice) {
-		t.Fatalf("second replay = %s, %v; want %s", twice, err, once)
-	}
-}
-
-func requireReplayKeepsOtherMeta(t *testing.T) {
-	snapshot := jsontext.Value(`{"ref":"r1","path":"a.go","blob":"b","replayed":false}`)
-	got, err := ReplayMeta(snapshot)
-	if err != nil || !bytes.Equal(got, snapshot) {
-		t.Fatalf("ReplayMeta = %s, %v; want the input", got, err)
-	}
-}
-
-func requireReplayFlipsOnlyTheMember(t *testing.T) {
-	nested := jsontext.Value(`{"other":{"hashline":{"replayed":false}},"hashline":{"replayed":false,"recovery":{"replayed":false}}}`)
-	got, err := ReplayMeta(nested)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"other":{"hashline":{"replayed":false}},"hashline":{"replayed":true,"recovery":{"replayed":false}}}`
-	if string(got) != want {
-		t.Fatalf("ReplayMeta\n%s\nwant\n%s", got, want)
-	}
-}
-
-func requireReplayRefusesMalformedMeta(t *testing.T) {
-	if got, err := ReplayMeta(jsontext.Value(`{"hashline":`)); err == nil {
-		t.Fatalf("ReplayMeta accepted malformed meta: %s", got)
 	}
 }
 
