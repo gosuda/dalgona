@@ -93,6 +93,12 @@ button.point,
 	color: var(--on-point);
 }
 
+button.point:is(:disabled, [aria-disabled="true"]) {
+	border-color: var(--line);
+	background: var(--tone);
+	color: var(--dim);
+}
+
 button.quiet {
 	border-color: transparent;
 	background: transparent;

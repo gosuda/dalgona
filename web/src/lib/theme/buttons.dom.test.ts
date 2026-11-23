@@ -69,10 +69,56 @@ describe("button hover", () => {
 		expect(rule.style.getPropertyValue("cursor")).toBe("not-allowed");
 		expect(rule.style.getPropertyValue("color")).toBe("var(--dim)");
 		expect(rule.style.getPropertyValue("border-color")).toBe("var(--line)");
-		for (const selector of ruleSelectors()) {
-			if (selector.includes("button") && selector.includes(":hover")) {
-				expect(selector.includes('[aria-disabled="true"]')).toBe(true);
-			}
+		const hover = appliedRule(
+			'button:not(:disabled):not([aria-disabled="true"]):not(.point):hover',
+		);
+		expect(hover.style.getPropertyValue("border-color")).toBe("var(--strong)");
+		const root = document.documentElement;
+		root.style.setProperty("--dim", "rgb(1, 2, 3)");
+		root.style.setProperty("--line", "rgb(4, 5, 6)");
+		root.style.setProperty("--tone", "rgb(7, 8, 9)");
+		try {
+			document.body.innerHTML =
+				'<button id="disabled-control" aria-disabled="true">Disabled</button>';
+			const style = getComputedStyle(
+				document.getElementById("disabled-control")!,
+			);
+			expect(style.color).toBe("rgb(1, 2, 3)");
+			expect(style.borderColor).toBe("rgb(4, 5, 6)");
+		} finally {
+			document.body.innerHTML = "";
+			root.style.removeProperty("--dim");
+			root.style.removeProperty("--line");
+			root.style.removeProperty("--tone");
+		}
+	});
+});
+
+describe("disabled point button", () => {
+	test("a busy point button takes the disabled styling", () => {
+		const root = document.documentElement;
+		root.style.setProperty("--dim", "rgb(1, 2, 3)");
+		root.style.setProperty("--line", "rgb(4, 5, 6)");
+		root.style.setProperty("--tone", "rgb(7, 8, 9)");
+		root.style.setProperty("--point", "rgb(10, 11, 12)");
+		root.style.setProperty("--on-point", "rgb(13, 14, 15)");
+		try {
+			document.body.innerHTML =
+				'<button id="busy-point" class="point" aria-disabled="true">Save</button><button id="live-point" class="point">Save</button>';
+			const busy = getComputedStyle(document.getElementById("busy-point")!);
+			expect(busy.color).toBe("rgb(1, 2, 3)");
+			expect(busy.borderColor).toBe("rgb(4, 5, 6)");
+			expect(busy.backgroundColor).toBe("rgb(7, 8, 9)");
+			const live = getComputedStyle(document.getElementById("live-point")!);
+			expect(live.color).toBe("rgb(13, 14, 15)");
+			expect(live.backgroundColor).toBe("rgb(10, 11, 12)");
+		} finally {
+			document.body.innerHTML = "";
+			root.style.removeProperty("--dim");
+			root.style.removeProperty("--line");
+			root.style.removeProperty("--tone");
+			root.style.removeProperty("--point");
+			root.style.removeProperty("--on-point");
 		}
 	});
 });
