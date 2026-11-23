@@ -218,6 +218,9 @@ func requireSyncAfterLastOperation(t *testing.T, style Style, test syncOrderCase
 	if err := f.run(t, style, test.input); err != nil {
 		t.Fatalf("the call failed: %v", err)
 	}
+	if calls != test.syncs {
+		t.Fatalf("directory syncs = %d, want %d", calls, test.syncs)
+	}
 	if test.dirs != nil {
 		requireDirSyncCounts(t, f.cwd, synced, test.dirs)
 	}
