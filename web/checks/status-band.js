@@ -29,7 +29,7 @@
 		if (!shown(id))
 			failures.push(`${id}: not visible at ${innerWidth}px (want visible)`);
 	}
-	const bandRem = band.clientWidth / rem;
+	const bandRem = band.getBoundingClientRect().width / rem;
 	for (const [id, below] of [
 		["folder", 30],
 		["queue", 26],
