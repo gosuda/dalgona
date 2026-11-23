@@ -9,3 +9,5 @@ type dirPin = rootPin
 func pinVerifiedComponents(env tool.Env, display, absolute string) (*dirPin, error) {
 	return pinRoot(env, display, absolute)
 }
+
+func (p *rootPin) parentPins() []*rootPin { return nil }
