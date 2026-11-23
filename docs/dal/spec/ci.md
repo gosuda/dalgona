@@ -53,6 +53,7 @@ One run then lists the web and worker test failures together.
 ## Native lanes
 
 The native macOS and Windows lanes are not implemented yet. The current workflow runs the Linux Depot jobs only. Restoring them MUST keep CI in the one workflow.
+The current workflow uploads no web asset artifact.
 Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
 Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
 A failing native job MUST NOT cancel the other native jobs.
