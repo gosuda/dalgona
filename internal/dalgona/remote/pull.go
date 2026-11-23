@@ -26,7 +26,7 @@ func (b *Binder) Pull(ctx context.Context, threadID string) error {
 	if info.bound == nil {
 		return fmt.Errorf("remote: thread %s has no box", threadID)
 	}
-	svc, err := b.service(ctx, b.runnerSpec(*info.bound))
+	svc, err := b.services.Service(ctx, b.runnerSpec(*info.bound))
 	if err != nil {
 		return err
 	}

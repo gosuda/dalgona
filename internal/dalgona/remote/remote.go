@@ -106,10 +106,6 @@ func (b *Binder) confirm(prompt string) (bool, error) {
 	return b.opts.Confirm(prompt)
 }
 
-func (b *Binder) service(ctx context.Context, spec config.RunnerSpec) (sandboxsvc.Service, error) {
-	return b.services.Service(ctx, spec)
-}
-
 func (b *Binder) runnerSpec(bound event.RunnerBound) config.RunnerSpec {
 	if spec, ok := b.opts.Config.Runners[bound.Runner]; ok && spec.Service == bound.Service {
 		return spec

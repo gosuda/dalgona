@@ -236,6 +236,9 @@ func waitDialExit(t *testing.T, local *runner.Local) runner.Output {
 }
 
 func dispatchDialProbe() (bool, int) {
+	if len(os.Args) > 1 && os.Args[1] == "__shim" {
+		return true, runner.ShimMain(os.Args[2:])
+	}
 	if os.Getenv("DALGONA_TEST_DIAL") == "" {
 		return false, 0
 	}

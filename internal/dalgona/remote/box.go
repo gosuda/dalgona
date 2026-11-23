@@ -178,7 +178,7 @@ func (r *boxRunner) bind(ctx context.Context) (*link, error) {
 	if info.created.ID == "" {
 		return nil, fmt.Errorf("remote: thread %s has no session.created", r.thread)
 	}
-	svc, err := r.b.service(ctx, r.spec)
+	svc, err := r.b.services.Service(ctx, r.spec)
 	if err != nil {
 		return nil, err
 	}

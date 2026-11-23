@@ -235,10 +235,10 @@ func (c *Conn) replyParseError(raw []byte) {
 		ID jsontext.Value `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.ID) == 0 {
-		c.replyError(jsontext.Value("null"), CodeParseError, "Parse error")
+		c.replyError(jsontext.Value("null"), codeParseError, "Parse error")
 		return
 	}
-	c.replyError(probe.ID, CodeParseError, "Parse error")
+	c.replyError(probe.ID, codeParseError, "Parse error")
 }
 
 func (c *Conn) replyInvalidRequest(raw []byte) {

@@ -32,7 +32,12 @@ func listenHome(t *testing.T, home string) {
 			if err != nil {
 				return
 			}
-			go func() { _, _ = io.Copy(io.Discard, conn) }()
+			go func() {
+				stop := context.AfterFunc(t.Context(), func() { _ = conn.Close() })
+				defer stop()
+				defer conn.Close()
+				_, _ = io.Copy(io.Discard, conn)
+			}()
 		}
 	}()
 }
