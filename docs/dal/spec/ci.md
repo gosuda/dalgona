@@ -7,7 +7,7 @@ It MUST support manual runs.
 Feature branch pushes MUST use their pull request run instead of starting a second CI run.
 CI MUST NOT filter changed paths because checks read files across package boundaries.
 A newer run for the same ref MUST cancel the older run.
-The current workflow has no tag trigger and no concurrency group yet.
+A newer run for the same ref cancels the older run through the workflow concurrency group, which covers tag pushes as well.
 
 ## Provider
 
@@ -38,7 +38,7 @@ It MUST activate the `packageManager`-pinned pnpm through corepack before
 any pnpm call, because the runner image ships Node without pnpm.
 
 The `web` job MUST install `uv` so the model and specification checks run with the Python 3.15 that `just verify` uses.
-The current workflow installs `uv` in no job yet. It runs those checks with the runner's `python3`.
+The `test` and `web` jobs install `uv` with Python 3.15 and run those checks through `uv run --python 3.15`, matching `just verify`.
 Web tests use Node and happy-dom. Cloudflare tests use local runtime stubs.
 Those tests MUST run once on Linux. They do not certify a live browser or Cloudflare deployment.
 
@@ -53,8 +53,8 @@ One `web` job run then lists every failing check that does not depend on a faile
 
 ## Native lanes
 
-The native macOS and Windows lanes are not implemented yet. The current workflow runs the Linux Depot jobs only. Restoring them MUST keep CI in the one workflow.
-The current workflow uploads no web asset artifact.
+The native macOS and Windows lanes run as `Verify (macos-latest)` and `Verify (windows-latest)` in the one workflow alongside the Linux Depot jobs.
+The `web` job uploads its `dist` artifact for the native jobs to download before Go verification.
 Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
 Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
 A failing native job MUST NOT cancel the other native jobs.

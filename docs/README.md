@@ -127,6 +127,7 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [Shell argument parser](dal/decisions/shell-argument-parser.md): one neutral command splitter and token reader for core packages.
 - [Journal authority and mirror](dal/decisions/journal-authority-and-mirror.md): JSONL as event authority with a repairable mirror.
 - [Syntax package](dal/decisions/syntax-package.md): tree-sitter access confined to one package.
+- [Shared input text](dal/decisions/input-text-sharing.md): one text policy package for every first-party client.
 
 ### Batteries (dalgona)
 
