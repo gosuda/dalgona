@@ -180,6 +180,8 @@ An answer that is typed text MUST appear in double quotes. On a question with op
 Quoted answers MUST escape line breaks and control characters without changing their decoded scalar sequence.
 The quote MUST decode as a JSON string to the exact answer. It escapes controls, line breaks, and directional controls as `\uXXXX`.
 Option labels with unsafe display characters MUST use their safe escaped projection in the result.
+A picked label MUST use its `DistinctLines` projection among the offered labels of its question.
+Two labels that look alike then stay apart in the result.
 The host MUST match the original offered label before projecting it.
 
 A question with no answer MUST show `no answer`.

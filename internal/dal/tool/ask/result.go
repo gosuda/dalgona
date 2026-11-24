@@ -132,8 +132,12 @@ func questionLine(question Question, picks []string) string {
 }
 
 func formatPick(question Question, pick string) string {
-	if question.hasLabel(pick) {
-		return textinput.DisplayLine(pick)
+	labels := make([]string, len(question.Options))
+	for i, option := range question.Options {
+		labels[i] = option.Label
+	}
+	if i := slices.Index(labels, pick); i >= 0 {
+		return textinput.DistinctLines(labels)[i]
 	}
 	quoted := textinput.Quote(pick)
 	if len(question.Options) == 0 {

@@ -249,6 +249,19 @@ func TestFormatQuotesTypedTextAndProjectsLabels(t *testing.T) {
 	}
 }
 
+func TestFormatKeepsLookAlikeLabelsApart(t *testing.T) {
+	questions := []Question{
+		{Header: "Pick", Text: "Which?", Options: []Option{{Label: "Bold"}, {Label: "\x1b[1mBold"}, {Label: "a\tb"}, {Label: "a b"}}, MultiSelect: true},
+		{Header: "Again", Text: "Which?", Options: []Option{{Label: "\x1b[1mBold"}, {Label: "a\tb"}}},
+	}
+	reply := Reply{Outcome: OutcomeAnswered, Answers: [][]string{{"Bold", "\x1b[1mBold", "a\tb", "a b"}, {"\x1b[1mBold"}}}
+	got := Format(questions, reply)
+	want := "User answers:\n- Pick (Which?): Bold; <U+001B>[1mBold; a<U+0009>b; a<U+0020>b\n- Again (Which?): Bold"
+	if string(got.Output) != want {
+		t.Fatalf("Format = %q, want %q", got.Output, want)
+	}
+}
+
 func TestFormatOneAnswerForSingleSelect(t *testing.T) {
 	questions := []Question{{Header: "Database", Text: "Which database should the service use?", Options: []Option{{Label: "SQLite"}, {Label: "Postgres"}}}}
 	reply := Reply{Outcome: OutcomeAnswered, Answers: [][]string{{"Postgres", "SQLite"}}}
