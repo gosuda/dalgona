@@ -2,20 +2,56 @@ package daemon
 
 import (
 	"context"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"io"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
-func startServe(t *testing.T, home string, serve func(context.Context, io.ReadWriteCloser, *agent.Host) error) (context.CancelFunc, <-chan error) {
+type identityReply struct {
+	Build     string `json:"build"`
+	PID       int    `json:"pid"`
+	Version   string `json:"version"`
+	StartedAt string `json:"startedAt"`
+}
+
+func identityServe(build string, pid int, retireCancel func()) func(context.Context, io.ReadWriteCloser, *agent.Host) error {
+	startedAt := time.Now().Format(time.RFC3339Nano)
+	return func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
+		extensions := map[string]rpcserver.Extension{}
+		if build != "" {
+			extensions[client.MethodIdentity] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+				reply, err := json.Marshal(identityReply{
+					Build: build, PID: pid, Version: "test", StartedAt: startedAt,
+				})
+				if err != nil {
+					return nil, err
+				}
+				return jsontext.Value(reply), nil
+			}
+		}
+		if retireCancel != nil {
+			extensions[client.MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+				retireCancel()
+				return jsontext.Value("{}"), nil
+			}
+		}
+		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{Extensions: extensions})
+	}
+}
+
+func startServe(t *testing.T, parent context.Context, home string, serve func(context.Context, io.ReadWriteCloser, *agent.Host) error) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	t.Setenv("DALGONA_HOME", home)
 	listening := observeListen(t)
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithCancel(parent)
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, home, appHost, serve) }()
 	select {
@@ -28,7 +64,7 @@ func startServe(t *testing.T, home string, serve func(context.Context, io.ReadWr
 
 func TestCheckBuildTreatsMethodNotFoundAsUnknownBuild(t *testing.T) {
 	home := shortHome(t)
-	cancel, done := startServe(t, home, func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
+	cancel, done := startServe(t, t.Context(), home, func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{})
 	})
 	defer stopRun(t, cancel, done)
@@ -39,5 +75,37 @@ func TestCheckBuildTreatsMethodNotFoundAsUnknownBuild(t *testing.T) {
 	}
 	if mismatch.Running != client.UnknownPreIdentityBuild {
 		t.Fatalf("mismatch running = %q, want %q", mismatch.Running, client.UnknownPreIdentityBuild)
+	}
+}
+
+func TestRetireCancelsDaemonContext(t *testing.T) {
+	home := shortHome(t)
+	retired := make(chan struct{})
+	ctx, cancelDaemon := context.WithCancel(t.Context())
+	defer cancelDaemon()
+	cancel, done := startServe(t, ctx, home, identityServe(client.Build(), os.Getpid(), func() {
+		close(retired)
+		cancelDaemon()
+	}))
+	defer cancel()
+	running, _, err := client.ProbeDaemon(t.Context(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := client.Retire(t.Context(), home, running); !retired || err != nil {
+		t.Fatalf("Retire = %v, %v; want retired", retired, err)
+	}
+	select {
+	case <-retired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retire did not cancel the daemon context")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after retire: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after retire")
 	}
 }
