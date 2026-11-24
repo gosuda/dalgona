@@ -30,7 +30,13 @@ Every response and notification in the Codex subset MUST validate against the ve
 ## Text inputs
 
 [Input text](input-text.md) defines the shared input contract for GUI, TUI, web, and daemon callers.
-Its new validation and preservation requirements are planned changes, not claims that the inspected runtime already implements them.
+The daemon applies the field checks of `internal/dal/textinput` before any effect of the request.
+`turn/start` and `turn/steer` check every `text` item and the `path` of every `mention`, `skill`, and `localImage` item.
+They finish these checks before they read an image or touch the thread.
+Their field reads `input[<index>].<member>`, where `<index>` counts every input item from zero.
+`review/start` checks `target.title` and `target.instructions`, `thread/name/set` checks `name`, and `account/login/start` checks `apiKey`.
+`dalgona/keywords/match` checks `text` against its byte limit.
+`Thread.Submit` repeats the check on its whole input for callers outside the protocol.
 
 The daemon MUST reject malformed UTF-8 and unpaired JSON surrogate escapes before dispatching a message.
 It MUST NOT enable replacement decoding for user input.

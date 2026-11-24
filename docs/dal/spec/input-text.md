@@ -313,7 +313,6 @@ These observations identify required changes, not a claim that this documentatio
 |[Web answers](../../../web/src/lib/question.ts), [question card](../../../web/src/lib/components/QuestionCard.svelte)|Answer processing trims and truncates. HTML length uses UTF-16.|Use the shared scalar quota and atomic rejection.|
 |[Web composer](../../../web/src/lib/components/Composer.svelte)|Submission trims typed text.|Separate send eligibility from preserved payload.|
 |[RPC connection](../../../internal/dal/rpc/conn.go)|The response dispatcher consumes its waiter before typed answer validation.|Retain pending questions through correction and migrate first-party response ownership.|
-|[Agent submission](../../../internal/dal/agent/entry.go)|Tool preparation precedes complete shared text validation.|Validate before discovery, masking storage, and journal effects.|
 
 An implementation MUST migrate every affected caller together for each changed boundary.
 Tests MUST detect the listed defects through behavior and independent expected text.
