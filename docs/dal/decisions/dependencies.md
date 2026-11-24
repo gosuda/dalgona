@@ -18,7 +18,7 @@ The release channel for Go modules is `https://proxy.golang.org/<module>/@latest
 
 Advisories come from the OSV batch query below, from OSV list pages `https://osv.dev/list?q=<module>&ecosystem=Go`, and from the GitHub security advisory pages of each project.
 
-This section lists the modules that `go.mod` requires directly, and the three tools. Indirect modules follow `go mod tidy`.
+This section lists the modules that `go.mod` requires directly, and the three tools. Indirect modules follow `go mod tidy`, except the floors in `## Advisory floors`.
 
 |Module|Pin|Released|Use|OSV batch|
 |---|---|---|---|---|
@@ -63,6 +63,19 @@ This section lists the modules that `go.mod` requires directly, and the three to
 The OSV column holds the result of `POST https://api.osv.dev/v1/querybatch` for each row's exact pin, run on 2026-11-15. One batch of 51 queries covered the toolchain, every row of this table except the go-readability and html-to-markdown rows, and every pin in `web/package.json`. A supplemental batch of 2 queries on the same day covered those two pins. The toolchain query used the package `stdlib` of ecosystem Go. The response held 51 results, and none listed a vulnerability. `none` means that the result for the pin listed no vulnerability. A control query for `golang.org/x/text` v0.3.0 returned GO-2020-0015, so the query form finds a known advisory. The dependency upgrade of 2026-11-19 moved ten Go pins and eight npm pins in `web/package.json` and `deploy/cloudflare/package.json`. A batch of 18 queries on 2026-11-19 covered those exact new pins, and none listed a vulnerability.
 
 The Released column of each module row equals the `Time` field of `https://proxy.golang.org/<module>/@v/<version>.info`, read on 2026-11-15; the ten rows re-grounded on 2026-11-19 read on that date. The toolchain row equals the go1.27.4 entry of `https://go.dev/doc/devel/release`.
+
+## Advisory floors
+
+`go.mod` raises these indirect modules above the highest version that any dependent requires. At that lower version, `just vuln` finds a reachable advisory. `go mod tidy` keeps each raised line. An upgrade MUST NOT lower a floor. Enforcement: `vuln` in `justfile` runs govulncheck in `just verify` and in CI, and it fails when a floor falls below its fix.
+
+|Modules|Floor|Released|Advisory|Lower version from|Exit|
+|---|---|---|---|---|---|
+|go.opentelemetry.io/otel, otel/metric, otel/trace|v1.47.0|2026-10-02|GO-2026-6974, fixed in otel/trace v1.47.0. `github.com/moby/moby/client` links otelhttp. govulncheck resolves the response body read in `internal/dal/model/stream.go` and the transport in `internal/dalgona/report/reporter.go` to otelhttp, which calls otel/trace.|v1.45.0, from `github.com/securego/gosec/v2` v2.29.0 under golangci-lint v2.15.0|Remove the row when a dependent requires v1.47.0 or later.|
+|github.com/gorilla/websocket|v1.5.4-0.20250319132907-e064f32e3674|2025-03-19|GO-2026-6278. v1.5.3 went back to a `math/rand` mask key. Commit d67f41855da4 on `main` restores `crypto/rand`, and no tagged release holds it. The `sandbox0` and `sprites` services in `internal/dalgona/sandboxsvc` reach it through their SDKs.|v1.5.3, from `github.com/superfly/sprites-go` v0.2.2 and gosec v2.29.0. `github.com/sandbox0-ai/sdk-go` v0.10.6 requires v1.5.1. Both SDK pins are their latest release.|Move to the first tag that holds the fix. Remove the row when every dependent requires a fixed version.|
+
+otel v1.47.0 adds otel/log v1.47.0 and keeps `go.opentelemetry.io/auto/sdk` at v1.2.1. otelhttp stays at v0.70.0, the version gosec requires. otel/sdk stays at v1.45.0 in the module graph, and no package that this module builds imports it. The gorilla/websocket floor is the head of `main`, the latest commit on the only channel that holds the fix.
+
+The Released column equals the `Time` field of `https://proxy.golang.org/<module>/@v/<version>.info` for each floor, read on 2026-11-24. One OSV batch of 8 queries ran on 2026-11-24. Six queries covered the floors, otel/log v1.47.0, and otelhttp v0.70.0, and none listed a vulnerability. Two control queries for gorilla/websocket v1.5.3 and otel/trace v1.45.0 returned GO-2026-6278 and GO-2026-6974.
 
 ## Runtime endpoints
 
