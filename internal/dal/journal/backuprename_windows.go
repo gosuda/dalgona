@@ -16,20 +16,24 @@ const (
 	backupRenameRetryDeadline = time.Second
 )
 
+var backupRename = os.Rename
+
 func renameBackupDir(oldpath, newpath string) error {
-	firstErr := os.Rename(oldpath, newpath)
+	firstErr := backupRename(oldpath, newpath)
 	if firstErr == nil || !backupRenameDenied(firstErr) {
 		return firstErr
 	}
 	deadline := time.Now().Add(backupRenameRetryDeadline)
-	for time.Now().Before(deadline) {
+	for {
 		time.Sleep(backupRenameRetryInterval)
-		renameErr := os.Rename(oldpath, newpath)
+		if !time.Now().Before(deadline) {
+			return firstErr
+		}
+		renameErr := backupRename(oldpath, newpath)
 		if renameErr == nil || !backupRenameDenied(renameErr) {
 			return renameErr
 		}
 	}
-	return firstErr
 }
 
 func backupRenameDenied(err error) bool {
