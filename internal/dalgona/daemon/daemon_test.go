@@ -58,18 +58,18 @@ func startDaemonTestHelper(home string) net.Listener {
 	if err := os.WriteFile(filepath.Join(home, "helper.pid"), pid, 0o600); err != nil {
 		daemonTestFailure(err)
 	}
-	ln, err := net.Listen("unix", filepath.Join(home, "dalgona.sock"))
-	if err != nil {
-		daemonTestFailure(err)
-	}
 	f, err := os.OpenFile(filepath.Join(home, "spawns"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		daemonTestFailure(err)
 	}
-	if _, err := f.WriteString("1\n"); err != nil {
+	if _, err = f.WriteString("1\n"); err != nil {
 		daemonTestFailure(err)
 	}
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
+		daemonTestFailure(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(home, "dalgona.sock"))
+	if err != nil {
 		daemonTestFailure(err)
 	}
 	return ln

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type patchKey struct{ threadID, itemID string }
@@ -83,16 +84,18 @@ func (m *model) applyRequestResolved(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(m.approvals, func(open approval) bool { return open.requestID == event.RequestID })
+	index := slices.IndexFunc(m.approvals, func(open approval) bool {
+		return open.threadID == event.ThreadID && open.requestID == event.RequestID
+	})
 	if index < 0 {
 		return nil
 	}
 	card := m.approvals[index].card
 	m.dropApproval(index)
 	if card != nil {
-		m.noticef("%s", questionResolvedNotice(event.Resolution))
+		m.noticef("%s", questionResolvedNotice(event.Resolution, card.attempts > 0))
 		if event.Resolution == "timedOut" {
-			m.commit(fmt.Sprintf("question:%s:%s:%s", card.threadID, card.params.TurnID, card.params.ItemID), card.closedLines("Timed out"))
+			m.commit(card.entryKey("question-status")+":timedOut", card.statusLines("Timed out"))
 		}
 	} else {
 		m.noticef("%s", resolvedNotice(event.Resolution))
@@ -131,7 +134,10 @@ func (m *model) abandonApprovals(cause error) {
 		if open.card != nil {
 			answer = open.card.answer
 		}
-		answer <- requestAnswer{err: cause}
+		select {
+		case answer <- requestAnswer{err: cause}:
+		default:
+		}
 		m.dropApproval(0)
 	}
 }
@@ -188,7 +194,7 @@ func approvalKind(method string) string {
 func (m *model) approvalLines(current approval) []string {
 	var lines []string
 	if current.threadID != m.thread.id {
-		lines = append(lines, "From thread "+current.threadID)
+		lines = append(lines, "From thread "+textinput.Escaped(current.threadID))
 	}
 	if current.card != nil {
 		lines = append(lines, current.card.reviewLines()...)
@@ -203,15 +209,15 @@ func (m *model) approvalLines(current approval) []string {
 func approvalDetails(current approval) []string {
 	var lines []string
 	if current.command != "" {
-		cmdLines := strings.Split(sanitizeText(current.command), "\n")
+		cmdLines := strings.Split(textinput.Escaped(current.command), "\n")
 		cmdLines[0] = "$ " + cmdLines[0]
 		lines = append(lines, cmdLines...)
 	}
 	if current.cwd != "" {
-		lines = append(lines, "cwd "+sanitizeText(current.cwd))
+		lines = append(lines, "cwd "+textinput.Escaped(current.cwd))
 	}
 	if current.reason != "" {
-		lines = append(lines, "reason: "+sanitizeText(current.reason))
+		lines = append(lines, "reason: "+textinput.Escaped(current.reason))
 	}
 	return lines
 }

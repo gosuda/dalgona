@@ -75,7 +75,6 @@ func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
 		{name: "advisor note", msg: notificationMsg{method: "dalgona/advisor/note", params: []byte(`{"threadId":"t1","advisor":"x\u001b]0;pwn\u0007y\u202e","severity":"info","note":"x\u001b]0;pwn\u0007y\u202e"}`)}},
 		{name: "model display name", msg: resultMsg{op: "models", value: &rpc.ModelListResponse{Data: []rpc.Model{{ID: "m1", DisplayName: hostile}}}}},
 		{name: "thread list title", msg: resultMsg{op: "threads", value: &rpc.ThreadListResponse{Data: []rpc.Thread{{ID: "t2", Name: hostile}}}}},
-		{name: "paste", msg: tea.PasteMsg{Content: hostile}},
 		{name: "login url", msg: resultMsg{op: "login", value: &rpc.LoginAccountResponse{AuthURL: "https://x\u001b]0;pwn\u0007y\u202e"}}},
 		{name: "settings save error", prepare: untrustedSettingsSave},
 		{name: "advisor failure in the open list", prepare: untrustedAdvisorList(errors.New(hostileAPC))},
@@ -119,15 +118,36 @@ func TestUntrustedThreadNameIsSanitizedInState(t *testing.T) {
 	}
 }
 
-func TestUntrustedApprovalThreadIsSanitized(t *testing.T) {
+func TestPastedControlsStayInTheDraftAndShowAsEscapes(t *testing.T) {
+	t.Parallel()
+	const hostile = "x\u001b]0;pwn\u0007y\u202e"
+	m := newModel(nil, Options{}, nil)
+	m.thread.id = "t1"
+	m, _ = drive(t, m, tea.PasteMsg{Content: hostile})
+	if got := m.input.composer.Expanded(); got != hostile {
+		t.Fatalf("draft = %q, want the pasted text %q", got, hostile)
+	}
+	view := m.View().Content
+	if !strings.Contains(view, "x<U+001B>]0;pwn<U+0007>y<U+202E>") {
+		t.Fatalf("view does not show the pasted controls as escapes:\n%q", view)
+	}
+	if strings.Contains(view, "\x1b]0;") || strings.Contains(view, "\u202e") {
+		t.Fatalf("view kept untrusted control text:\n%q", view)
+	}
+}
+
+func TestUntrustedApprovalThreadShowsAsEscapes(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	m.thread.id = "t1"
 	answer := make(chan requestAnswer, 1)
 	params := []byte(`{"threadId":"t1\u001b]0;pwn\u0007y\u202e","turnId":"turn-1","itemId":"c1","command":"echo hi","reason":"why"}`)
 	m, _ = drive(t, m, serverRequestMsg{method: "item/commandExecution/requestApproval", params: params, answer: answer})
+	if got, want := m.approvals[0].threadID, "t1\x1b]0;pwn\ay\u202e"; got != want {
+		t.Fatalf("approval thread id = %q, want the decoded id %q", got, want)
+	}
 	view := m.View().Content
-	if !strings.Contains(view, "thread t1y\n") {
+	if !strings.Contains(view, "thread t1<U+001B>]0;pwn<U+0007>y<U+202E>\n") {
 		t.Fatalf("approval view lost the thread id text:\n%q", view)
 	}
 	if strings.Contains(view, "\x1b]0;") || strings.Contains(view, "\u202e") {

@@ -6,11 +6,11 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -98,7 +98,7 @@ func commandNamed(name string) command {
 
 func (c editor) tokenBreak(r rune) bool {
 	_, isChip := c.chipOf(r)
-	return isChip || unicode.IsSpace(r)
+	return isChip || textinput.IsWhiteSpace(r)
 }
 
 func (c editor) commandEnd() int {
@@ -288,7 +288,7 @@ func (m *model) completePopup() {
 	e := &m.input.composer
 	head := []rune("/" + name)
 	tail := e.text[e.commandEnd():]
-	if len(tail) == 0 || !unicode.IsSpace(tail[0]) {
+	if len(tail) == 0 || tail[0] != ' ' {
 		tail = slices.Concat([]rune{' '}, tail)
 	}
 	e.text = slices.Concat(head, tail)

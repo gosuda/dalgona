@@ -269,7 +269,7 @@ func TestModelSlashCommands(t *testing.T) {
 		t.Run(test.input, func(t *testing.T) {
 			t.Parallel()
 			caller, m := slashModel()
-			name, argument, _ := parseSlash(test.input)
+			name, argument, _ := slashOf(test.input)
 			checkCallResult(t, caller, m.executeSlash(name, argument), test.method)
 		})
 	}
@@ -284,7 +284,7 @@ func TestModelSlashCommands(t *testing.T) {
 		t.Run(test.input, func(t *testing.T) {
 			t.Parallel()
 			caller, m := slashModel()
-			name, argument, _ := parseSlash(test.input)
+			name, argument, _ := slashOf(test.input)
 			command := m.executeSlash(name, argument)
 			if command != nil || m.confirm == nil {
 				t.Fatal("slash command must open a confirm panel before its request")

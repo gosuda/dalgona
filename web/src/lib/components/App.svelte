@@ -200,6 +200,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 					position={shownPosition}
 					total={openRequests.length}
 					subagent={subagentTitle}
+					submission={session.questionSubmissions.get(session.currentRequest.id) ?? null}
 					onSubmit={(request, selections) => session.answerQuestion(request, selections)}
 					onDismiss={(request) => session.cancelQuestion(request)}
 				/>

@@ -117,6 +117,8 @@ func (m *model) applyEventNotification(msg notificationMsg) (tea.Cmd, error) {
 		return nil, m.applyTurnEffort(msg.params)
 	case "account/login/completed":
 		return nil, m.applyLoginCompleted(msg.params)
+	case "warning":
+		return nil, m.applyAnswerWarning(msg.params)
 	default:
 		return nil, nil
 	}

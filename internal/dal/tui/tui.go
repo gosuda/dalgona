@@ -113,6 +113,9 @@ func (h *programHandler) Request(ctx context.Context, method string, params json
 		return nil, fmt.Errorf("approval request id: %w", err)
 	}
 	h.program.Send(serverRequestMsg{method: method, requestID: requestID, params: params.Clone(), answer: answer})
+	if method == "item/tool/requestUserInput" {
+		return h.answerQuestion(ctx, answer)
+	}
 	select {
 	case response := <-answer:
 		return response.value, response.err
@@ -120,6 +123,25 @@ func (h *programHandler) Request(ctx context.Context, method string, params json
 		return nil, errors.New("tui closed before the approval decision")
 	case <-ctx.Done():
 		return nil, fmt.Errorf("approval decision: %w", ctx.Err())
+	}
+}
+
+func (h *programHandler) answerQuestion(ctx context.Context, answer <-chan requestAnswer) (any, error) {
+	respond := rpc.ClientResponder(ctx)
+	for {
+		select {
+		case response := <-answer:
+			if response.err != nil {
+				return nil, response.err
+			}
+			if err := respond(response.value); err != nil {
+				return nil, fmt.Errorf("answer question: %w", err)
+			}
+		case <-h.done:
+			return nil, errors.New("tui closed before the question was answered")
+		case <-ctx.Done():
+			return nil, rpc.ErrResponded
+		}
 	}
 }
 

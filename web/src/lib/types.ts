@@ -287,6 +287,14 @@ export type AppNotification =
 			readonly resolution: string | null;
 	  }
 	| {
+			readonly type: "requestWarning";
+			readonly threadId: string;
+			readonly requestId: RequestId;
+			readonly field: string;
+			readonly reason: string;
+			readonly message: string;
+	  }
+	| {
 			readonly type: "loginCompleted";
 			readonly loginId: string | null;
 			readonly success: boolean;
@@ -458,6 +466,17 @@ export interface QuestionRequest {
 export interface QuestionSelection {
 	readonly picked: readonly string[];
 	readonly other: string;
+}
+
+export interface QuestionCorrection {
+	readonly field: string;
+	readonly reason: string;
+	readonly message: string;
+}
+
+export interface QuestionSubmission {
+	readonly selections: readonly QuestionSelection[];
+	readonly correction: QuestionCorrection | null;
 }
 
 export type ServerRequest = ApprovalRequest | QuestionRequest;

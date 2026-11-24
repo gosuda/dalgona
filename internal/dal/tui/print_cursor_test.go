@@ -100,13 +100,14 @@ func closedPanels() []closedPanel {
 			close: func(run *emulatedRun) { run.send(press('n', 0, "n")) },
 		},
 		{
-			name: "question submitted",
+			name: "question answered",
 			open: func(run *emulatedRun) {
 				run.send(questionRequest(make(chan requestAnswer, 1), single))
 			},
 			close: func(run *emulatedRun) {
 				run.send(press('2', 0, "2"))
 				run.send(press(tea.KeyEnter, 0, ""))
+				run.send(notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t1","requestId":"req-1","resolution":"answered"}`)})
 			},
 		},
 	}
