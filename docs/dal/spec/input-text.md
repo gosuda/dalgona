@@ -3,7 +3,14 @@
 ## I01. Status and authority
 
 This contract defines required input behavior for the Gio GUI, TUI, web client, and daemon.
-It is specification work, not evidence that those implementations already conform.
+The package `internal/dal/inputtext` implements the client-independent rules of I02 through I05, I07, and I10.
+It decodes strict UTF-8 and UTF-16, checks field policies and quotas, converts coordinates, and edits drafts on grapheme boundaries.
+It also implements required-field eligibility, the escape recognition profile of [Ask tool](ask.md), and conversation-search eligibility.
+Its segmentation tables come from the pinned Unicode 18.0.0 data files, and its tests run the upstream GraphemeBreakTest, WordBreakTest, and SentenceBreakTest.
+It also reports the untailored word and sentence boundaries of UAX #29 revision 49 for accessibility text navigation.
+Those boundaries accept any scalar offset and can fall inside a grapheme cluster, so edits still use the cluster boundaries of I05.
+The daemon checks request text with this package at dispatch, as [Protocol](protocol.md#text-inputs) lists. The GUI and web client do not use this package yet.
+This contract is not evidence that those implementations already conform.
 The inspected source baseline is `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 
 The contract covers prompts, question answers, titles, search, review instructions, paths, credentials, completions, pasted text, and recovered drafts.
@@ -101,6 +108,8 @@ Transient platform composition storage MAY contain incomplete encoding. It MUST 
 Committed editing MUST use Unicode 18.0.0 default extended grapheme clusters from [UAX #29, revision 49](https://www.unicode.org/reports/tr29/tr29-49.html).
 This is the selected conformance target. A runtime's advertised Unicode version alone MUST NOT prove conformance.
 Implementation changes MUST pin the segmentation data, algorithm revision, and conformance artifact hashes.
+`internal/dal/inputtext/ucdgen.go` checks the SHA-256 of each pinned Unicode 18.0.0 data file before it writes the property table.
+The conformance test checks the SHA-256 of the vendored GraphemeBreakTest-18.0.0 file.
 The [shared corpus](input-text-cases.json) supplements the upstream [GraphemeBreakTest](https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakTest.txt).
 
 Forward and backward movement MUST cross complete clusters in logical text order.
