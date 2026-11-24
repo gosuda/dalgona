@@ -11,17 +11,22 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+var runFileRead = os.ReadFile
+
 func readRunFile(path string) ([]byte, error) {
 	deadline := time.Now().Add(replaceRetryDeadline)
 	for {
-		data, err := os.ReadFile(path)
+		data, err := runFileRead(path)
 		if err == nil {
 			return data, nil
 		}
-		if !runFileSharingViolation(err) || !time.Now().Before(deadline) {
+		if !runFileSharingViolation(err) {
 			return nil, err
 		}
-		time.Sleep(replaceRetryInterval)
+		time.Sleep(min(replaceRetryInterval, time.Until(deadline)))
+		if !time.Now().Before(deadline) {
+			return nil, err
+		}
 	}
 }
 
