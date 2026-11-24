@@ -98,7 +98,7 @@ func retryReplaceRename(tmp, dst string) error {
 	}
 	deadline := time.Now().Add(replaceRetryDeadline)
 	for {
-		time.Sleep(replaceRetryInterval)
+		time.Sleep(min(replaceRetryInterval, time.Until(deadline)))
 		if !time.Now().Before(deadline) {
 			return firstErr
 		}

@@ -131,28 +131,48 @@ func TestPublishReplaceHeldPastDeadlineKeepsOriginalError(t *testing.T) {
 	}
 }
 
-func TestRetryReplaceRenameStartsNoRetryPastDeadline(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		held := &os.LinkError{Op: "rename", Old: "staged", New: "pid", Err: windows.ERROR_SHARING_VIOLATION}
-		attempts := 0
-		var firstDone time.Time
-		useReplaceRename(t, func(string, string) error {
-			attempts++
-			switch attempts {
-			case 1:
-				firstDone = time.Now()
-			case 2:
-				time.Sleep(time.Until(firstDone.Add(replaceRetryDeadline - replaceRetryInterval/2)))
-			}
-			return held
+func TestRetryReplaceRenameStopsAtDeadline(t *testing.T) {
+	cases := []struct {
+		name      string
+		secondEnd time.Duration
+		wantFail  time.Duration
+	}{
+		{"second attempt ends before the deadline", replaceRetryDeadline - replaceRetryInterval/2, replaceRetryDeadline},
+		{"second attempt ends after the deadline", replaceRetryDeadline + replaceRetryInterval/2, replaceRetryDeadline + replaceRetryInterval/2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) { checkReplaceStopsAtDeadline(t, tc.secondEnd, tc.wantFail) })
 		})
-		if err := retryReplaceRename("staged", "pid"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
-			t.Fatalf("replace held past the deadline: %v, want sharing violation", err)
+	}
+}
+
+func checkReplaceStopsAtDeadline(t *testing.T, secondEnd, wantFail time.Duration) {
+	t.Helper()
+	held := &os.LinkError{Op: "rename", Old: "staged", New: "pid", Err: windows.ERROR_SHARING_VIOLATION}
+	attempts := 0
+	var firstDone time.Time
+	useReplaceRename(t, func(string, string) error {
+		attempts++
+		switch attempts {
+		case 1:
+			firstDone = time.Now()
+		case 2:
+			time.Sleep(time.Until(firstDone.Add(secondEnd)))
 		}
-		if attempts != 2 {
-			t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
-		}
+		return held
 	})
+	err := retryReplaceRename("staged", "pid")
+	failedAt := time.Since(firstDone)
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("replace held past the deadline: %v, want sharing violation", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
+	}
+	if failedAt != wantFail {
+		t.Fatalf("replace failed %v after the first attempt, want %v", failedAt, wantFail)
+	}
 }
 
 func TestPublishReplaceDirectoryFailsFast(t *testing.T) {
