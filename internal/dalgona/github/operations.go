@@ -184,38 +184,11 @@ func (c *Client) Issues(ctx context.Context, request IssuesRequest) (IssuesPage,
 	if !ok {
 		return page, result.meta, nil
 	}
-	var decoded []struct {
-		ID          int64      `json:"id"`
-		Number      int64      `json:"number"`
-		Title       string     `json:"title"`
-		Body        string     `json:"body"`
-		State       string     `json:"state"`
-		HTMLURL     string     `json:"html_url"`
-		PullRequest *ghPullRef `json:"pull_request"`
-		Labels      []ghLabel  `json:"labels"`
-		User        ghActor    `json:"user"`
-		CreatedAt   time.Time  `json:"created_at"`
-		UpdatedAt   time.Time  `json:"updated_at"`
-	}
+	var decoded []IssueItem
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return page, result.meta, fmt.Errorf("github: issues: decode response: %w", err)
 	}
-	page.Items = make([]IssueItem, 0, len(decoded))
-	for _, item := range decoded {
-		page.Items = append(page.Items, IssueItem{
-			ID:          item.ID,
-			Number:      item.Number,
-			Title:       item.Title,
-			Body:        item.Body,
-			State:       item.State,
-			HTMLURL:     item.HTMLURL,
-			PullRequest: item.PullRequest,
-			Labels:      item.Labels,
-			User:        item.User,
-			CreatedAt:   item.CreatedAt,
-			UpdatedAt:   item.UpdatedAt,
-		})
-	}
+	page.Items = decoded
 	return page, result.meta, nil
 }
 
