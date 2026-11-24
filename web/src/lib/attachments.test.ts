@@ -28,7 +28,11 @@ describe("messageInput", () => {
 				text: "please summarise\n\nline 1\nline 2",
 				text_elements: [],
 			},
-			{ type: "image", url: "data:image/png;base64,iVBORw0KGgo=" },
+			{
+				type: "image",
+				url: "data:image/png;base64,iVBORw0KGgo=",
+				name: "shot.png",
+			},
 		]);
 	});
 

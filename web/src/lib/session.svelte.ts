@@ -22,7 +22,7 @@ import {
 	visibilityState,
 } from "./notifications";
 import { RpcError, rpcSocketUrl, tokenFromHash } from "./protocol";
-import { questionResponse, resolutionNotice } from "./question";
+import { correctionOf, questionResponse, resolutionNotice } from "./question";
 import {
 	acceptThreadStatus,
 	activeRequest,
@@ -70,8 +70,10 @@ import type {
 	NoticeAction,
 	NoticeTone,
 	OutputPage,
+	QuestionCorrection,
 	QuestionRequest,
 	QuestionSelection,
+	QuestionWarning,
 	RequestId,
 	RetryWait,
 	ReviewTarget,
@@ -262,6 +264,13 @@ export class Session {
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
 	requests: readonly ServerRequest[] = $state([]);
 	timedOutQuestions: ReadonlySet<string> = $state(new Set());
+	answeredQuestions: ReadonlySet<RequestId> = $state(new Set());
+	questionDrafts: ReadonlyMap<RequestId, readonly QuestionSelection[]> = $state(
+		new Map(),
+	);
+	questionCorrections: ReadonlyMap<RequestId, QuestionCorrection> = $state(
+		new Map(),
+	);
 	patchChanges: PatchChanges = $state({});
 	knownChildren: KnownChildThreads = $state({});
 	queuedFollowups: readonly string[] = $state([]);
@@ -423,7 +432,12 @@ export class Session {
 						request.itemId,
 					]);
 				}
+				const answeredHere = this.answeredQuestions.has(request.id);
 				this.settleRequest(request);
+				if (answeredHere && notification.resolution === "answered") {
+					this.notify("info", "Question answered");
+					return;
+				}
 				const text = resolutionNotice(notification.resolution);
 				if (text !== null) this.notify("info", text);
 			},
@@ -720,6 +734,8 @@ export class Session {
 		this.client?.close();
 		this.cancelStable();
 		this.requests = [];
+		this.answeredQuestions = new Set();
+		this.questionCorrections = new Map();
 		this.clearErrors();
 		const hashed = tokenFromHash(this.location.hash);
 		if (hashed !== "") {
@@ -755,6 +771,11 @@ export class Session {
 				if (generation === this.connectionGeneration) {
 					this.requests = trackRequest(this.requests, request);
 					this.notifyAttention("waiting", request.threadId);
+				}
+			},
+			onQuestionWarning: (warning) => {
+				if (generation === this.connectionGeneration) {
+					this.correctQuestion(warning);
 				}
 			},
 			onStateChange: (state) => {
@@ -1635,11 +1656,29 @@ export class Session {
 		request: QuestionRequest,
 		selections: readonly QuestionSelection[],
 	): void {
+		if (this.answeredQuestions.has(request.id)) return;
 		this.requireClient().respond(
 			request.id,
 			questionResponse(request, selections),
 		);
-		this.settleRequest(request);
+		this.saveQuestionDraft(request.id, selections);
+		this.answeredQuestions = new Set([...this.answeredQuestions, request.id]);
+	}
+
+	saveQuestionDraft(
+		id: RequestId,
+		selections: readonly QuestionSelection[],
+	): void {
+		this.questionDrafts = new Map([
+			...this.questionDrafts,
+			[
+				id,
+				selections.map((selection) => ({
+					picked: [...selection.picked],
+					other: selection.other,
+				})),
+			],
+		]);
 	}
 
 	cancelQuestion(request: QuestionRequest): void {
@@ -1647,9 +1686,35 @@ export class Session {
 		this.settleRequest(request);
 	}
 
+	private correctQuestion(warning: QuestionWarning): void {
+		const id = warning.requestId;
+		if (!this.answeredQuestions.has(id)) return;
+		this.forgetAnswer(id);
+		this.questionCorrections = new Map([
+			...this.questionCorrections,
+			[id, correctionOf(warning)],
+		]);
+	}
+
+	private forgetAnswer(id: RequestId): void {
+		const answered = new Set(this.answeredQuestions);
+		const corrections = new Map(this.questionCorrections);
+		if (answered.delete(id)) this.answeredQuestions = answered;
+		if (corrections.delete(id)) this.questionCorrections = corrections;
+	}
+
 	private settleRequest(request: ServerRequest): void {
 		this.requests = resolveRequest(this.requests, request.id);
 		this.patchChanges = forgetPatchChanges(this.patchChanges, request);
+		this.dropQuestionDraft(request.id);
+		this.forgetAnswer(request.id);
+	}
+
+	private dropQuestionDraft(id: RequestId): void {
+		if (!this.questionDrafts.has(id)) return;
+		const drafts = new Map(this.questionDrafts);
+		drafts.delete(id);
+		this.questionDrafts = drafts;
 	}
 
 	async requestDesktopNotifications(): Promise<void> {

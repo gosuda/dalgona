@@ -307,6 +307,102 @@ describe("thread command panels", () => {
 		});
 	});
 
+	test("review/start keeps a typed branch and commit id exactly", async () => {
+		const answers: Record<string, Answer> = {
+			"review/start": () => ({ reviewThreadId: "thread-1", turn: {} }),
+		};
+		const { session, calls } = activeSession(answers);
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Base branch" }));
+		await fireEvent.input(
+			screen.getByRole("textbox", { name: "Base branch name" }),
+			{ target: { value: " main\u00a0" } },
+		);
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Commit" }));
+		await fireEvent.input(screen.getByRole("textbox", { name: "Commit id" }), {
+			target: { value: "abc123 " },
+		});
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		expect(calls.filter((call) => call.method === "review/start")).toEqual([
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "baseBranch", branch: " main\u00a0" },
+				},
+			},
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "commit", sha: "abc123 " },
+				},
+			},
+		]);
+	});
+
+	test("review instructions convert CRLF once and keep their padding", async () => {
+		const answers: Record<string, Answer> = {
+			"review/start": () => ({ reviewThreadId: "thread-1", turn: {} }),
+		};
+		const { session, calls } = activeSession(answers);
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Custom" }));
+		const field = screen.getByRole("textbox", { name: "Review instructions" });
+		await fireEvent.input(field, { target: { value: " \u3000\n" } });
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Enter review instructions.",
+		);
+		await fireEvent.input(field, {
+			target: { value: "  check\r\nerrors \r\n" },
+		});
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		expect(calls.filter((call) => call.method === "review/start")).toEqual([
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "custom", instructions: "  check\nerrors \n" },
+				},
+			},
+		]);
+	});
+
+	test("a multiline paste into the commit id is refused whole", async () => {
+		const { session, calls } = activeSession({});
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Commit" }));
+		const field = screen.getByRole("textbox", {
+			name: "Commit id",
+		}) as HTMLInputElement;
+		await fireEvent.input(field, { target: { value: "ab" } });
+		field.setSelectionRange(2, 2);
+		const inserted = await fireEvent.paste(field, {
+			clipboardData: { getData: () => "c123\nd456" },
+		});
+		expect(inserted).toBe(false);
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toBe(
+			"This field takes one line. Paste or drop text without line breaks.",
+		);
+		expect(field.getAttribute("aria-describedby")).toBe(alert.id);
+		expect(field.value).toBe("ab");
+		expect(calls.some((call) => call.method === "review/start")).toBe(false);
+	});
+
 	test("fork clears a stale turn selection when the panel reopens", async () => {
 		const answers: Record<string, Answer> = { "dalgona/thread/tree": tree };
 		const { session } = activeSession(answers);
@@ -439,6 +535,81 @@ test("conversation search offers retry and distinguishes no matches", async () =
 	await vi.advanceTimersByTimeAsync(300);
 	await tick();
 	expect(screen.getByText("No conversation mentions this text.")).toBeTruthy();
+});
+
+function searchSession(search: ReturnType<typeof vi.fn>): Session {
+	return {
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
+		searchThreads: search,
+		closePanel: vi.fn(),
+		openedPanel: 1,
+		closePanelIf: vi.fn(),
+	} as unknown as Session;
+}
+
+test("conversation search needs three scalars in every term and sends the filter unchanged", async () => {
+	vi.useFakeTimers();
+	const search = vi.fn().mockResolvedValue([]);
+	render(ResumePanel, { session: searchSession(search), open: true });
+	const input = screen.getByRole("searchbox", { name: "Filter threads" });
+	for (const local of ["ab ", "abc de", " \u3000 ", "ab\u00a0cde"]) {
+		await fireEvent.input(input, { target: { value: local } });
+		await vi.advanceTimersByTimeAsync(300);
+		expect(search, JSON.stringify(local)).not.toHaveBeenCalled();
+		expect(
+			screen.queryByRole("region", { name: "Matches in conversations" }),
+		).toBeNull();
+	}
+	await fireEvent.input(input, { target: { value: " abc " } });
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenCalledExactlyOnceWith(" abc ", expect.anything());
+	await fireEvent.input(input, {
+		target: { value: "\u3000\uac00\ub098\ub2e4 e\u0301e\t" },
+	});
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenLastCalledWith(
+		"\u3000\uac00\ub098\ub2e4 e\u0301e\t",
+		expect.anything(),
+	);
+});
+
+test("a multiline paste into the filter is refused whole with a field error", async () => {
+	vi.useFakeTimers();
+	const search = vi.fn().mockResolvedValue([]);
+	render(ResumePanel, { session: searchSession(search), open: true });
+	const input = screen.getByRole("searchbox", {
+		name: "Filter threads",
+	}) as HTMLInputElement;
+	await fireEvent.input(input, { target: { value: "ke" } });
+	input.setSelectionRange(1, 2);
+	const inserted = await fireEvent.paste(input, {
+		clipboardData: {
+			getData: (type: string) => (type === "text/plain" ? "needle\r\nhay" : ""),
+		},
+	});
+	expect(inserted).toBe(false);
+	const alert = screen.getByRole("alert");
+	expect(alert.textContent).toBe(
+		"This field takes one line. Paste or drop text without line breaks.",
+	);
+	expect(input.getAttribute("aria-describedby")).toBe(alert.id);
+	expect(input.value).toBe("ke");
+	expect([input.selectionStart, input.selectionEnd]).toEqual([1, 2]);
+	for (const separator of ["\u2028", "\u0085", "\v"]) {
+		const refused = await fireEvent.paste(input, {
+			clipboardData: {
+				getData: () => `needle${separator}hay`,
+			},
+		});
+		expect(refused, JSON.stringify(separator)).toBe(false);
+	}
+	const accepted = await fireEvent.paste(input, {
+		clipboardData: { getData: () => "needle\thay" },
+	});
+	expect(accepted).toBe(true);
+	expect(screen.queryByRole("alert")).toBeNull();
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).not.toHaveBeenCalled();
 });
 
 test("resume closes after the thread loads and focus lands in the enabled message field", async () => {

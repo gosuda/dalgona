@@ -460,12 +460,27 @@ export interface QuestionSelection {
 	readonly other: string;
 }
 
+export interface QuestionWarning {
+	readonly threadId: string;
+	readonly message: string;
+	readonly requestId: RequestId;
+	readonly reason: string;
+	readonly field: string;
+}
+
+export interface QuestionCorrection {
+	readonly questionId: string | null;
+	readonly answerIndex: number | null;
+	readonly reason: string;
+}
+
 export type ServerRequest = ApprovalRequest | QuestionRequest;
 
 export interface RpcHandlers {
 	readonly onNotification: (notification: AppNotification) => void;
 	readonly onRequest: (request: ApprovalRequest) => void;
 	readonly onQuestion: (request: QuestionRequest) => void;
+	readonly onQuestionWarning: (warning: QuestionWarning) => void;
 	readonly onStateChange: (state: ConnectionState) => void;
 	readonly onError: (message: string) => void;
 }

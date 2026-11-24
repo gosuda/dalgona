@@ -332,6 +332,7 @@ describe("IME composition Escape", () => {
 		await fireEvent.keyDown(field, { key: "Escape", keyCode: 229 });
 		expect(onInterrupt).not.toHaveBeenCalled();
 		expect(help()).toBe(before);
+		await fireEvent.keyUp(field, { key: "Escape" });
 		await fireEvent.keyDown(field, { key: "Escape" });
 		expect(onInterrupt).not.toHaveBeenCalled();
 		expect(help()).toBe("Esc again to interrupt");
@@ -404,6 +405,9 @@ describe("IME composition Escape", () => {
 		await fireEvent.keyDown(node, { key: "Enter", isComposing: true });
 		await fireEvent.keyDown(node, { key: "Escape", isComposing: true });
 		await fireEvent.keyDown(node, { key: "Process" });
+		for (const key of ["ArrowDown", "ArrowUp", "Tab", "Enter", "Escape"]) {
+			await fireEvent.keyUp(node, { key });
+		}
 		expect(onOpen).not.toHaveBeenCalled();
 		expect(onClose).not.toHaveBeenCalled();
 		expect(first?.getAttribute("aria-selected")).toBe("true");
@@ -429,6 +433,7 @@ describe("IME composition Escape", () => {
 		await fireEvent.input(input, { target: { value: "日本語入力" } });
 		await fireEvent.keyDown(input, { key: "Escape", keyCode: 229 });
 		expect(onClose).not.toHaveBeenCalled();
+		await fireEvent.keyUp(input, { key: "Escape" });
 		await fireEvent.compositionStart(input);
 		await fireEvent.keyDown(input, { key: "Escape" });
 		expect(onClose).not.toHaveBeenCalled();
@@ -436,6 +441,7 @@ describe("IME composition Escape", () => {
 		expect(onClose).not.toHaveBeenCalled();
 		expect(input.value).toBe("日本語入力");
 		await fireEvent.compositionEnd(input);
+		await fireEvent.keyUp(input, { key: "Escape" });
 		await fireEvent.keyDown(input, { key: "Escape" });
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
@@ -506,8 +512,113 @@ describe("IME composition Escape", () => {
 		await fireEvent.keyDown(card, { key: "y", keyCode: 229 });
 		await fireEvent.keyDown(card, { key: "Escape", isComposing: true });
 		await fireEvent.keyDown(card, { key: "Process" });
+		for (const key of ["n", "y", "Escape", "Process"]) {
+			await fireEvent.keyUp(card, { key });
+		}
 		expect(onDecision).not.toHaveBeenCalled();
 		await fireEvent.keyDown(card, { key: "n" });
 		expect(onDecision).toHaveBeenCalledWith(approvalRequest, "decline");
+	});
+});
+
+describe("IME composition lifecycle", () => {
+	afterEach(cleanup);
+
+	test("Enter stays owned from compositionstart through the ending key's keyup", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = messageField();
+		await fireEvent.input(field, { target: { value: "한" } });
+		await fireEvent.compositionStart(field);
+		await fireEvent.keyDown(field, { key: "Enter", code: "Enter" });
+		await fireEvent.keyUp(field, { key: "Enter", code: "Enter" });
+		await fireEvent.keyDown(field, {
+			key: "Enter",
+			code: "Enter",
+			isComposing: true,
+		});
+		await fireEvent.compositionEnd(field, { data: "한" });
+		await fireEvent.keyDown(field, { key: "Enter", code: "Enter" });
+		expect(onSend).not.toHaveBeenCalled();
+		expect(field.value).toBe("한");
+		await fireEvent.keyUp(field, { key: "Enter", code: "Enter" });
+		await fireEvent.keyDown(field, { key: "Enter", code: "Enter" });
+		expect(onSend).toHaveBeenCalledExactlyOnceWith("한", NO_ATTACHMENTS_SENT);
+	});
+
+	test("a candidate chosen without a key leaves the next Enter free", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = messageField();
+		await fireEvent.compositionStart(field);
+		await fireEvent.input(field, { target: { value: "日本" } });
+		await fireEvent.compositionEnd(field, { data: "日本" });
+		await fireEvent.keyDown(field, { key: "Enter", code: "Enter" });
+		expect(onSend).toHaveBeenCalledExactlyOnceWith("日本", NO_ATTACHMENTS_SENT);
+	});
+
+	test("a focus change releases a composed key whose keyup was lost", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const field = messageField();
+		await fireEvent.input(field, { target: { value: "中文" } });
+		await fireEvent.compositionStart(field);
+		await fireEvent.keyDown(field, { key: "Enter", code: "Enter" });
+		await fireEvent.compositionEnd(field, { data: "文" });
+		await fireEvent.focusOut(field);
+		await fireEvent.keyDown(field, { key: "Enter", code: "Enter" });
+		expect(onSend).toHaveBeenCalledExactlyOnceWith("中文", NO_ATTACHMENTS_SENT);
+	});
+
+	test("the question card keeps its answer when Escape only ends a composition", async () => {
+		const onDismiss = vi.fn();
+		render(QuestionCard, {
+			props: {
+				request: cjkRequest,
+				position: 1,
+				total: 1,
+				subagent: null,
+				onSubmit: vi.fn(),
+				onDismiss,
+			},
+		});
+		const field = screen.getByRole("textbox", { name: "自由記述" });
+		await fireEvent.compositionStart(field);
+		await fireEvent.keyDown(field, { key: "Escape", code: "Escape" });
+		await fireEvent.compositionEnd(field);
+		await fireEvent.keyDown(field, { key: "Escape", code: "Escape" });
+		expect(onDismiss).not.toHaveBeenCalled();
+		await fireEvent.keyUp(field, { key: "Escape", code: "Escape" });
+		await fireEvent.keyDown(field, { key: "Escape", code: "Escape" });
+		expect(onDismiss).toHaveBeenCalledExactlyOnceWith(cjkRequest);
+	});
+});
+
+describe("panel held Escape ownership", () => {
+	afterEach(cleanup);
+
+	test("a held Escape after compositionend still owns the panel cancel event", async () => {
+		const onClose = vi.fn();
+		const children = createRawSnippet(() => ({
+			render: () => '<input id="ime-held-field" type="text">',
+		}));
+		const { container } = render(Panel, {
+			props: { title: "Panel", open: true, onClose, children },
+		});
+		await tick();
+		const dialog = container.querySelector("dialog");
+		const input = container.querySelector<HTMLInputElement>("#ime-held-field");
+		if (dialog === null || input === null) {
+			throw new Error("panel did not render");
+		}
+		await fireEvent.compositionStart(input);
+		await fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+		await fireEvent.compositionEnd(input);
+		await fireEvent.keyDown(input, { key: "Escape", code: "Escape" });
+		dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+		expect(onClose).not.toHaveBeenCalled();
+		await fireEvent.keyUp(input, { key: "Escape", code: "Escape" });
+		dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
+		expect(onClose).toHaveBeenCalledTimes(1);
 	});
 });

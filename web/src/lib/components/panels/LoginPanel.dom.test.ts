@@ -140,6 +140,72 @@ describe("login panel", () => {
 		);
 	});
 
+	test("an API key with significant spaces is sent exactly", async () => {
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+			"account/login/start": () => ({ type: "apiKey" }),
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/openai/));
+		const field = screen.getByLabelText("API key for openai");
+		await fireEvent.input(field, { target: { value: " \u3000" } });
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		expect(screen.getByRole("alert").textContent).toBe("Enter the API key.");
+		await fireEvent.input(field, { target: { value: " sk-test\t" } });
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		await vi.waitFor(() =>
+			expect(
+				rpc.calls.filter((call) => call.method === "account/login/start"),
+			).toEqual([
+				{
+					method: "account/login/start",
+					params: { type: "apiKey", provider: "openai", apiKey: " sk-test\t" },
+				},
+			]),
+		);
+	});
+
+	test("a pasted key with a line break or NUL is refused whole and not echoed", async () => {
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+			"account/login/start": () => ({ type: "apiKey" }),
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/openai/));
+		const field = screen.getByLabelText(
+			"API key for openai",
+		) as HTMLInputElement;
+		const inserted = await fireEvent.paste(field, {
+			clipboardData: { getData: () => "sk-secret\n" },
+		});
+		expect(inserted).toBe(false);
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toBe(
+			"This field takes one line. Paste or drop text without line breaks.",
+		);
+		expect(field.getAttribute("aria-describedby")).toBe(alert.id);
+		expect(field.value).toBe("");
+		await fireEvent.input(field, { target: { value: "sk\0secret" } });
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		expect(screen.getByRole("alert").textContent).toBe(
+			"This text has a NUL character. Remove it to continue.",
+		);
+		expect(document.body.textContent).not.toContain("secret");
+		expect(
+			rpc.calls.some((call) => call.method === "account/login/start"),
+		).toBe(false);
+	});
+
 	test("a browser login waits for account/login/completed and reloads models", async () => {
 		const { session, rpc } = await connected({
 			"dalgona/account/providers/list": providers([

@@ -385,7 +385,8 @@ function spillMember(item: { readonly [key: string]: unknown }): {
 	};
 } {
 	const spill = item["outputSpill"];
-	if (!isObject(spill)) return {};
+	if (spill === undefined) return {};
+	if (!isObject(spill)) fail("item");
 	const path = spill["path"];
 	const bytes = spill["bytes"];
 	const sha256 = spill["sha256"];
@@ -394,7 +395,7 @@ function spillMember(item: { readonly [key: string]: unknown }): {
 		typeof bytes !== "number" ||
 		typeof sha256 !== "string"
 	)
-		return {};
+		fail("item");
 	return { spill: { path, bytes, sha256 } };
 }
 
