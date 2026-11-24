@@ -49,6 +49,7 @@ Failing-first tests (`internal/agent`, `review_turn_test.go`; `internal/agent/ev
 - `TestTurnReviewSecondEndIsNotReviewed`: continues `TestTurnReviewRunsOnceAndTurnGoesOn`. After the speaking review, the model's next reply has no tool call again. Expected: the turn judge is still called once, and the journal has one `turn.judged`.
 - `TestTurnReviewEndsWithoutMessageUnlessItSpeaks`: a table. Rows: `clean` (every answer 0.02); `uncertain` (`incomplete` 0.7, `sound` 0.2); `flagged` but not spoken (`incomplete` 0.94, `sound` 0.5); `error` (the `Ask` returns an error); and `timeout` (`h.host.reviewTimeout = 50 * time.Millisecond`, and `Ask` blocks until `ctx.Done()`). Expected for each row: no user message after the assistant's last reply, the turn ends `completed`, one `turn.judged` with the stated verdict, `Feedback` false. The timeout row has the error text `part 1 of 1: review timed out after 50ms`, and it runs inside `testing/synctest`.
 - `TestTurnReviewRecoveryDoesNotReview`: the journal holds an open turn with a completed `patch` call and a tool-free reply. The harness calls `recoverSession()`. The recovered model then adds a new edit and replies with no tool call. Expected: the edit unit judges the new edit (one `tool.judged`), and the turn unit makes 0 judge calls and writes no `turn.judged`.
+  Coverage now resides in `TestRecoveryNeverJudgesCompletedEdit`.
 - `TestTurnReviewSkipsTurnWithoutEligibleEdit`: a turn with a task and no edit. Expected: 0 judge calls and no `turn.judged`.
 - `TestTurnReviewNeedsTask`: the user message text is empty, and the model makes one edit through the harness. Expected: one edit judge call, no turn judge call, and no `turn.judged`.
 - `TestTurnReviewSkipsPathWithoutPostImage`: the fake model edits `a.go` and then `b.go` through the harness, after the protocol workstream, Step 5. The last change to `b.go` needs no `PostBlob`, and the test must make that setup explicit. Expected: `turn.judged.Paths == ["a.go", "b.go"]`, `Skipped == ["b.go"]`, and the judged state's `files` holds only `a.go`.
@@ -61,6 +62,7 @@ Failing-first tests (`internal/agent`, `review_turn_test.go`; `internal/agent/ev
 - `TestTurnReviewLoopOrder`: a recorder shows the order `turn.judged` append, then the boundary hook, then the `turn_end` hook, then `turn.completed`.
 - Event tests, `TestTurnJudgedValidation`: `spoken` that is not in `flags` is rejected; `feedback` true with empty `spoken` is rejected; `error` with scores is rejected; `skipped` with an entry not in `paths` is rejected; `uncertain` with flags is rejected. Expected: each returns a validation error.
 - Event tests, `TestTurnJudgedFoldMessages`: accepted while the turn is open; a repeat for the same turn id fails with `event: fold: duplicate turn.judged turn-3`; after `turn.completed` it fails with the turn mismatch error from `requireTurn`.
+  Coverage now resides in `TestFoldTurnJudged`.
 
 Spec:
 - `docs/spec/edit-review.md`: a "Turn review" section with the gate, the diff with changed lines only, the request limit and its shares, the outcomes, the 8 s limit, the interrupt rule, and the rule that a continuation is its own unit.

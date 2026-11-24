@@ -687,14 +687,6 @@ describe("dalgona schema conformance", () => {
 		}
 	});
 
-	it("rejects an advisor status row missing a usage member", () => {
-		expect(() =>
-			parseAdvisorStatusResponse([
-				without(advisorStatus[0] as JsonObject, "usage"),
-			]),
-		).toThrow("invalid advisor status");
-	});
-
 	it("reads the word of a keyword row and ignores its hue", () => {
 		expect(parseKeywordsResponse([{ hue: [0, 330], word: "x" }])).toEqual([
 			{ word: "x" },

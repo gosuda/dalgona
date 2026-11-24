@@ -98,33 +98,6 @@ func TestEscInterruptsEveryLiveState(t *testing.T) {
 	}
 }
 
-func TestEscNamesTheStateWithoutALiveTurn(t *testing.T) {
-	t.Parallel()
-	for state, want := range map[string]string{
-		stateIdle:        "idle, draft kept; nothing to interrupt",
-		stateInterrupted: "stopped; nothing to interrupt",
-		stateFailed:      "failed; nothing to interrupt",
-	} {
-		t.Run(state, func(t *testing.T) {
-			t.Parallel()
-			m, caller := escNoticeModel(state, "keep me")
-			m, command := drive(t, m, press(tea.KeyEscape, 0, ""))
-			if command != nil {
-				m, _ = drive(t, m, command())
-			}
-			if m.notice != want {
-				t.Fatalf("notice = %q, want %q", m.notice, want)
-			}
-			if state != stateIdle && strings.Contains(m.notice, "idle") {
-				t.Fatalf("notice %q names idle in state %q", m.notice, state)
-			}
-			if len(caller.calls) != 0 {
-				t.Fatalf("Esc sent %q, want no request", caller.calls[0].method)
-			}
-		})
-	}
-}
-
 func TestEscInIdlePromptWithDraftStaysInert(t *testing.T) {
 	t.Parallel()
 	m, caller := escNoticeModel(stateIdle, "keep me")

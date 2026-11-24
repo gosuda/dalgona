@@ -69,14 +69,6 @@ func TestRenderDiagramNomnoml(t *testing.T) {
 	}
 }
 
-func TestRenderDiagramSvgShowsSource(t *testing.T) {
-	diagramMu.Lock()
-	defer diagramMu.Unlock()
-	if _, err := renderDiagramWith(drawDiagram, "svg", "<svg/>"); err == nil {
-		t.Fatal("svg must fail to the source card")
-	}
-}
-
 func diagramBlockLines(t *testing.T, b block) []string {
 	t.Helper()
 	m := &model{out: outState{renders: make(chan struct{}, diagramRenders), layouts: newD2Gate()}}

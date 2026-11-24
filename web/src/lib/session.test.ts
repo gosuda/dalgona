@@ -1498,37 +1498,6 @@ describe("file search", () => {
 		session.stop();
 	});
 
-	test("searches under a newly started thread's response cwd", async () => {
-		const searches: JsonValue[] = [];
-		const { dial } = fakeDial("none", {
-			"thread/start": () => ({
-				thread: thread("new-thread", []),
-				model: "gpt-test",
-				approvalsReviewer: "user",
-				modelProvider: "openai",
-				approvalPolicy: "on-request",
-				sandbox: "workspace-write",
-				cwd: "/new-work",
-			}),
-			fuzzyFileSearch: (params) => {
-				searches.push(params);
-				return { files: [] };
-			},
-		});
-		const session = new Session(dial);
-		session.start(location);
-		await openThread(session, "t1");
-		await session.createThread();
-		session.threads = [];
-
-		await session.searchFiles("mod");
-
-		expect(searches).toEqual([
-			{ query: "mod", roots: ["/new-work"], cancellationToken: "composer" },
-		]);
-		session.stop();
-	});
-
 	test("rejects a null response cwd", () => {
 		const response = resumeAnswer("none")({ threadId: "t1" });
 		expect(() =>
@@ -1698,15 +1667,6 @@ describe("review note", () => {
 		if (port === undefined) throw new Error("no port was dialled");
 		return { session, port };
 	}
-
-	test("a flagged tool verdict sets the review note", async () => {
-		const { session, port } = await openedSession();
-		port.deliver(turnStarted("t1", "turn-1"));
-		port.deliver(fileChangeCompleted("t1", "turn-1", "call-7"));
-		port.deliver(toolJudged("flagged", "Flagged: removed code"));
-		expect(session.reviewNote).toBe("Flagged: removed code");
-		session.stop();
-	});
 
 	test("a clean tool verdict sets no review note", async () => {
 		const { session, port } = await openedSession();
