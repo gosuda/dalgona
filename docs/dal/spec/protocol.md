@@ -367,6 +367,8 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
   Stdin has no read deadline and accepts at most 1048576 bytes.
   Use `</dev/null` or `ssh -n` to avoid unintended stdin input.
   The client MUST reject malformed UTF-8 before submission, replacing the previous U+FFFD repair behavior.
+  It MUST also reject NUL before submission.
+  Either refusal prints `invalid text: stdin: <reason>; pipe UTF-8 text without NUL`, exits 1, and dials no daemon.
   This is an explicit compatibility tightening under [Input text](input-text.md).
   The existing headless adapter removes trailing CR and LF characters as a documented CLI convenience.
   That transformation MUST NOT apply to GUI, TUI, web, or direct daemon text inputs.

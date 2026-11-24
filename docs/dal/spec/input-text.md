@@ -315,7 +315,6 @@ These observations identify required changes, not a claim that this documentatio
 |[Answer cleanup](../../../internal/dal/tool/ask/clean.go), [results](../../../internal/dal/tool/ask/result.go)|User answers are cleaned and truncated.|Validate exact text before claiming a question outcome.|
 |[RPC connection](../../../internal/dal/rpc/conn.go)|The response dispatcher consumes its waiter before typed answer validation.|Retain pending questions through correction and migrate first-party response ownership.|
 |[Agent submission](../../../internal/dal/agent/entry.go)|Tool preparation precedes complete shared text validation.|Validate before discovery, masking storage, and journal effects.|
-|[CLI input](../../../internal/dal/app/cli.go)|Invalid stdin UTF-8 receives replacement characters.|Reject malformed input and retain the explicitly named newline exception.|
 
 An implementation MUST migrate every affected caller together for each changed boundary.
 Tests MUST detect the listed defects through behavior and independent expected text.
