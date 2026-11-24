@@ -20,6 +20,8 @@ const (
 	replaceKeepLimit     = 4 * 1024
 )
 
+var replaceRename = os.Rename
+
 func publishReplace(tmp, dst string, perm fs.FileMode) error {
 	if replaceUnchanged(tmp, dst, perm) {
 		return nil
@@ -87,7 +89,7 @@ func sameReplaceContent(tmp, dst string) bool {
 }
 
 func retryReplaceRename(tmp, dst string) error {
-	firstErr := os.Rename(tmp, dst)
+	firstErr := replaceRename(tmp, dst)
 	if firstErr == nil || !replaceDenied(firstErr) {
 		return firstErr
 	}
@@ -95,17 +97,16 @@ func retryReplaceRename(tmp, dst string) error {
 		return firstErr
 	}
 	deadline := time.Now().Add(replaceRetryDeadline)
-	for time.Now().Before(deadline) {
-		time.Sleep(replaceRetryInterval)
-		renameErr := os.Rename(tmp, dst)
-		if renameErr == nil {
-			return nil
+	for {
+		time.Sleep(min(replaceRetryInterval, time.Until(deadline)))
+		if !time.Now().Before(deadline) {
+			return firstErr
 		}
-		if !replaceDenied(renameErr) {
+		renameErr := replaceRename(tmp, dst)
+		if renameErr == nil || !replaceDenied(renameErr) {
 			return renameErr
 		}
 	}
-	return firstErr
 }
 
 func replaceIsDir(dst string) bool {
