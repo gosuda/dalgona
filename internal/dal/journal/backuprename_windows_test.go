@@ -48,49 +48,39 @@ func holdBackupDir(t *testing.T, path string) windows.Handle {
 	return handle
 }
 
-func releaseBackupDirAfter(handle windows.Handle, delay time.Duration) <-chan struct{} {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		time.Sleep(delay)
-		_ = windows.CloseHandle(handle)
-	}()
-	return done
+func useBackupRename(t *testing.T, rename func(oldpath, newpath string) error) {
+	t.Helper()
+	backupRename = rename
+	t.Cleanup(func() { backupRename = os.Rename })
+}
+
+func renameHeld(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, syscall.ERROR_ACCESS_DENIED)
 }
 
 func TestInstallBackupRetriesHeldStagedDir(t *testing.T) {
 	fixture := heldBackupFixture(t)
-	done := releaseBackupDirAfter(holdBackupDir(t, fixture.staged), 100*time.Millisecond)
+	handle := holdBackupDir(t, fixture.staged)
+	released := false
+	useBackupRename(t, func(oldpath, newpath string) error {
+		err := os.Rename(oldpath, newpath)
+		if !released && renameHeld(err) {
+			released = true
+			_ = windows.CloseHandle(handle)
+		}
+		return err
+	})
 	err := installBackup(fixture.dir, fixture.staged, fixture.tmp, syncDir)
-	<-done
+	if !released {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("no rename met the held staged checkpoint, install returned %v", err)
+	}
 	if err != nil {
 		t.Fatalf("install held staged checkpoint: %v", err)
 	}
 	if _, serr := os.Stat(filepath.Join(fixture.final, "STAGED")); serr != nil {
 		t.Fatalf("held staged checkpoint was not installed: %v", serr)
 	}
-}
-
-func TestInstallBackupHeldPastDeadlineKeepsBackup(t *testing.T) {
-	fixture := heldBackupFixture(t)
-	handle := holdBackupDir(t, fixture.staged)
-	defer func() { _ = windows.CloseHandle(handle) }()
-	err := installBackup(fixture.dir, fixture.staged, fixture.tmp, syncDir)
-	if err == nil {
-		t.Fatal("install held staged checkpoint succeeded, want sharing violation or access denied")
-	}
-	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
-		t.Fatalf("install held staged checkpoint: %v, want sharing violation or access denied", err)
-	}
-	if _, serr := os.Stat(filepath.Join(fixture.final, "MARKER")); serr != nil {
-		t.Fatalf("failed install lost the previous backup: %v", serr)
-	}
-}
-
-func useBackupRename(t *testing.T, rename func(oldpath, newpath string) error) {
-	t.Helper()
-	backupRename = rename
-	t.Cleanup(func() { backupRename = os.Rename })
 }
 
 func TestRenameBackupDirStartsNoRetryPastDeadline(t *testing.T) {
@@ -112,5 +102,21 @@ func TestRenameBackupDirStartsNoRetryPastDeadline(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
+	}
+}
+
+func TestInstallBackupHeldPastDeadlineKeepsBackup(t *testing.T) {
+	fixture := heldBackupFixture(t)
+	handle := holdBackupDir(t, fixture.staged)
+	defer func() { _ = windows.CloseHandle(handle) }()
+	err := installBackup(fixture.dir, fixture.staged, fixture.tmp, syncDir)
+	if err == nil {
+		t.Fatal("install held staged checkpoint succeeded, want sharing violation or access denied")
+	}
+	if !renameHeld(err) {
+		t.Fatalf("install held staged checkpoint: %v, want sharing violation or access denied", err)
+	}
+	if _, serr := os.Stat(filepath.Join(fixture.final, "MARKER")); serr != nil {
+		t.Fatalf("failed install lost the previous backup: %v", serr)
 	}
 }
