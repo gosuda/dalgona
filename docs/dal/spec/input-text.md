@@ -301,19 +301,10 @@ Synthetic composition events and rendered CJK strings MUST NOT substitute for ac
 TUI evidence MUST name supported terminal/IME pairs and test bracketed paste alongside committed text delivery.
 Headless passing tests MUST NOT be reported as visual, terminal-width, or IME acceptance.
 
-## I13. Required implementation changes
-
-The source baseline contains the following migration work.
-These observations identify required changes, not a claim that this documentation changes runtime behavior.
-
-|Source|Observed behavior|Required change|
-|---|---|---|
-|[Web answers](../../../web/src/lib/question.ts), [question card](../../../web/src/lib/components/QuestionCard.svelte)|Answer processing trims and truncates. HTML length uses UTF-16.|Use the shared scalar quota and atomic rejection.|
-|[Web composer](../../../web/src/lib/components/Composer.svelte)|Submission trims typed text.|Separate send eligibility from preserved payload.|
-|[RPC connection](../../../internal/dal/rpc/conn.go)|The response dispatcher consumes its waiter before typed answer validation.|Retain pending questions through correction and migrate first-party response ownership.|
+## I13. Implementation proof
 
 An implementation MUST migrate every affected caller together for each changed boundary.
-Tests MUST detect the listed defects through behavior and independent expected text.
+Tests MUST detect text defects through behavior and independent expected text.
 Source assertions, snapshot updates, and a passing style check MUST NOT count as Unicode behavior proof.
 
 ## I14. Standards and API references

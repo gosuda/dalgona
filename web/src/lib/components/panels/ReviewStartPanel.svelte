@@ -1,6 +1,8 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
+import { oneLine } from "#lib/oneLine.ts";
 import type { Session } from "#lib/session.svelte.ts";
+import { isBlank } from "#lib/text/validate.ts";
 import type { ReviewTarget } from "#lib/types.ts";
 
 interface Props {
@@ -18,18 +20,15 @@ let busy = $state(false);
 
 function target(): ReviewTarget | string {
 	if (kind === "baseBranch") {
-		const name = branch.trim();
-		return name === "" ? "Enter a base branch." : { type: kind, branch: name };
+		return isBlank(branch) ? "Enter a base branch." : { type: kind, branch };
 	}
 	if (kind === "commit") {
-		const id = sha.trim();
-		return id === "" ? "Enter a commit id." : { type: kind, sha: id };
+		return isBlank(sha) ? "Enter a commit id." : { type: kind, sha };
 	}
 	if (kind === "custom") {
-		const text = instructions.trim();
-		return text === ""
+		return isBlank(instructions)
 			? "Enter review instructions."
-			: { type: kind, instructions: text };
+			: { type: kind, instructions };
 	}
 	return { type: kind };
 }
@@ -62,11 +61,11 @@ async function start(): Promise<void> {
 			<label><input type="radio" name="review-target" value="uncommittedChanges" bind:group={kind} /> Uncommitted changes</label>
 			<label><input type="radio" name="review-target" value="baseBranch" bind:group={kind} /> Base branch</label>
 			{#if kind === "baseBranch"}
-				<input type="text" bind:value={branch} aria-label="Base branch name" />
+				<input type="text" bind:value={branch} aria-label="Base branch name" oninput={() => (error = "")} {@attach oneLine((message) => (error = message))} />
 			{/if}
 			<label><input type="radio" name="review-target" value="commit" bind:group={kind} /> Commit</label>
 			{#if kind === "commit"}
-				<input type="text" bind:value={sha} aria-label="Commit id" />
+				<input type="text" bind:value={sha} aria-label="Commit id" oninput={() => (error = "")} {@attach oneLine((message) => (error = message))} />
 			{/if}
 			<label><input type="radio" name="review-target" value="custom" bind:group={kind} /> Custom</label>
 			{#if kind === "custom"}

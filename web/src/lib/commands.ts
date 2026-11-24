@@ -57,7 +57,7 @@ type ComposerInput =
 
 export function parseComposerText(text: string): ComposerInput {
 	if (text.startsWith("!")) {
-		return { kind: "shell", command: text.slice(1).trim() };
+		return { kind: "shell", command: text.slice(1) };
 	}
 	if (text.startsWith("//")) {
 		return { kind: "message", text: text.slice(1) };

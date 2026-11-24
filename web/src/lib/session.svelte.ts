@@ -72,6 +72,7 @@ import type {
 	OutputPage,
 	QuestionRequest,
 	QuestionSelection,
+	QuestionSubmission,
 	RequestId,
 	RetryWait,
 	ReviewTarget,
@@ -177,6 +178,7 @@ const effectKinds = [
 	"threadName",
 	"advisorNote",
 	"requestResolved",
+	"requestWarning",
 	"retryWait",
 	"tokenUsage",
 	"fileChangesUpdated",
@@ -262,6 +264,9 @@ export class Session {
 	advisor: AdvisorSummary = $state({ kind: "unknown" });
 	requests: readonly ServerRequest[] = $state([]);
 	timedOutQuestions: ReadonlySet<string> = $state(new Set());
+	questionSubmissions: ReadonlyMap<RequestId, QuestionSubmission> = $state.raw(
+		new Map(),
+	);
 	patchChanges: PatchChanges = $state({});
 	knownChildren: KnownChildThreads = $state({});
 	queuedFollowups: readonly string[] = $state([]);
@@ -423,9 +428,33 @@ export class Session {
 						request.itemId,
 					]);
 				}
+				const submitted = this.questionSubmissions.has(request.id);
 				this.settleRequest(request);
-				const text = resolutionNotice(notification.resolution);
+				const text = resolutionNotice(notification.resolution, submitted);
 				if (text !== null) this.notify("info", text);
+			},
+			requestWarning: (notification) => {
+				const submission = this.questionSubmissions.get(notification.requestId);
+				const request = this.requests.find(
+					(open) => open.id === notification.requestId,
+				);
+				if (
+					submission === undefined ||
+					request?.threadId !== notification.threadId
+				) {
+					return;
+				}
+				this.questionSubmissions = new Map(this.questionSubmissions).set(
+					notification.requestId,
+					{
+						selections: submission.selections,
+						correction: {
+							field: notification.field,
+							reason: notification.reason,
+							message: notification.message,
+						},
+					},
+				);
 			},
 			loginCompleted: (notification) => {
 				this.loginCompleted(notification);
@@ -720,6 +749,7 @@ export class Session {
 		this.client?.close();
 		this.cancelStable();
 		this.requests = [];
+		this.questionSubmissions = new Map();
 		this.clearErrors();
 		const hashed = tokenFromHash(this.location.hash);
 		if (hashed !== "") {
@@ -1635,14 +1665,19 @@ export class Session {
 		request: QuestionRequest,
 		selections: readonly QuestionSelection[],
 	): void {
+		if (this.questionSubmissions.get(request.id)?.correction === null) return;
 		this.requireClient().respond(
 			request.id,
 			questionResponse(request, selections),
 		);
-		this.settleRequest(request);
+		this.questionSubmissions = new Map(this.questionSubmissions).set(
+			request.id,
+			{ selections, correction: null },
+		);
 	}
 
 	cancelQuestion(request: QuestionRequest): void {
+		if (this.questionSubmissions.get(request.id)?.correction === null) return;
 		this.requireClient().respond(request.id, { answers: {} });
 		this.settleRequest(request);
 	}
@@ -1650,6 +1685,11 @@ export class Session {
 	private settleRequest(request: ServerRequest): void {
 		this.requests = resolveRequest(this.requests, request.id);
 		this.patchChanges = forgetPatchChanges(this.patchChanges, request);
+		if (this.questionSubmissions.has(request.id)) {
+			const submissions = new Map(this.questionSubmissions);
+			submissions.delete(request.id);
+			this.questionSubmissions = submissions;
+		}
 	}
 
 	async requestDesktopNotifications(): Promise<void> {

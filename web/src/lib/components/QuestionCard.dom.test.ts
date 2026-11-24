@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	within,
+} from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import { afterEach, describe, expect, type Mock, test, vi } from "vitest";
@@ -6,12 +12,14 @@ import App from "#lib/components/App.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
 import type {
+	AppNotification,
 	JsonValue,
 	QuestionRequest,
 	QuestionSelection,
 	RequestId,
 	RpcHandlers,
 } from "#lib/types.ts";
+import { parseNotification } from "#lib/validation.ts";
 
 afterEach(cleanup);
 
@@ -88,9 +96,65 @@ function props(
 		position: 1,
 		total: 1,
 		subagent: null,
+		submission: null,
 		onSubmit,
 		onDismiss,
 	};
+}
+
+const otherRequest: QuestionRequest = {
+	...databaseRequest,
+	questions: databaseRequest.questions.map((question) => ({
+		...question,
+		isOther: true,
+	})),
+};
+
+function notice(method: string, params: JsonValue): AppNotification {
+	const parsed = parseNotification({ method, params });
+	if (parsed === null) throw new Error(`${method} did not parse`);
+	return parsed;
+}
+
+function correction(field: string, reason: string): AppNotification {
+	return notice("warning", {
+		threadId: "thread-1",
+		requestId: "req-1",
+		message: `invalid text: ${field}: ${reason}`,
+		reason,
+		field,
+	});
+}
+
+function openApp(respond: (id: RequestId, result: JsonValue) => void): {
+	handlers: RpcHandlers;
+	session: Session;
+} {
+	let handlers: RpcHandlers | undefined;
+	const session = new Session((_url, incoming) => {
+		handlers = incoming;
+		return { ...port(respond), call: () => new Promise<never>(() => {}) };
+	});
+	session.start({
+		hash: "#token=abc",
+		host: "localhost:7437",
+		pathname: "/",
+		protocol: "http:",
+		search: "",
+	});
+	if (handlers === undefined) throw new Error("the session did not dial");
+	session.activeThreadId = "thread-1";
+	return { handlers, session };
+}
+
+function pasted(text: string) {
+	return { getData: (type: string) => (type === "text/plain" ? text : "") };
+}
+
+function otherField(): HTMLInputElement {
+	return screen.getByRole("textbox", {
+		name: "Other answer for Database",
+	}) as HTMLInputElement;
 }
 
 function port(respond: (id: RequestId, result: JsonValue) => void): RpcPort {
@@ -264,5 +328,225 @@ describe("question card", () => {
 		expect(onSubmit).toHaveBeenCalledWith(databaseRequest, [
 			{ picked: ["Postgres"], other: "" },
 		]);
+	});
+});
+
+describe("question display", () => {
+	test("shows look-alike labels apart and submits the offered label", async () => {
+		const onSubmit = vi.fn();
+		const request: QuestionRequest = {
+			...databaseRequest,
+			questions: [
+				{
+					id: "q1",
+					header: "Pick\u202e",
+					question: "Which\none?",
+					isOther: false,
+					multiSelect: false,
+					options: [
+						{ label: "Yes", description: "a\tb", preview: null },
+						{ label: "Yes\u200b", description: "", preview: "\n\tcode\u0000" },
+					],
+				},
+			],
+		};
+		render(QuestionCard, { props: props(request, onSubmit, vi.fn()) });
+		expect(screen.getByText("Pick<U+202E>")).toBeTruthy();
+		expect(screen.getByText("Which one?")).toBeTruthy();
+		expect(screen.getByText("a b")).toBeTruthy();
+		expect(screen.getByText("Yes")).toBeTruthy();
+		await fireEvent.click(screen.getByRole("radio", { name: /Yes<U\+200B>/ }));
+		expect(document.querySelector(".preview")?.textContent).toBe(
+			"    code<U+0000>",
+		);
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).toHaveBeenCalledWith(request, [
+			{ picked: ["Yes\u200b"], other: "" },
+		]);
+	});
+});
+
+describe("question answer text", () => {
+	test("keeps an over-limit answer in the field with an error and does not submit it", async () => {
+		const onSubmit = vi.fn();
+		render(QuestionCard, { props: props(otherRequest, onSubmit, vi.fn()) });
+		expect(otherField().hasAttribute("maxlength")).toBe(false);
+		const full = "\u{1F600}".repeat(2000);
+		await fireEvent.input(otherField(), { target: { value: `${full}x` } });
+		expect(otherField().value).toBe(`${full}x`);
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
+		);
+		expect(otherField().getAttribute("aria-describedby")).toBe(alert.id);
+		expect(otherField().getAttribute("aria-invalid")).toBe("true");
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).not.toHaveBeenCalled();
+		await fireEvent.input(otherField(), { target: { value: full } });
+		expect(screen.queryByRole("alert")).toBeNull();
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).toHaveBeenCalledWith(otherRequest, [
+			{ picked: [], other: full },
+		]);
+	});
+
+	test("refuses a multiline paste whole and keeps the answer", async () => {
+		render(QuestionCard, { props: props(otherRequest, vi.fn(), vi.fn()) });
+		await fireEvent.input(otherField(), { target: { value: "keep" } });
+		expect(
+			await fireEvent.paste(otherField(), {
+				clipboardData: pasted("a\u2028b"),
+			}),
+		).toBe(false);
+		expect(otherField().value).toBe("keep");
+		expect(screen.getByRole("alert").textContent).toBe(
+			"This field takes one line. Nothing was pasted.",
+		);
+		expect(
+			await fireEvent.paste(otherField(), {
+				clipboardData: pasted("one line"),
+			}),
+		).toBe(true);
+		await fireEvent.input(otherField(), { target: { value: "keep it" } });
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	test("refuses a NUL answer and submits whitespace as typed", async () => {
+		const onSubmit = vi.fn();
+		render(QuestionCard, { props: props(otherRequest, onSubmit, vi.fn()) });
+		await fireEvent.input(otherField(), { target: { value: "a\u0000b" } });
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Remove the NUL character from this answer.",
+		);
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).not.toHaveBeenCalled();
+		await fireEvent.input(otherField(), { target: { value: " \u3000 " } });
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).toHaveBeenCalledWith(otherRequest, [
+			{ picked: [], other: " \u3000 " },
+		]);
+	});
+
+	test("sends nothing while a submitted answer waits", async () => {
+		const onSubmit = vi.fn();
+		const onDismiss = vi.fn();
+		render(QuestionCard, {
+			props: {
+				...props(otherRequest, onSubmit, onDismiss),
+				submission: {
+					selections: [{ picked: [], other: "sent" }],
+					correction: null,
+				},
+			},
+		});
+		expect(otherField().value).toBe("sent");
+		for (const name of ["Submit", "Skip", "Dismiss"]) {
+			const button = screen.getByRole("button", { name });
+			expect(button.getAttribute("aria-disabled")).toBe("true");
+			await fireEvent.click(button);
+		}
+		await fireEvent.keyDown(screen.getByRole("heading"), { key: "Escape" });
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(onDismiss).not.toHaveBeenCalled();
+		expect(screen.getByRole("status").textContent).toBe(
+			"Answer sent. Waiting for the question to close.",
+		);
+	});
+
+	test("restores submitted answers and shows a correction it cannot place", () => {
+		render(QuestionCard, {
+			props: {
+				...props(databaseRequest, vi.fn(), vi.fn()),
+				submission: {
+					selections: [{ picked: ["Postgres"], other: "" }],
+					correction: {
+						field: "answers.gone.answers[0]",
+						reason: "text_too_large",
+						message: "invalid text",
+					},
+				},
+			},
+		});
+		expect(
+			(screen.getByRole("radio", { name: /Postgres/ }) as HTMLInputElement)
+				.checked,
+		).toBe(true);
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
+		);
+	});
+
+	test("keeps the card after Submit until the request resolves and resubmits after a warning", async () => {
+		const respond = vi.fn();
+		const { handlers, session } = openApp(respond);
+		handlers.onQuestion(otherRequest);
+		render(App, { props: { session } });
+		await tick();
+		await fireEvent.input(otherField(), { target: { value: " two words " } });
+		const card = within(
+			screen.getByRole("region", { name: "Answer this question" }),
+		);
+		const submit = card.getByRole("button", { name: "Submit" });
+		submit.focus();
+		await fireEvent.click(submit);
+		expect(respond).toHaveBeenCalledWith("req-1", {
+			answers: { q1: { answers: [" two words "] } },
+		});
+		expect(
+			screen.getByText("Answer sent. Waiting for the question to close."),
+		).toBeTruthy();
+		expect(submit.getAttribute("aria-disabled")).toBe("true");
+		await fireEvent.click(submit);
+		await fireEvent.click(card.getByRole("button", { name: "Skip" }));
+		await fireEvent.click(card.getByRole("button", { name: "Dismiss" }));
+		await fireEvent.keyDown(submit, { key: "Escape" });
+		expect(respond).toHaveBeenCalledTimes(1);
+
+		handlers.onNotification(
+			correction("answers.q1.answers[0]", "disallowed_control"),
+		);
+		await tick();
+		expect(otherField().value).toBe(" two words ");
+		const error = screen.getByText(
+			"Remove the NUL character from this answer.",
+		);
+		expect(otherField().getAttribute("aria-describedby")).toBe(error.id);
+		expect(submit.getAttribute("aria-disabled")).toBeNull();
+		expect(document.activeElement).toBe(submit);
+		await fireEvent.click(submit);
+		expect(respond).toHaveBeenCalledTimes(1);
+
+		await fireEvent.input(otherField(), {
+			target: { value: " two words, fixed " },
+		});
+		expect(
+			screen.queryByText("Remove the NUL character from this answer."),
+		).toBeNull();
+		await fireEvent.click(submit);
+		expect(respond).toHaveBeenCalledTimes(2);
+		expect(respond).toHaveBeenLastCalledWith("req-1", {
+			answers: { q1: { answers: [" two words, fixed "] } },
+		});
+
+		handlers.onNotification(
+			notice("serverRequest/resolved", {
+				threadId: "thread-1",
+				requestId: "req-1",
+				resolution: "answered",
+			}),
+		);
+		await tick();
+		expect(
+			screen.queryByRole("region", { name: "Question details" }),
+		).toBeNull();
+		expect(screen.getByText("Question answered")).toBeTruthy();
+		handlers.onNotification(
+			correction("answers.q1.answers[0]", "disallowed_control"),
+		);
+		await tick();
+		expect(
+			screen.queryByRole("region", { name: "Question details" }),
+		).toBeNull();
+		expect(respond).toHaveBeenCalledTimes(2);
 	});
 });
