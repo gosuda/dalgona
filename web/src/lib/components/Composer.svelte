@@ -24,6 +24,7 @@ import CompletionList from "#lib/components/CompletionList.svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import { isImeKey } from "#lib/ime.ts";
+import { checkText, isBlank, newlinesToLF } from "#lib/text/validate.ts";
 import type { FileMatch, KeywordMatch } from "#lib/types.ts";
 
 const INTERRUPT_GUARD_MS = 2000;
@@ -220,7 +221,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 $effect(() => {
 	const draft = text;
 	const seq = ++matchSeq;
-	if (!onMatch || draft.trim() === "") {
+	if (!onMatch || isBlank(draft)) {
 		matches = [];
 		return;
 	}
@@ -298,19 +299,33 @@ function insertFile(match: FileMatch | undefined): void {
 }
 
 function messageText(): string | null {
-	return parsed.kind === "message" ? parsed.text.trim() : null;
+	return parsed.kind === "message" ? parsed.text : null;
 }
 
 function validText(): string | null {
 	const value = messageText();
 	if (value === null) return null;
-	if (value) {
-		error = "";
-		return value;
+	if (isBlank(value)) {
+		error = "Enter a message before sending.";
+		textarea?.focus();
+		return null;
 	}
-	error = "Enter a message before sending.";
+	if (refused([value])) return null;
+	error = "";
+	return value;
+}
+
+function refused(parts: readonly string[]): boolean {
+	const reason = parts
+		.map((part) => checkText(part))
+		.find((found) => found !== undefined);
+	if (reason === undefined) return false;
+	error =
+		reason === "disallowed_control"
+			? "The message holds a NUL character. Remove it before sending."
+			: "The message holds an incomplete character. Retype it before sending.";
 	textarea?.focus();
-	return null;
+	return true;
 }
 
 function clearDraft(): void {
@@ -376,7 +391,7 @@ function onPaste(event: ClipboardEvent): void {
 		for (const file of images) void attachImage(file);
 		return;
 	}
-	const pasted = data.getData("text/plain").replace(/\r\n?/g, "\n");
+	const pasted = newlinesToLF(data.getData("text/plain"));
 	const body = pasted.endsWith("\n") ? pasted.slice(0, -1) : pasted;
 	const lines = body.split("\n").length;
 	if (lines < PASTE_CHIP_LINES) return;
@@ -389,13 +404,14 @@ function sendDraft(): void {
 	if (typed === null) return;
 	const attachments = attachmentsOf(chips);
 	if (
-		typed === "" &&
+		isBlank(typed) &&
 		attachments.texts.length === 0 &&
 		attachments.images.length === 0
 	) {
 		validText();
 		return;
 	}
+	if (refused([typed, ...attachments.texts])) return;
 	if (messageBytes(typed, attachments) > MAX_MESSAGE_BYTES) {
 		error =
 			"The message and images are too large to send together. Remove an image.";
@@ -408,7 +424,7 @@ function sendDraft(): void {
 }
 
 function runShell(command: string): void {
-	if (command === "") {
+	if (isBlank(command)) {
 		error = "Enter a command after !.";
 		return;
 	}
@@ -435,7 +451,7 @@ function submitPrimary(): void {
 	}
 	if (running) {
 		const value = validText();
-		if (!value) return;
+		if (value === null) return;
 		onSteer(value);
 		clearDraft();
 		return;
@@ -450,7 +466,7 @@ function queueFollowup(): void {
 	}
 	if (parsed.kind === "command") return;
 	const value = validText();
-	if (!value) return;
+	if (value === null) return;
 	onFollowup(value);
 	clearDraft();
 }

@@ -6,12 +6,11 @@ import (
 	"math"
 	"slices"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (m *model) executeSlash(name, argument string) tea.Cmd {
@@ -245,32 +244,52 @@ const (
 	slashUnknown
 )
 
-func parseSlash(text string) (name, arg string, kind slashKind) {
-	if prompt, ok := strings.CutPrefix(text, "//"); ok {
-		return "", "/" + prompt, slashPrompt
+func (c editor) slashParts() (name, arg string, kind slashKind) {
+	start := slashStart(c.text)
+	if start < 0 {
+		return "", c.Expanded(), slashPrompt
 	}
-	name, arg, _ = strings.Cut(strings.TrimPrefix(text, "/"), " ")
+	body := c.text[start+1:]
+	if len(body) > 0 && body[0] == '/' {
+		return "", c.expand(slices.Concat(c.text[:start], body)), slashPrompt
+	}
+	end := slices.IndexFunc(body, c.tokenBreak)
+	if end < 0 {
+		end = len(body)
+	}
+	name = string(body[:end])
 	switch {
 	case strings.Contains(name, "/"):
-		return "", text, slashPrompt
-	case slices.ContainsFunc(commands, func(c command) bool { return c.name == name }):
-		return name, strings.TrimSpace(arg), slashCommand
-	default:
+		return "", c.Expanded(), slashPrompt
+	case !slices.ContainsFunc(commands, func(c command) bool { return c.name == name }):
 		return name, "", slashUnknown
 	}
+	rest, ok := slashArgument(body[end:])
+	if !ok {
+		return name, "", slashUnknown
+	}
+	return name, c.expand(rest), slashCommand
 }
 
-func (c editor) slashParts() (name, arg string, kind slashKind) {
-	text := strings.TrimSpace(c.Value())
-	if name, arg, kind = parseSlash(text); kind != slashUnknown {
-		return name, arg, kind
+func slashArgument(rest []rune) ([]rune, bool) {
+	switch {
+	case len(rest) == 0:
+		return nil, true
+	case rest[0] == ' ':
+		rest = rest[1:]
+	case textinput.IsWhiteSpace(rest[0]):
+		return nil, false
 	}
-	end := strings.IndexFunc(text, c.tokenBreak)
-	if end < 0 {
-		return name, arg, kind
+	if textinput.Blank(string(rest)) {
+		return nil, true
 	}
-	if r, _ := utf8.DecodeRuneInString(text[end:]); unicode.IsSpace(r) {
-		return name, arg, kind
+	return rest, true
+}
+
+func slashStart(text []rune) int {
+	start := slices.IndexFunc(text, func(r rune) bool { return !textinput.IsWhiteSpace(r) })
+	if start < 0 || text[start] != '/' {
+		return -1
 	}
-	return parseSlash(text[:end] + " " + text[end:])
+	return start
 }

@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type loginPhase int
@@ -278,7 +279,7 @@ func (m *model) apiKeyKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.login.phase = loginMethods
 		m.login.cursor = 0
 	default:
-		if m.input.field.edit(key) || (msg.Text != "" && m.input.field.insert(msg.Text)) {
+		if m.input.field.edit(key) || (msg.Text != "" && m.typeIntoField(msg.Text)) {
 			m.login.err = ""
 		}
 	}
@@ -318,8 +319,8 @@ func (m *model) startLogin(method loginMethod) tea.Cmd {
 }
 
 func (m *model) submitAPIKey() tea.Cmd {
-	key := strings.TrimSpace(m.input.field.value())
-	if key == "" {
+	key := m.input.field.value()
+	if textinput.Blank(key) {
 		m.login.err = "Enter the API key."
 		return nil
 	}

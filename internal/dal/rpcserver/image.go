@@ -102,21 +102,32 @@ func imageReadError(path string, err error) error {
 	return internalError(fmt.Errorf("cannot read image %s: %w", path, err))
 }
 
-func (p *turnParams) takeImage(load func(admit func(int64) error) (agent.Image, error)) {
+type imageLoad func(admit func(int64) error) (agent.Image, error)
+
+func (p *turnParams) queueImage(load imageLoad) {
 	if p.imageErr != nil {
 		return
 	}
-	if len(p.images) == event.MaxImages {
+	if len(p.loads) == event.MaxImages {
 		p.imageErr = invalidParams(fmt.Sprintf("a request takes at most %d images, got %d", event.MaxImages, event.MaxImages+1))
 		return
 	}
-	image, err := load(p.admit)
-	if err != nil {
-		p.imageErr = err
-		return
+	p.loads = append(p.loads, load)
+}
+
+func (p *turnParams) loadImages() {
+	for _, load := range p.loads {
+		if p.imageErr != nil {
+			return
+		}
+		image, err := load(p.admit)
+		if err != nil {
+			p.imageErr = err
+			return
+		}
+		p.images = append(p.images, image)
+		p.imageBytes += int64(len(image.Data))
 	}
-	p.images = append(p.images, image)
-	p.imageBytes += int64(len(image.Data))
 }
 
 func (p *turnParams) admit(size int64) error {

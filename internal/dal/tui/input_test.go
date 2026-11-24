@@ -285,17 +285,6 @@ func TestShortPasteWithCRKeepsLineBreaks(t *testing.T) {
 	}
 }
 
-func TestPasteIntoFilterSplitsLinesAtCarriageReturn(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{"one\rtwo", "one\r\ntwo"} {
-		m := openModelPicker(t, new(fakeCaller))
-		m, _ = drive(t, m, tea.PasteMsg{Content: in})
-		if got := m.input.field.value(); got != "one" {
-			t.Fatalf("%q: filter holds %q, want the first line only", in, got)
-		}
-	}
-}
-
 func TestChipPromptIsSentUnchangedWhenSlashLike(t *testing.T) {
 	for _, first := range []string{"// x", "/model foo"} {
 		caller := new(fakeCaller)
@@ -344,40 +333,47 @@ func TestOversizePasteRefused(t *testing.T) {
 	}
 }
 
-func TestPasteIntoFilterKeepsFirstLine(t *testing.T) {
-	t.Parallel()
-	m := openModelPicker(t, new(fakeCaller))
-	m, _ = drive(t, m, tea.PasteMsg{Content: "one\ntwo"})
-	if got := m.input.field.value(); got != "one" {
-		t.Fatalf("filter holds %q, want the first line only", got)
-	}
-}
-
-func TestPasteIntoTheOtherOneLineFieldsKeepsTheFirstLine(t *testing.T) {
+func TestOneLineFieldsRefuseAWholePasteWithALineBreak(t *testing.T) {
 	t.Parallel()
 	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
 		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
 	tests := []struct {
 		name  string
+		field string
 		model func(*testing.T) model
 	}{
-		{"api key", func(t *testing.T) model {
+		{"filter", "Filter", func(t *testing.T) model { return openModelPicker(t, new(fakeCaller)) }},
+		{"api key", "API key", func(t *testing.T) model {
 			m := openLoginPanel(t, new(fakeCaller), "openai")
 			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 			return m
 		}},
-		{"answer line", func(t *testing.T) model {
+		{"answer line", "Answer", func(t *testing.T) model {
 			m, _ := openQuestion(t, free)
 			return m
 		}},
 	}
+	refusals := map[string]string{
+		"one\rtwo": "takes one line", "one\r\ntwo": "takes one line", "one\ntwo": "takes one line",
+		"one\vtwo": "takes one line", "one\ftwo": "takes one line", "one\u0085two": "takes one line",
+		"one\u2028two": "takes one line", "one\u2029two": "takes one line", "one\x00two": "cannot hold NUL",
+		"one\xfftwo": "needs valid UTF-8",
+	}
 	for _, tt := range tests {
-		for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
-			m := tt.model(t)
+		for in, reason := range refusals {
+			m := typeKeys(t, tt.model(t), "ke")
 			m, _ = drive(t, m, tea.PasteMsg{Content: in})
-			if got := m.input.field.value(); got != "one" {
-				t.Fatalf("%s: paste %q left %q, want the first line only", tt.name, in, got)
+			if got := m.input.field.value(); got != "ke" {
+				t.Fatalf("%s: paste %q left %q, want the earlier text only", tt.name, in, got)
 			}
+			if want := tt.field + " " + reason + "; nothing was inserted"; m.notice != want {
+				t.Fatalf("%s: paste %q gave notice %q, want %q", tt.name, in, m.notice, want)
+			}
+		}
+		m := typeKeys(t, tt.model(t), "ke")
+		m, _ = drive(t, m, tea.PasteMsg{Content: " y\u00a0\u200d\ue000 "})
+		if got, want := m.input.field.value(), "ke y\u00a0\u200d\ue000 "; got != want {
+			t.Fatalf("%s: one-line paste left %q, want %q", tt.name, got, want)
 		}
 	}
 }

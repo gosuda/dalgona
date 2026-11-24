@@ -7,11 +7,11 @@ import (
 	"io"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const resumeSearchDelay = 300 * time.Millisecond
@@ -61,11 +61,9 @@ func (m *model) resumeQuery() string {
 	if m.textMode() != inputFilter || m.conn.lost != "" || m.review != nil {
 		return ""
 	}
-	query := strings.TrimSpace(m.input.field.value())
-	for word := range strings.FieldsSeq(query) {
-		if utf8.RuneCountInString(word) < 3 {
-			return ""
-		}
+	query := m.input.field.value()
+	if !textinput.SearchEligible(query) {
+		return ""
 	}
 	return query
 }

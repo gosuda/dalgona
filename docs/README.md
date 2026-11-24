@@ -125,6 +125,7 @@ Each decision file states its Invariant, Scope, and Enforcement. It MAY end with
 - [RPC file search](dal/decisions/rpc-file-search.md): workspace file listing through search tool walker.
 - [RPC thread search](dal/decisions/rpc-thread-search.md): thread text search through the journal mirror index.
 - [Shell argument parser](dal/decisions/shell-argument-parser.md): one neutral command splitter and token reader for core packages.
+- [Text input package](dal/decisions/text-input.md): one pinned Unicode 18 segmenter and field check for Go and the web client.
 
 ### Batteries (dalgona)
 

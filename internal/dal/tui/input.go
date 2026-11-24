@@ -3,13 +3,14 @@ package tui
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -21,9 +22,10 @@ const (
 const shellPlaceholder = "Shell · enter runs · esc leaves"
 
 const (
-	pasteChipLines = 10
-	pasteLimit     = 1 << 20
-	chipRuneBase   = 0xF0000
+	pasteChipLines  = 10
+	pasteLimit      = 1 << 20
+	chipAtomBase    = utf8.MaxRune + 1
+	chipPlaceholder = "\ufffc"
 )
 
 type chip struct {
@@ -49,27 +51,24 @@ const (
 type textField struct {
 	text   []rune
 	cursor int
+	limit  int
 }
 
 func (f textField) value() string {
 	return string(f.text)
 }
 
-var pasteLineBreaks = strings.NewReplacer("\r\n", "\n", "\r", "\n")
-
-func (f *textField) pasteLine(text string) bool {
-	first, _, _ := strings.Cut(pasteLineBreaks.Replace(text), "\n")
-	return f.insert(first)
-}
-
-func (f *textField) insert(text string) bool {
-	runes := []rune(sanitizeText(text))
-	if len(runes) == 0 {
-		return false
+func (f *textField) insert(text string) error {
+	if err := (textinput.Field{Name: "field", SingleLine: true}).Check(text); err != nil {
+		return err
+	}
+	runes := []rune(text)
+	if f.limit > 0 && len(f.text)+len(runes) > f.limit {
+		return &textinput.Error{Field: "field", Reason: textinput.TextTooLarge}
 	}
 	f.text = slices.Insert(f.text, f.cursor, runes...)
 	f.cursor += len(runes)
-	return true
+	return nil
 }
 
 func (f *textField) edit(key string) bool {
@@ -97,32 +96,42 @@ func (f *textField) edit(key string) bool {
 	return false
 }
 
+func isChipAtom(r rune) bool { return r >= chipAtomBase }
+
+func textSegment(text []rune, at int) (int, int) {
+	start, end := at, at
+	for start > 0 && !isChipAtom(text[start-1]) {
+		start--
+	}
+	for end < len(text) && !isChipAtom(text[end]) {
+		end++
+	}
+	return start, end
+}
+
 func prevClusterRuneIndex(text []rune, cursor int) int {
 	if cursor <= 0 {
 		return 0
 	}
-	prefix := string(text[:cursor])
-	pos, last := 0, 0
-	for pos < len(prefix) {
-		cluster, _ := ansi.FirstGraphemeCluster(prefix[pos:], ansi.GraphemeWidth)
-		if len(cluster) == 0 {
-			break
-		}
-		last = len(cluster)
-		pos += last
-	}
-	if last == 0 {
+	if isChipAtom(text[cursor-1]) {
 		return cursor - 1
 	}
-	return cursor - utf8.RuneCountInString(prefix[pos-last:pos])
+	start, _ := textSegment(text, cursor)
+	prefix := string(text[start:cursor])
+	return start + utf8.RuneCountInString(prefix[:textinput.PrevBoundary(prefix, len(prefix))])
 }
 
 func nextClusterRuneIndex(text []rune, cursor int) int {
 	if cursor >= len(text) {
 		return len(text)
 	}
-	cluster, _ := ansi.FirstGraphemeCluster(string(text[cursor:]), ansi.GraphemeWidth)
-	return cursor + utf8.RuneCountInString(cluster)
+	if isChipAtom(text[cursor]) {
+		return cursor + 1
+	}
+	start, end := textSegment(text, cursor)
+	segment := string(text[start:end])
+	at := len(string(text[start:cursor]))
+	return cursor + utf8.RuneCountInString(segment[at:textinput.NextBoundary(segment, at)])
 }
 
 func inputLabel(mode inputMode) string {
@@ -160,10 +169,24 @@ func newEditor() editor {
 type editorRow struct {
 	text            string
 	start, end, col int
+	chip            int
+	source          []int
 }
 
 func (c editor) Value() string {
-	return string(c.text)
+	return layoutText(c.text)
+}
+
+func layoutText(runes []rune) string {
+	var out strings.Builder
+	for _, r := range runes {
+		if isChipAtom(r) {
+			out.WriteString(chipPlaceholder)
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
 }
 
 func (c *editor) SetValue(value string) {
@@ -191,7 +214,7 @@ func (c *editor) settleVerbatim() {
 }
 
 func (c editor) readsSlash() bool {
-	return !c.verbatim() && strings.HasPrefix(strings.TrimSpace(c.Value()), "/")
+	return !c.verbatim() && slashStart(c.text) >= 0
 }
 
 func (c editor) sendsPastedSlash(text string) bool {
@@ -213,15 +236,20 @@ func editorCells(width int) int {
 
 func (c editor) rows(s *screenState, width int) []editorRow {
 	var rows []editorRow
-	offset := 0
-	for line := range strings.SplitSeq(c.Value(), "\n") {
+	offset, start := 0, 0
+	for i := 0; i <= len(c.text); i++ {
+		if i < len(c.text) && c.text[i] != '\n' {
+			continue
+		}
+		line := c.text[start:i]
 		rows = append(rows, c.lineRows(s, line, offset, editorCells(width))...)
-		offset += len(line) + 1
+		offset += len(layoutText(line)) + 1
+		start = i + 1
 	}
 	return rows
 }
 
-func (c editor) lineRows(s *screenState, line string, offset, cell int) []editorRow {
+func (c editor) lineRows(s *screenState, line []rune, offset, cell int) []editorRow {
 	var rows []editorRow
 	start := 0
 	for i, r := range line {
@@ -229,29 +257,60 @@ func (c editor) lineRows(s *screenState, line string, offset, cell int) []editor
 			continue
 		}
 		if start < i {
-			rows = append(rows, c.textRows(s, line[start:i], offset+start, cell)...)
+			rows = append(rows, c.textRows(s, string(line[start:i]), offset, cell)...)
+			offset += len(string(line[start:i]))
 		}
-		size := utf8.RuneLen(r)
-		rows = append(rows, editorRow{text: line[i : i+size], start: offset + i, end: offset + i + size})
-		start = i + size
+		rows = append(rows, editorRow{start: offset, end: offset + len(chipPlaceholder), chip: int(r - chipAtomBase)})
+		offset += len(chipPlaceholder)
+		start = i + 1
 	}
 	if start < len(line) || len(rows) == 0 {
-		rows = append(rows, c.textRows(s, line[start:], offset+start, cell)...)
+		rows = append(rows, c.textRows(s, string(line[start:]), offset, cell)...)
 	}
 	return rows
 }
 
 func (c editor) textRows(s *screenState, line string, offset, cell int) []editorRow {
-	ranges := s.wrapRanges(line, cell)
+	shown, source := editableText(line)
+	ranges := s.wrapRanges(shown, cell)
 	rows := make([]editorRow, len(ranges))
 	for i, r := range ranges {
-		rows[i] = editorRow{text: line[r.start:r.end], start: offset + r.start, end: offset + r.end, col: r.col}
+		marks := make([]int, r.end-r.start+1)
+		for j := range marks {
+			marks[j] = offset + source[r.start+j]
+		}
+		rows[i] = editorRow{text: shown[r.start:r.end], start: marks[0], end: marks[len(marks)-1], col: r.col, chip: -1, source: marks}
 	}
 	return rows
 }
 
+func editableText(line string) (string, []int) {
+	var shown strings.Builder
+	source := make([]int, 0, len(line)+1)
+	for i, r := range line {
+		piece := textinput.EditableRune(r)
+		shown.WriteString(piece)
+		if piece == string(r) {
+			for j := range len(piece) {
+				source = append(source, i+j)
+			}
+			continue
+		}
+		source = append(source, i)
+		for range len(piece) - 1 {
+			source = append(source, i+utf8.RuneLen(r))
+		}
+	}
+	return shown.String(), append(source, len(line))
+}
+
+func (row editorRow) shownAt(at int) int {
+	index := sort.Search(len(row.source), func(i int) bool { return row.source[i] > at }) - 1
+	return min(max(index, 0), len(row.text))
+}
+
 func (c editor) byteCursor() int {
-	return len(string(c.text[:c.cursor]))
+	return len(layoutText(c.text[:c.cursor]))
 }
 
 func caretRow(rows []editorRow, at int) int {
@@ -275,16 +334,15 @@ func (c editor) cellsBefore(s *screenState, row editorRow, at int) int {
 		}
 		return 0
 	}
-	n := min(max(at-row.start, 0), len(row.text))
-	return s.cellsFrom(row.text[:n], row.col)
+	return s.cellsFrom(row.text[:row.shownAt(at)], row.col)
 }
 
 func localSpans(spans []keywordSpan, row editorRow) []keywordSpan {
 	var out []keywordSpan
 	for _, span := range spans {
 		start, end := max(span.start, row.start), min(span.end, row.end)
-		if start < end {
-			out = append(out, keywordSpan{start: start - row.start, end: end - row.start})
+		if start < end && row.chip < 0 {
+			out = append(out, keywordSpan{start: row.shownAt(start), end: row.shownAt(end)})
 		}
 	}
 	return out
@@ -343,7 +401,7 @@ func (c *editor) updateKey(s *screenState, msg tea.KeyPressMsg) {
 		return
 	}
 	if msg.Text != "" {
-		c.insert([]rune(sanitizeText(msg.Text)))
+		c.insert([]rune(textinput.NewlinesToLF(msg.Text)))
 	}
 }
 
@@ -417,19 +475,17 @@ func (c editor) runeAt(s *screenState, row editorRow, col int) int {
 		}
 		return utf8.RuneCountInString(c.Value()[:row.end])
 	}
+	value := c.Value()
+	source := value[row.start:row.end]
 	offset := 0
-	for offset < len(row.text) {
-		cluster, _ := ansi.FirstGraphemeCluster(row.text[offset:], s.method)
-		if len(cluster) == 0 {
-			break
-		}
-		next := offset + len(cluster)
-		if s.cellsFrom(row.text[:next], row.col) > col {
+	for offset < len(source) {
+		next := textinput.NextBoundary(source, offset)
+		if s.cellsFrom(row.text[:row.shownAt(row.start+next)], row.col) > col {
 			break
 		}
 		offset = next
 	}
-	return utf8.RuneCountInString(c.Value()[:row.start+offset])
+	return utf8.RuneCountInString(value[:row.start+offset])
 }
 
 func (c editor) lineStart() int {
@@ -450,10 +506,10 @@ func (c editor) lineEnd() int {
 
 func (c editor) wordStart() int {
 	i := c.cursor
-	for i > 0 && unicode.IsSpace(c.text[i-1]) {
+	for i > 0 && textinput.IsWhiteSpace(c.text[i-1]) {
 		i--
 	}
-	for i > 0 && !unicode.IsSpace(c.text[i-1]) {
+	for i > 0 && !textinput.IsWhiteSpace(c.text[i-1]) {
 		i--
 	}
 	return i
@@ -461,10 +517,10 @@ func (c editor) wordStart() int {
 
 func (c editor) wordEnd() int {
 	i := c.cursor
-	for i < len(c.text) && unicode.IsSpace(c.text[i]) {
+	for i < len(c.text) && textinput.IsWhiteSpace(c.text[i]) {
 		i++
 	}
-	for i < len(c.text) && !unicode.IsSpace(c.text[i]) {
+	for i < len(c.text) && !textinput.IsWhiteSpace(c.text[i]) {
 		i++
 	}
 	return i
@@ -525,8 +581,8 @@ func (c *editor) moveRight() {
 }
 
 func chipAtom(index int) rune {
-	atom := rune(chipRuneBase)
-	for range index + 1 {
+	atom := rune(chipAtomBase)
+	for range index {
 		atom++
 	}
 	return atom
@@ -537,11 +593,8 @@ func chipLabel(number int, text string) string {
 }
 
 func (c editor) chipOf(r rune) (chip, bool) {
-	if r > 0xFFFFD {
-		return chip{}, false
-	}
-	index := int(r) - chipRuneBase - 1
-	if index < 0 || index >= len(c.chips) {
+	index := int(r - chipAtomBase)
+	if !isChipAtom(r) || index >= len(c.chips) {
 		return chip{}, false
 	}
 	return c.chips[index], true
@@ -555,11 +608,10 @@ func (c editor) hasTypedText() bool {
 }
 
 func (c editor) chipRow(row editorRow) (chip, bool) {
-	r, size := utf8.DecodeRuneInString(row.text)
-	if size == 0 || size != len(row.text) {
+	if row.chip < 0 {
 		return chip{}, false
 	}
-	return c.chipOf(r)
+	return c.chipOf(chipAtom(row.chip))
 }
 
 func (c editor) display(runes []rune) string {
@@ -569,7 +621,7 @@ func (c editor) display(runes []rune) string {
 			out.WriteString(ch.label)
 			continue
 		}
-		out.WriteRune(r)
+		out.WriteString(textinput.EditableRune(r))
 	}
 	return out.String()
 }
@@ -583,12 +635,12 @@ func (c editor) firstLine() string {
 }
 
 func (c editor) Expanded() string {
-	return c.expand(c.Value())
+	return c.expand(c.text)
 }
 
-func (c editor) expand(text string) string {
+func (c editor) expand(runes []rune) string {
 	var out strings.Builder
-	for _, r := range text {
+	for _, r := range runes {
 		if ch, ok := c.chipOf(r); ok {
 			out.WriteString(ch.text)
 			continue
@@ -599,7 +651,7 @@ func (c editor) expand(text string) string {
 }
 
 func (c *editor) paste(text string) {
-	text = sanitizeText(pasteLineBreaks.Replace(text))
+	text = textinput.NewlinesToLF(text)
 	if strings.Count(text, "\n")+1 < pasteChipLines {
 		c.insert([]rune(text))
 		return
