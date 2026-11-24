@@ -2,6 +2,7 @@ import os
 import pathlib
 import re
 import sys
+from collections.abc import Iterator
 
 EXCLUDED = {
     ".git", ".references", "node_modules", ".svelte-kit", ".outline",
@@ -14,7 +15,7 @@ LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 REF_RE = re.compile(r"(?m)^\[[^\]]+\]:\s*(\S+)")
 
 
-def heading_id(text, seen):
+def heading_id(text: str, seen: dict[str, int]) -> str:
     base = re.sub(r"[^\w\s-]", "", text.lower()).strip().replace(" ", "-")
     base = re.sub(r"-+", "-", base)
     n = seen.get(base, 0)
@@ -24,7 +25,7 @@ def heading_id(text, seen):
     return f"{base}-{n}"
 
 
-def heading_ids(path):
+def heading_ids(path: pathlib.Path) -> set[str]:
     ids = set()
     seen = {}
     try:
@@ -37,7 +38,7 @@ def heading_ids(path):
             ids.add(heading_id(m.group(1).strip(), seen))
     return ids
 
-def iter_markdown(root):
+def iter_markdown(root: pathlib.Path) -> Iterator[pathlib.Path]:
     for path in root.rglob("*.md"):
         if any(part in EXCLUDED for part in path.parts):
             continue
@@ -47,7 +48,7 @@ def iter_markdown(root):
         yield path
 
 
-def prose_lines(path):
+def prose_lines(path: pathlib.Path) -> list[str]:
     lines = []
     in_fence = False
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -63,7 +64,7 @@ def prose_lines(path):
 
 
 
-def local_targets(path):
+def local_targets(path: pathlib.Path) -> list[tuple[int, str]]:
     out = []
     for i, line in enumerate(prose_lines(path), 1):
         for m in LINK_RE.finditer(line):
@@ -75,15 +76,15 @@ def local_targets(path):
     return out
 
 
-def is_remote(target):
+def is_remote(target: str) -> bool:
     return "://" in target or target.startswith("mailto:")
 
 
-def is_placeholder(target):
+def is_placeholder(target: str) -> bool:
     return "<" in target or ">" in target
 
 
-def check(root):
+def check(root: pathlib.Path) -> list[str]:
     errors = []
     cache = {}
     for path in sorted(iter_markdown(root)):
@@ -115,7 +116,7 @@ def check(root):
     return errors
 
 
-def main():
+def main() -> int:
     root = pathlib.Path(".")
     errors = check(root)
     for error in errors:
