@@ -49,27 +49,17 @@ func configureSandbox(cmd *exec.Cmd, _ string, sandbox Sandbox) error {
 	if len(sandbox.DeniedSockets) != 0 {
 		return fmt.Errorf("runner: Windows network confinement is unavailable")
 	}
-	roots, err := windowsWritableRoots(cmd.Dir, sandbox)
+	roots, err := windowsWritableRoots(sandbox)
 	if err != nil {
 		return err
 	}
 	return confineWindowsCommand(cmd, roots)
 }
 
-func windowsWritableRoots(cwd string, sandbox Sandbox) ([]string, error) {
+func windowsWritableRoots(sandbox Sandbox) ([]string, error) {
 	switch sandbox.Mode {
 	case SandboxWorkspaceWrite:
-		if cwd == "" {
-			var err error
-			cwd, err = os.Getwd()
-			if err != nil {
-				return nil, fmt.Errorf("runner: resolve command directory: %w", err)
-			}
-		}
-		input := make([]string, 0, len(sandbox.WritableRoots)+1)
-		input = append(input, cwd)
-		input = append(input, sandbox.WritableRoots...)
-		return resolveRoots(input)
+		return resolveRoots(sandbox.WritableRoots)
 	case SandboxOff, SandboxMode("read-only"):
 		return nil, nil
 	default:

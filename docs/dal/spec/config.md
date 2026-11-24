@@ -85,7 +85,7 @@ The `[daltoki]` table configures the Daltoki coordinator service. It MUST be dal
 | `concurrency` | `2` | Maximum concurrent owned graphs |
 | `jobs_per_day` | `20` | Admission cap per UTC day |
 | `model` | `""` | Model used for triage and fix graphs |
-| `profile` | `"daltoki"` | Home profile for coordinator runs |
+| `profile` | `"hashline-light"` | Home profile for coordinator runs |
 | `job_token_limit` | `100000` | Token reservation cap per job |
 | `daily_token_limit` | `500000` | Token reservation cap per UTC day |
 | `job_cost_limit_usd_micros` | `5000000` | Cost reservation cap per job |
@@ -127,7 +127,70 @@ The top-level `tls_ca_file` key names a PEM file of certificate authorities. Its
 
 A local `login` for an OAuth provider or with `--device-auth` MUST install `tls_ca_file` before its first request. The `models` command sends its request through the host. The host MUST install the setting when it loads its configuration. A `logout` and an API-key `login` send no request and do not read the setting.
 
-A `[remotes.<name>]` table records a daemon in a box (Mode B, see `runners.md`). Its keys are `service`, `image`, `template`, `url`, and `box_id`. Each key MUST merge across layers on its own. A key present in a later layer MUST replace the earlier value, including an empty string. An absent key MUST keep the earlier value. Other keys inside the table MUST fail loading as unknown keys.
+A `[remotes.<name>]` table records a box daemon, legacy daemon relay, SSH machine, or paired device.
+Its keys are `kind`, `service`, `image`, `template`, `url`, `box_id`, `token_file`, `ssh_destination`, `ssh_platform`, `ssh_install`, `machine_id`, and `public_key_pin`.
+The `kind` value MUST be `box`, `daemon`, `ssh`, or `device`, with `box` as the default.
+A `box` remote follows Mode B in [runners.md](../../dalgona/spec/runners.md#mode-b-the-daemon-in-a-box).
+A `daemon` remote MUST set `url` and `token_file`.
+It MUST NOT set `service`, `image`, `template`, or `box_id`.
+A `box` remote MUST NOT set `token_file`.
+Each key MUST merge across layers on its own.
+A key present in a later layer MUST replace the earlier value, including an empty string.
+An absent key MUST keep the earlier value.
+Other keys inside the table MUST fail loading as unknown keys.
+
+An `ssh` remote MUST set `ssh_destination`, `ssh_platform`, and `machine_id`.
+The destination MUST be an OpenSSH host alias or `user@host`.
+The platform MUST be `linux`, `darwin`, or `windows`.
+The machine identity MUST contain exactly 64 lowercase hexadecimal characters.
+An optional `ssh_install` MUST contain the SHA-256 digest that selects the installed artifact.
+An empty `ssh_install` MUST select the trusted installed CLI on the remote path.
+SSH remotes MUST NOT set box settings, relay settings, or a public-key pin.
+Onboarding MUST establish the machine binding before it publishes this configuration.
+
+A `device` remote MUST set `url`, `token_file`, `machine_id`, and `public_key_pin`.
+The URL MUST be a canonical HTTPS origin without a path, user information, query, or fragment.
+The machine identity and public-key pin MUST each contain exactly 64 lowercase hexadecimal characters.
+Device remotes MUST NOT set box or SSH settings.
+The device token file MUST contain a JSON-encoded bearer string.
+The client MUST validate that file's ownership, type, permissions, size, and content at each dial.
+A missing or invalid device token file MUST fail only that endpoint's connection.
+It MUST NOT prevent local use or select the legacy daemon transport.
+
+A daemon remote `url` MUST use `https` or `wss` and include a host.
+It MUST NOT contain user information, a query, or a fragment.
+The client MUST join `/rpc` to the configured URL path.
+Both schemes select the same TLS-protected relay transport.
+
+A relative `token_file` path MUST resolve against the product home.
+The token file MUST be a regular file and MUST NOT be a symlink.
+On non-Windows systems, the token file MUST NOT have group or other permission bits.
+A daemon token file MUST contain at most 4096 bytes and a nonempty token after trimming whitespace.
+`Load` MUST validate these file rules for a daemon remote.
+Device token files MUST retain the same file safety and size limits at dial time.
+The endpoint session MUST reread `token_file` at every dial.
+Clients MUST use TLS 1.3 as the minimum version and trust the system pool plus `tls_ca_file` when set.
+They MUST send the token in the `Authorization` header and MUST NOT expose it through a URL, log, or GUI restore state.
+
+Reported errors MUST append these exact message bodies to the configuration file and line origin:
+
+```text
+remotes.<n>.kind must be one of box, daemon, ssh, device
+remotes.<n>: a daemon remote takes only kind, url, and token_file
+remotes.<n>.url must be an https:// or wss:// URL with a host and no user info, query, or fragment
+remotes.<n>.token_file is required for a daemon remote
+remotes.<n>.token_file applies only to kind = "daemon" or "device"
+```
+
+Reported `token_file` errors MUST use one of the following exact message bodies:
+
+```text
+remotes.<n>.token_file <path>: no such file
+remotes.<n>.token_file <path>: not a regular file
+remotes.<n>.token_file <path>: group or others have access; run chmod 600 <path>
+remotes.<n>.token_file <path>: larger than 4096 bytes
+remotes.<n>.token_file <path>: holds no token
+```
 
 A `[models."<provider>/<model>"]` table sets values for one model. Its keys are `context_window`, `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`, and `cache_write_usd_per_mtok`. Each key MUST merge across layers on its own. An absent key MUST keep the earlier value.
 

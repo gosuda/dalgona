@@ -2,13 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
@@ -17,9 +17,12 @@ import (
 
 const (
 	execExitTimeout = 124
-	execStopGrace   = 5 * time.Second
+	execStopGrace   = 4 * time.Second
+	execSignalLimit = 500 * time.Millisecond
 	execPoll        = 20 * time.Millisecond
 )
+
+var errExecTimedOut = errors.New("agent: execution deadline reached")
 
 type ExecSpec struct {
 	Argv      []string
@@ -91,71 +94,85 @@ func execEnvironment(base []string, overrides map[string]*string) []string {
 	return env
 }
 
+type execCollector struct {
+	run    runner.Runner
+	id     string
+	spec   ExecSpec
+	offset int64
+	result ExecResult
+}
+
 func collectExec(ctx context.Context, run runner.Runner, id string, spec ExecSpec) (ExecResult, error) {
-	done := make(chan struct{})
-	defer close(done)
-	timedOut := stopExec(ctx, run, id, spec.Timeout, done)
-	reads := context.WithoutCancel(ctx)
-	var result ExecResult
-	var offset int64
-	timer := time.NewTimer(execPoll)
-	defer timer.Stop()
-	var grace *time.Timer
-	defer func() {
-		if grace != nil {
-			grace.Stop()
-		}
-	}()
+	collector := execCollector{run: run, id: id, spec: spec}
+	running := ctx
+	if spec.Timeout > 0 {
+		var cancel context.CancelFunc
+		running, cancel = context.WithTimeoutCause(ctx, spec.Timeout, errExecTimedOut)
+		defer cancel()
+	}
+	err := collector.poll(running)
+	switch {
+	case err == nil:
+		return collector.result, nil
+	case running.Err() == nil:
+		collector.signal(context.WithoutCancel(ctx), runner.SignalKill)
+		return collector.result, err
+	}
+	if err := collector.settle(ctx); err != nil {
+		return collector.result, fmt.Errorf("agent: exec stop without confirmed exit: %w", err)
+	}
+	if errors.Is(context.Cause(running), errExecTimedOut) {
+		collector.result.TimedOut = true
+		collector.result.ExitCode = execExitTimeout
+	}
+	return collector.result, nil
+}
+
+func (c *execCollector) poll(ctx context.Context) error {
+	ticker := time.NewTicker(execPoll)
+	defer ticker.Stop()
 	for {
-		out, err := run.Read(reads, id, offset)
+		out, err := c.run.Read(ctx, c.id, c.offset)
 		if err != nil {
-			_ = run.Signal(reads, id, runner.SignalKill)
-			return result, fmt.Errorf("agent: exec read: %w", err)
+			return fmt.Errorf("agent: exec read: %w", err)
 		}
-		offset = out.Next
-		result.keep(out.Data, spec.OutputCap, spec.OnOutput)
+		c.offset = out.Next
+		c.result.keep(out.Data, c.spec.OutputCap, c.spec.OnOutput)
 		if out.Exit != nil {
-			return finishExec(result, out.Exit.Code, timedOut), nil
-		}
-		if err := awaitPoll(ctx, timer, &grace); err != nil {
-			_ = run.Signal(reads, id, runner.SignalKill)
-			return result, err
-		}
-	}
-}
-
-func finishExec(result ExecResult, exitCode int, timedOut *atomic.Bool) ExecResult {
-	result.ExitCode = exitCode
-	if timedOut.Load() {
-		result.TimedOut = true
-		result.ExitCode = execExitTimeout
-	}
-	return result
-}
-
-func awaitPoll(ctx context.Context, timer *time.Timer, grace **time.Timer) error {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-	timer.Reset(execPoll)
-	if *grace != nil {
-		select {
-		case <-timer.C:
+			c.result.ExitCode = out.Exit.Code
 			return nil
-		case <-(*grace).C:
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		*grace = time.NewTimer(execStopGrace + time.Second)
+}
+
+func (c *execCollector) settle(ctx context.Context) error {
+	now := time.Now()
+	deadline := now.Add(execStopGrace)
+	if requestDeadline, ok := ctx.Deadline(); ok && requestDeadline.Before(deadline) {
+		deadline = requestDeadline
+	}
+	stop, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+	defer cancel()
+	term, cancelTerm := context.WithDeadline(stop, now.Add(deadline.Sub(now)*3/4))
+	c.signal(term, runner.SignalTerm)
+	err := c.poll(term)
+	cancelTerm()
+	if err == nil {
 		return nil
 	}
+	c.signal(stop, runner.SignalKill)
+	return c.poll(stop)
+}
+
+func (c *execCollector) signal(ctx context.Context, signal runner.Signal) {
+	ctx, cancel := context.WithTimeout(ctx, execSignalLimit)
+	defer cancel()
+	_ = c.run.Signal(ctx, c.id, signal)
 }
 
 func (r *ExecResult) keep(data []byte, limit int64, sink func([]byte)) {
@@ -173,33 +190,4 @@ func (r *ExecResult) keep(data []byte, limit int64, sink func([]byte)) {
 	if sink != nil {
 		sink(data)
 	}
-}
-
-func stopExec(ctx context.Context, run runner.Runner, id string, timeout time.Duration, done <-chan struct{}) *atomic.Bool {
-	timedOut := new(atomic.Bool)
-	go func() {
-		var fire <-chan time.Time
-		if timeout > 0 {
-			timer := time.NewTimer(timeout)
-			defer timer.Stop()
-			fire = timer.C
-		}
-		select {
-		case <-done:
-			return
-		case <-ctx.Done():
-		case <-fire:
-			timedOut.Store(true)
-		}
-		stop := context.WithoutCancel(ctx)
-		_ = run.Signal(stop, id, runner.SignalTerm)
-		grace := time.NewTimer(execStopGrace)
-		defer grace.Stop()
-		select {
-		case <-done:
-		case <-grace.C:
-			_ = run.Signal(stop, id, runner.SignalKill)
-		}
-	}()
-	return timedOut
 }

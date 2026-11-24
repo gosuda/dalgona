@@ -358,3 +358,59 @@ func TestUserMessageImageValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestUserMessageImageMetadataRoundTrip(t *testing.T) {
+	t.Parallel()
+	original := event.UserMessage{
+		ItemID: "item-01", TurnID: "turn-01", Text: "what is this", Kind: "prompt",
+		Images: []event.Image{{Mime: "image/png", Path: "/work/shot.png", Name: "shot.png", AltText: "Map of the work area", Blob: event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}}},
+	}
+	assertRoundTrip(t, 0, original)
+	encoded, err := event.Encode(original)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	for _, member := range []string{`"name":"shot.png"`, `"alt_text":"Map of the work area"`} {
+		if !strings.Contains(string(encoded), member) {
+			t.Fatalf("journal form %s lacks %s", encoded, member)
+		}
+	}
+	decoded, err := event.Decode(encoded)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	message, ok := decoded.(event.UserMessage)
+	if !ok || len(message.Images) != 1 || message.Images[0].Name != "shot.png" || message.Images[0].AltText != "Map of the work area" {
+		t.Fatalf("decoded = %#v, want name and alt_text to survive", decoded)
+	}
+}
+
+func TestUserMessageImageMetadataBounds(t *testing.T) {
+	t.Parallel()
+	good := event.BlobRef{Blob: strings.Repeat("a", 64), Bytes: 12}
+	for _, tc := range []struct {
+		name   string
+		images []event.Image
+		err    string
+	}{
+		{
+			name:   "name refused",
+			images: []event.Image{{Mime: "image/png", Name: strings.Repeat("n", event.MaxImageNameBytes+1), Blob: good}},
+			err:    "images[0]: name exceeds 4096 bytes",
+		},
+		{
+			name:   "alt refused",
+			images: []event.Image{{Mime: "image/png", AltText: strings.Repeat("a", event.MaxImageAltBytes+1), Blob: good}},
+			err:    "images[0]: alt_text exceeds 4096 bytes",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			message := event.UserMessage{ItemID: "item-01", TurnID: "turn-01", Text: "x", Kind: "prompt", Images: tc.images}
+			err := message.Validate()
+			if err == nil || err.Error() != tc.err {
+				t.Fatalf("Validate = %v, want %q", err, tc.err)
+			}
+		})
+	}
+}

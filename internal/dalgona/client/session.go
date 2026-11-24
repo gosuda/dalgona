@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
+
+	"github.com/gosuda/dalgona/internal/dal/config"
 )
 
 var ErrSessionClosed = errors.New("client: session closed")
@@ -65,12 +67,32 @@ func (s *Session) Reconnect(ctx context.Context) (net.Conn, error) {
 	if s.isClosed() {
 		return nil, ErrSessionClosed
 	}
+	if s.remotes != nil {
+		return s.connectRemote(ctx)
+	}
+	conn, err := DialHome(s.endpoint.Home)
+	if err != nil {
+		return nil, err
+	}
+	return s.track(conn)
+}
+
+func (s *Session) connectRemote(ctx context.Context) (net.Conn, error) {
+	name := s.endpoint.Remote
+	spec, _ := s.remotes.configuredRemote(name)
 	var conn net.Conn
 	var err error
-	if s.remotes != nil {
-		conn, err = s.remotes.Bridge(ctx, s.endpoint.Remote)
-	} else {
-		conn, err = DialHome(s.endpoint.Home)
+	switch spec.Kind {
+	case config.RemoteSSH:
+		stream, _, dialErr := dialSSH(ctx, spec)
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		conn = pipeConn(stream)
+	case config.RemoteDevice:
+		return nil, fmt.Errorf("remote: %s is paired; connect with the terminal machine selector", name)
+	default:
+		conn, err = s.remotes.Bridge(ctx, name)
 	}
 	if err != nil {
 		return nil, err

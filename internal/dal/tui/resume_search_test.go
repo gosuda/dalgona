@@ -73,9 +73,9 @@ func TestResumeSearchOpensOlderThreadByMessage(t *testing.T) {
 		m := recentResumeList(t, client)
 		m = runResumeInput(t, m, press('서', 0, "서"))
 		m = runResumeInput(t, m, press('버', 0, "버"))
-		m = runResumeInput(t, m, tea.PasteMsg{Content: "응답\nignored"})
-		if !slices.Equal(queries, []string{"서버응답"}) {
-			t.Fatalf("searches = %v, want just the three-character query", queries)
+		m = runResumeInput(t, m, tea.PasteMsg{Content: "\uc751\ub2f5"})
+		if !slices.Equal(queries, []string{"\uc11c\ubc84\uc751\ub2f5"}) {
+			t.Fatalf("searches = %v, want just the four-character query", queries)
 		}
 		assertContains(t, stripANSI(m.View().Content), "Deploy notes", "서버응답 timed out")
 		if strings.Contains(m.View().Content, "hidden-control") {
@@ -240,6 +240,7 @@ func TestResumeSearchOnlyUsesTheVisibleFilter(t *testing.T) {
 		m = runResumeInput(t, m, tea.PasteMsg{Content: "unrelated answer"})
 		m, _ = runCommands(t, m, pending)
 		m = runResumeInput(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		m, _ = drive(t, m, requestResolved("t1", "req-1", "cancelled"))
 		if m.textMode() != inputFilter || m.input.field.value() != "" {
 			t.Fatal("dismissing the question did not restore an empty resume filter")
 		}

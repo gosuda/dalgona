@@ -62,6 +62,24 @@ type Processes interface {
 	Signal(ctx context.Context, id string, s Signal) error
 }
 
+const MaxProcessPageBytes = readPageSize
+
+func ReadProcessPage(ctx context.Context, run Processes, id string, offset, limit int64) (Output, error) {
+	type pager interface {
+		ReadPage(context.Context, string, int64, int64) (Output, error)
+	}
+	limit = clampPage(limit)
+	if paged, ok := run.(pager); ok {
+		return paged.ReadPage(ctx, id, offset, limit)
+	}
+	out, err := run.Read(ctx, id, offset)
+	if int64(len(out.Data)) > limit {
+		out.Data = out.Data[:limit]
+		out.Next = offset + limit
+	}
+	return out, err
+}
+
 type Files interface {
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	WriteFile(ctx context.Context, path string, data []byte, perm fs.FileMode) error

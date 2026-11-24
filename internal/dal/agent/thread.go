@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
@@ -17,6 +18,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/runner"
 	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/patch"
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
@@ -45,6 +47,7 @@ type Thread struct {
 	system         string
 	runner         runner.Runner
 	snapshots      *snapshot.Store
+	openGeneration uint64
 	release        func() error
 
 	inbox     chan func(*actor)
@@ -60,19 +63,22 @@ type Thread struct {
 }
 
 type actor struct {
-	t            *Thread
-	records      []event.Seqd
-	sizes        []int
-	state        event.State
-	damage       error
-	subs         map[chan Update]struct{}
-	busy         bool
-	cancel       context.CancelCauseFunc
-	approvals    map[string]*pendingApproval
-	questions    map[string]*pendingQuestion
-	questionSeq  uint64
-	autoContinue bool
-	hook         BoundaryHook
+	t                  *Thread
+	records            []event.Seqd
+	sizes              []int
+	state              event.State
+	damage             error
+	subs               map[chan Update]struct{}
+	seededSubs         map[chan Update]*atomic.Bool
+	activeDeltas       activeDeltas
+	busy               bool
+	cancel             context.CancelCauseFunc
+	approvals          map[string]*pendingApproval
+	questions          map[string]*pendingQuestion
+	questionSeq        uint64
+	autoContinue       bool
+	hook               BoundaryHook
+	interruptOperation string
 }
 
 func (h *Host) load(id string) (loadedSession, error) {
@@ -119,7 +125,7 @@ func (h *Host) openThread(ctx context.Context, loaded loadedSession, overrides O
 
 func (h *Host) openLocked(ctx context.Context, loaded loadedSession, overrides Overrides, release func() error) (*Thread, error) {
 	t := &Thread{
-		host: h, id: loaded.created.ID, created: loaded.created, snapshots: snapshot.New(),
+		host: h, id: loaded.created.ID, created: loaded.created, snapshots: snapshot.New(), openGeneration: uint64(len(loaded.records)),
 		inbox: make(chan func(*actor)), quit: make(chan struct{}), stopped: make(chan struct{}),
 		ext: baseExtension{}, release: release,
 		output: outputRelay{ch: make(chan Update, outputBuffer)},
@@ -191,12 +197,13 @@ func (t *Thread) prepare(ctx context.Context, loaded loadedSession, overrides Ov
 }
 
 type toolset struct {
-	model     string
-	byName    map[string]tool.Tool
-	specs     []model.Tool
-	names     []string
-	duplicate string
-	allowed   []string
+	model      string
+	generation uint64
+	byName     map[string]tool.Tool
+	specs      []model.Tool
+	names      []string
+	duplicate  string
+	allowed    []string
 }
 
 func (s *toolset) lookup(name string) (tool.Tool, bool) {
@@ -235,7 +242,7 @@ func (t *Thread) toolNames() []string {
 }
 
 func (t *Thread) ensureTools(ctx context.Context) error {
-	if t.currentTools() != nil {
+	if current := t.currentTools(); current != nil && current.generation == t.toolsGeneration() {
 		return nil
 	}
 	v, err := t.view(ctx)
@@ -247,14 +254,35 @@ func (t *Thread) ensureTools(ctx context.Context) error {
 }
 
 func (t *Thread) toolsFor(ctx context.Context, modelID string) (*toolset, error) {
-	if current := t.currentTools(); t.reuses(current, modelID) {
-		return current, nil
+	for {
+		current := t.currentTools()
+		generation := t.toolsGeneration()
+		if t.reuses(current, modelID, generation) {
+			return current, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		built, err := t.buildToolset(ctx, modelID, generation)
+		if err != nil {
+			if t.toolsGeneration() != generation {
+				continue
+			}
+			return nil, err
+		}
+		if published := t.publishToolset(built); published != nil {
+			return published, nil
+		}
 	}
+}
+
+func (t *Thread) buildToolset(ctx context.Context, modelID string, generation uint64) (*toolset, error) {
 	tools, err := t.buildTools(ctx, modelID)
 	if err != nil {
 		return nil, err
 	}
 	built := t.newToolset(modelID, tools)
+	built.generation = generation
 	if built.duplicate != "" {
 		return nil, fmt.Errorf("agent: duplicate tool name %q", built.duplicate)
 	}
@@ -264,28 +292,57 @@ func (t *Thread) toolsFor(ctx context.Context, modelID string) (*toolset, error)
 			return nil, err
 		}
 	}
-	t.toolsStateMu.Lock()
-	defer t.toolsStateMu.Unlock()
-	if t.reuses(t.toolset, modelID) {
-		return t.toolset, nil
-	}
-	t.toolset = built
 	return built, nil
 }
 
-func (t *Thread) reuses(set *toolset, modelID string) bool {
-	return set != nil && (t.fixedTools != nil || set.model == modelID)
+func (t *Thread) publishToolset(built *toolset) *toolset {
+	t.toolsStateMu.Lock()
+	defer t.toolsStateMu.Unlock()
+	if generation := t.toolsGeneration(); generation != built.generation {
+		return nil
+	}
+	if t.reuses(t.toolset, built.model, built.generation) {
+		return t.toolset
+	}
+	t.toolset = built
+	return built
+}
+
+func (t *Thread) reuses(set *toolset, modelID string, generation uint64) bool {
+	return set != nil && set.generation == generation && (t.fixedTools != nil || set.model == modelID)
+}
+
+func (t *Thread) toolsGeneration() uint64 {
+	if t.fixedTools != nil || t.host.cfg.ToolsGeneration == nil {
+		return 0
+	}
+	return t.host.cfg.ToolsGeneration()
 }
 
 func (t *Thread) buildTools(ctx context.Context, modelID string) ([]tool.Tool, error) {
 	if t.fixedTools != nil {
-		return t.confine(ctx, t.fixedTools)
+		return t.confine(ctx, t.withProfile(t.fixedTools))
 	}
 	built, err := t.host.cfg.Tools(ContextWithThread(ctx, t), modelID, t.created.Cwd)
 	if err != nil {
 		return nil, fmt.Errorf("agent: build tools: %w", err)
 	}
-	return t.confine(ctx, t.ext.Tools(t.withThreadTools(built)))
+	return t.confine(ctx, t.ext.Tools(t.withThreadTools(t.withProfile(built))))
+}
+
+func (t *Thread) withProfile(tools []tool.Tool) []tool.Tool {
+	if t.created.Profile == "" {
+		return tools
+	}
+	out := make([]tool.Tool, len(tools))
+	for i, item := range tools {
+		if name := item.Spec().Name; name == "patch" || name == "apply_patch" {
+			out[i] = patch.New(t.created.Profile)
+			continue
+		}
+		out[i] = item
+	}
+	return out
 }
 
 func (t *Thread) newToolset(modelID string, tools []tool.Tool) *toolset {
@@ -383,7 +440,11 @@ func (a *actor) loop() {
 		select {
 		case fn := <-a.t.inbox:
 			a.drainOutput()
-			fn(a)
+			if a.panicked(fn) {
+				a.shutdown()
+				go func() { _ = a.t.Close() }()
+				return
+			}
 		case update := <-a.t.output.ch:
 			a.publishOutput(update)
 		case <-a.t.quit:
@@ -394,6 +455,7 @@ func (a *actor) loop() {
 }
 
 func (a *actor) shutdown() {
+	a.activeDeltas.clear()
 	if a.cancel != nil {
 		a.cancel(ErrClosed)
 	}
@@ -487,9 +549,11 @@ func (a *actor) append(ctx context.Context, events ...event.Event) (uint64, erro
 		return a.head(), nil
 	}
 	if err != nil {
+		a.captureJournalFailure(ctx, err)
 		return a.head(), err
 	}
 	a.damage = fmt.Errorf("agent: append to %s: journal head %d after appending %d events at %d", a.t.id, last, len(events), a.head())
+	a.captureJournalFailure(ctx, a.damage)
 	return a.head(), a.damage
 }
 
@@ -510,6 +574,13 @@ func (a *actor) prepareAppend(events []event.Event) (event.State, [][]byte, erro
 }
 
 func (a *actor) publish(update Update) {
+	switch update.Kind {
+	case UpdateTextDelta, UpdateReasoningDelta:
+		a.rememberDelta(update)
+	case UpdateEvent:
+		a.activeDeltas.update(update.Event)
+	case UpdateApproval, UpdateExecOutput, UpdateRetryWait, UpdateQuestion, UpdateWarning:
+	}
 	for ch := range a.subs {
 		a.sendUpdate(ch, update)
 	}

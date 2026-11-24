@@ -40,8 +40,7 @@ func (h *history) saveDraft(draft editor, text string) {
 }
 
 func (h *history) record(text, turnID string, verbatim, replace bool) {
-	text = strings.TrimSpace(sanitizeText(text))
-	if text == "" || strings.Fields(text)[0] == "/login" {
+	if strings.TrimSpace(text) == "" || strings.Fields(text)[0] == "/login" {
 		return
 	}
 	verbatim = verbatim && strings.HasPrefix(text, "/")
@@ -131,6 +130,7 @@ func (h *history) newer(into *editor) bool {
 		into.text, into.chips = slices.Clone(h.draft.text), slices.Clone(h.draft.chips)
 		into.verbatimText = h.draft.verbatimText
 		into.cursor = len(into.text)
+		into.lead = into.chipsAt(into.cursor)
 		return true
 	}
 	h.recall(into)

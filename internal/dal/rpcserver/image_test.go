@@ -99,6 +99,68 @@ func TestTurnStartImageDataURL(t *testing.T) {
 	}
 }
 
+func requirePreservedTextEntry(t *testing.T, content []map[string]any) {
+	t.Helper()
+	if len(content) != 3 || fmt.Sprint(content[0]["text"]) != "what is this" {
+		t.Fatalf("user content = %+v, want text plus two images", content)
+	}
+}
+
+func requireJournalNameAndAlt(t *testing.T, messages []event.UserMessage, path string) {
+	t.Helper()
+	if len(messages) != 1 || len(messages[0].Images) != 2 {
+		t.Fatalf("user messages %+v, want one message with two images", messages)
+	}
+	if got := messages[0].Images[0]; got.Name != "shot.png" || got.AltText != "Map of the work area" || got.Path != path {
+		t.Fatalf("journal image 0 = %+v, want name shot.png and alt Map of the work area", got)
+	}
+	if got := messages[0].Images[1]; got.Name != "pasted.png" || got.AltText != "Pasted diagram" {
+		t.Fatalf("journal image 1 = %+v, want name pasted.png and alt Pasted diagram", got)
+	}
+}
+
+func requireWireNameAndAlt(t *testing.T, content []map[string]any) {
+	t.Helper()
+	first, second := content[1], content[2]
+	if fmt.Sprint(first["name"]) != "shot.png" || fmt.Sprint(first["altText"]) != "Map of the work area" {
+		t.Fatalf("wire image 0 = %+v, want name and altText to survive to wire", first)
+	}
+	if fmt.Sprint(second["name"]) != "pasted.png" || fmt.Sprint(second["altText"]) != "Pasted diagram" {
+		t.Fatalf("wire image 1 = %+v, want name and alt alias to survive to wire", second)
+	}
+}
+
+func requireResumedNameAndAlt(t *testing.T, contents [][]map[string]any) {
+	t.Helper()
+	if len(contents) != 1 || len(contents[0]) != 3 {
+		t.Fatalf("resumed contents = %+v, want one item with text plus two images", contents)
+	}
+	resumed := contents[0][1]
+	if fmt.Sprint(resumed["name"]) != "shot.png" || fmt.Sprint(resumed["altText"]) != "Map of the work area" {
+		t.Fatalf("resumed image = %+v, want name and altText after recovery", resumed)
+	}
+}
+
+func TestTurnStartImagePreservesNameAndAlt(t *testing.T) {
+	r := newRig(t, config.ApprovalYolo)
+	c := r.connect()
+	threadID := startThread(t, r, c, nil)
+	path := writeImage(t, "shot.png", pngSample)
+	input := []map[string]string{
+		{"type": "text", "text": "what is this"},
+		{"type": "localImage", "path": path, "name": "shot.png", "altText": "Map of the work area"},
+		{"type": "image", "url": "data:image/png;base64," + dataURLPNG, "name": "pasted.png", "alt": "Pasted diagram"},
+	}
+	var response rpc.TurnStartResponse
+	c.ok("turn/start", map[string]any{"threadId": threadID, "input": input}, &response)
+	content := userItemContent(t, c.collect())
+	requirePreservedTextEntry(t, content)
+	requireJournalNameAndAlt(t, userMessages(t, r, threadID), path)
+	requireWireNameAndAlt(t, content)
+	contents, _ := resumedUserContents(t, r, threadID)
+	requireResumedNameAndAlt(t, contents)
+}
+
 func TestTurnImageErrors(t *testing.T) {
 	r := newRig(t, config.ApprovalYolo)
 	c := r.connect()

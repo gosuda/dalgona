@@ -24,7 +24,7 @@ func TestCellsAndFitTable(t *testing.T) {
 		{"한글", 4, "한글"},
 		{"한글한글", 8, "한..."},
 		{"α", 1, "α"},
-		{"e\u0301", 1, "é"},
+		{"e\u0301", 1, "e\u0301"},
 	}
 	for _, tc := range cases {
 		if got := screen.cells(tc.in); got != tc.cells {
@@ -378,6 +378,41 @@ func TestWrapKeepsTheMarkOfAWideSpaceInsideARow(t *testing.T) {
 					t.Fatalf("method %v width %d: wrap(%q) = %q keeps the space and drops its mark", method, width, text, rows)
 				}
 			}
+		}
+	}
+}
+
+func TestWrapPreservesExactBytes(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	for _, text := range []string{"éx", "한글", "aé한x"} {
+		for _, n := range []int{1, 2, 3, 5, 39} {
+			rows := screen.wrap(text, n)
+			if got := strings.Join(rows, ""); got != text {
+				t.Errorf("wrap(%q, %d) = %q, want the exact input bytes", text, n, rows)
+			}
+		}
+	}
+}
+
+func TestFitKeepsExactText(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	if got := screen.fit("é", 5); got != "é" {
+		t.Errorf("fit(decomposed, 5) = %q, want the exact text", got)
+	}
+}
+
+func TestWrapKeepsDisplayEscapeWhole(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	rows := screen.wrap("AA<U+0003>BBBB", 6)
+	if got := strings.Join(rows, "|"); got != "AA|<U+0003>|BBBB" {
+		t.Fatalf("wrap = %q, want the escape kept whole", rows)
+	}
+	for _, row := range rows {
+		if strings.Contains(row, "<U") && !strings.Contains(row, "<U+0003>") {
+			t.Fatalf("row splits a display escape: %q", row)
 		}
 	}
 }

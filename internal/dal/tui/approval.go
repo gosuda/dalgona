@@ -83,19 +83,19 @@ func (m *model) applyRequestResolved(params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
-	index := slices.IndexFunc(m.approvals, func(open approval) bool { return open.requestID == event.RequestID })
+	index := m.requestIndex(event.ThreadID, event.RequestID)
 	if index < 0 {
 		return nil
 	}
-	card := m.approvals[index].card
+	open := m.approvals[index]
 	m.dropApproval(index)
-	if card != nil {
-		m.noticef("%s", questionResolvedNotice(event.Resolution))
-		if event.Resolution == "timedOut" {
-			m.commit(fmt.Sprintf("question:%s:%s:%s", card.threadID, card.params.TurnID, card.params.ItemID), card.closedLines("Timed out"))
-		}
-	} else {
+	if open.card == nil {
 		m.noticef("%s", resolvedNotice(event.Resolution))
+		return nil
+	}
+	m.noticef("%s", open.card.resolvedNotice(event.Resolution))
+	if event.Resolution == "timedOut" {
+		m.commit(open.questionRow(rowTimedOut, 0).key(), open.card.timedOutLines())
 	}
 	return nil
 }
@@ -131,7 +131,9 @@ func (m *model) abandonApprovals(cause error) {
 		if open.card != nil {
 			answer = open.card.answer
 		}
-		answer <- requestAnswer{err: cause}
+		if answer != nil {
+			answer <- requestAnswer{err: cause}
+		}
 		m.dropApproval(0)
 	}
 }

@@ -7,10 +7,10 @@ import (
 	"io"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
@@ -61,11 +61,9 @@ func (m *model) resumeQuery() string {
 	if m.textMode() != inputFilter || m.conn.lost != "" || m.review != nil {
 		return ""
 	}
-	query := strings.TrimSpace(m.input.field.value())
-	for word := range strings.FieldsSeq(query) {
-		if utf8.RuneCountInString(word) < 3 {
-			return ""
-		}
+	query := m.input.field.value()
+	if !inputtext.Searchable(query) {
+		return ""
 	}
 	return query
 }
@@ -76,7 +74,7 @@ func (m *model) fetchResumeMatches(search *resumeSearch, delay time.Duration) te
 	search.err = ""
 	params := rpc.ThreadSearchParams{Query: search.query, Cursor: search.nextCursor, Limit: 50}
 	conn := m.conn
-	return func() tea.Msg {
+	return conn.link.scope(func() tea.Msg {
 		defer cancel()
 		if delay > 0 {
 			select {
@@ -87,7 +85,7 @@ func (m *model) fetchResumeMatches(search *resumeSearch, delay time.Duration) te
 		reply := &resumeSearchPage{search: search}
 		err := conn.searchResumePage(ctx, params, &reply.page)
 		return resultMsg{op: "resumeSearch", value: reply, err: err}
-	}
+	})
 }
 
 func (c connInfo) searchResumePage(ctx context.Context, params rpc.ThreadSearchParams, page *rpc.ThreadSearchResponse) error {

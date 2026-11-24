@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"path/filepath"
 	"regexp"
@@ -47,13 +44,12 @@ type stagedFile struct {
 }
 
 type stagedBatch struct {
-	files       []*stagedFile
-	summary     string
-	style       Style
-	version     uint64
-	cutoff      snapshot.Evidence
-	findings    []observerFinding
-	fingerprint [sha256.Size]byte
+	files    []*stagedFile
+	summary  string
+	style    Style
+	version  uint64
+	cutoff   snapshot.Evidence
+	findings []observerFinding
 }
 
 type fileGroup struct {
@@ -62,7 +58,7 @@ type fileGroup struct {
 	edits    []edit
 }
 
-func stage(ctx context.Context, style Style, edits []edit, env tool.Env, input string) (stagedBatch, error) {
+func stage(ctx context.Context, style Style, edits []edit, env tool.Env) (stagedBatch, error) {
 	groups, err := checkedGroups(ctx, env, edits)
 	if err != nil {
 		return stagedBatch{}, err
@@ -71,7 +67,7 @@ func stage(ctx context.Context, style Style, edits []edit, env tool.Env, input s
 	if err != nil {
 		return stagedBatch{}, err
 	}
-	return finishBatch(style, env, input, files)
+	return finishBatch(style, env, files)
 }
 
 func checkedGroups(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup, error) {
@@ -89,8 +85,8 @@ func checkedGroups(ctx context.Context, env tool.Env, edits []edit) ([]fileGroup
 	return groups, nil
 }
 
-func finishBatch(style Style, env tool.Env, input string, files []*stagedFile) (stagedBatch, error) {
-	batch := newStagedBatch(style, env, input)
+func finishBatch(style Style, env tool.Env, files []*stagedFile) (stagedBatch, error) {
+	batch := newStagedBatch(style, env)
 	for _, file := range files {
 		file.beforeSHA = fileSHA(file.before, file.exists)
 		file.afterSHA = fileSHA(file.after, !file.deleted)
@@ -111,24 +107,15 @@ func finishBatch(style Style, env tool.Env, input string, files []*stagedFile) (
 	return batch, nil
 }
 
-func newStagedBatch(style Style, env tool.Env, input string) stagedBatch {
-	return stagedBatch{
-		style: style, version: 1, cutoff: env.Evidence,
-		fingerprint: invocationFingerprint(style, env, input),
-	}
+func newStagedBatch(style Style, env tool.Env) stagedBatch {
+	return stagedBatch{style: style, version: 1, cutoff: env.Evidence}
 }
 
-func invocationFingerprint(style Style, env tool.Env, input string) [sha256.Size]byte {
-	hash := sha256.New()
-	var size [8]byte
-	for _, part := range []string{string(style), "1", env.Cwd, env.Evidence.Consumer, input} {
-		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
-		_, _ = hash.Write(size[:])
-		_, _ = io.WriteString(hash, part)
+func (b stagedBatch) requestedPaths(edits []edit) []string {
+	if !b.style.profile() {
+		return nil
 	}
-	var digest [sha256.Size]byte
-	hash.Sum(digest[:0])
-	return digest
+	return editPaths(edits)
 }
 
 func validateGroups(groups []fileGroup, cwd string) error {

@@ -12,7 +12,8 @@ func decodeSessionEvent(kind string, r *objectReader) (Event, error) {
 			ID: r.str("id"), Parent: r.str("parent"), ForkOf: r.str("fork_of"), Cwd: r.str("cwd"),
 			Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"), Effort: r.str("effort"),
 			Runner: r.str("runner"), InstructionsBlob: r.blob("instructions_blob"), Advisor: r.str("advisor"),
-			CreatedAt: r.timestamp("created_at"),
+			CreatedAt: r.timestamp("created_at"), Operation: r.str("operation_id"),
+			ReadOnly: r.boolean("read_only"), Profile: r.str("profile"),
 		}, nil
 	case TypeRunnerBound:
 		return RunnerBound{
@@ -30,7 +31,10 @@ func decodeTurnEvent(kind string, r *objectReader) (Event, error) {
 	case TypeTurnEffort:
 		return TurnEffort{TurnID: r.str("turn_id"), Effort: r.str("effort")}, nil
 	case TypeTurnCompleted:
-		return TurnCompleted{TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error"), CompletedAt: r.timestamp("completed_at")}, nil
+		return TurnCompleted{
+			TurnID: r.str("turn_id"), Status: r.str("status"), Error: r.str("error"), CompletedAt: r.timestamp("completed_at"),
+			Operation: r.str("operation_id"),
+		}, nil
 	case TypeTurnRecovery:
 		return TurnRecovery{TurnID: r.str("turn_id"), Attempt: r.number("attempt")}, nil
 	case TypeTurnJudged:
@@ -65,7 +69,7 @@ func decodeUserMessage(r *objectReader) UserMessage {
 	return UserMessage{
 		ItemID: r.str("item_id"), TurnID: r.str("turn_id"), Text: text, TextBlob: textBlob, Kind: r.str("kind"),
 		Notices: notices, Mentions: mentions, Images: images, Effort: r.str("effort"), Verbatim: r.boolean("verbatim"),
-		Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"),
+		Model: r.str("model"), Approval: r.str("approval"), Sandbox: r.str("sandbox"), Operation: r.str("operation_id"),
 	}
 }
 
@@ -95,7 +99,7 @@ func decodeImage(raw jsontext.Value) (Image, error) {
 		return Image{}, err
 	}
 	r := objectReader{fields: fields}
-	value := Image{Mime: r.str("mime"), Path: r.str("path")}
+	value := Image{Mime: r.str("mime"), Path: r.str("path"), Name: r.str("name"), AltText: r.str("alt_text")}
 	if blob := r.blob("image"); blob != nil {
 		value.Blob = *blob
 	}
@@ -327,14 +331,14 @@ func decodeStateEvent(kind string, r *objectReader) (Event, error) {
 		r.require("tokens_after")
 		return Compaction{
 			FirstKeptSeq: r.uint64("first_kept_seq"), Summary: r.str("summary"), Method: r.str("method"),
-			TokensBefore: r.number("tokens_before"), TokensAfter: r.number("tokens_after"),
+			TokensBefore: r.number("tokens_before"), TokensAfter: r.number("tokens_after"), Operation: r.str("operation_id"),
 		}, nil
 	case TypeContextPruned:
 		return decodeContextPruned(r), nil
 	case TypeChildSpawned:
 		return ChildSpawned{CallID: r.str("call_id"), ChildID: r.str("child_id"), Runner: r.str("runner"), Tools: r.stringList("tools"), MailHop: r.u8("mail_hop")}, nil
 	case TypeBranch:
-		return Branch{ParentSeq: r.uint64("parent_seq")}, nil
+		return Branch{ParentSeq: r.uint64("parent_seq"), Operation: r.str("operation_id")}, nil
 	default:
 		return nil, fmt.Errorf("unsupported state event %q", kind)
 	}

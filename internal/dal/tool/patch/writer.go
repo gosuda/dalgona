@@ -53,26 +53,49 @@ func commitBatch(ctx context.Context, env tool.Env, batch stagedBatch) (tool.Res
 	}
 	defer batch.closePins()
 	if err := verifyBatch(ctx, env, batch.files); err != nil {
-		return tool.Result{}, outcomeOf(err), err
+		return failedBatch(ctx, err)
 	}
 	if err := checkNoReplaceSupport(env, batch.files); err != nil {
-		return tool.Result{}, outcomeOf(err), err
+		return failedBatch(ctx, err)
 	}
 	states, err := stageWriteSet(ctx, env, batch.files)
 	if err != nil {
-		return tool.Result{}, outcomeOf(err), err
+		return failedBatch(ctx, err)
 	}
 	effects, failed, commitErr := commitWriteSet(ctx, env, states)
 	if commitErr != nil {
 		run := commitRun{files: batch.files, states: states, effects: effects, failed: failed, cause: commitErr}
 		outcome, err := failCommit(context.WithoutCancel(ctx), env, batch.style, run)
-		return tool.Result{}, outcome, err
+		return tool.Result{Failure: commitFailure(ctx, outcome, commitErr)}, outcome, err
 	}
 	if outcome, err := settleCommit(context.WithoutCancel(ctx), env, batch, states); err != nil {
-		return tool.Result{}, outcome, err
+		return tool.Result{Failure: commitFailure(ctx, outcome, err)}, outcome, err
 	}
 	refs := recordSnapshots(env, batch.files)
 	return tool.Result{Output: appliedOutput(batch.summary, batch.files, refs), OK: true}, appliedOutcome, nil
+}
+
+func failedBatch(ctx context.Context, err error) (tool.Result, tool.Outcome, error) {
+	outcome := outcomeOf(err)
+	return tool.Result{Failure: commitFailure(ctx, outcome, err)}, outcome, err
+}
+
+func commitFailure(ctx context.Context, outcome tool.Outcome, cause error) tool.FailureKind {
+	switch {
+	case ctx.Err() != nil:
+		return tool.FailureNone
+	case outcome.Status != tool.StatusWriteError && outcome.Status != tool.StatusIndeterminate:
+		return tool.FailureNone
+	case outcome.Reason != tool.ReasonWriteFailed:
+		return tool.FailureInternal
+	case requestedPathRefusal(cause):
+		return tool.FailureNone
+	}
+	return tool.MachineryFailure(ctx, cause)
+}
+
+func requestedPathRefusal(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, errNotRegular)
 }
 
 func settleCommit(ctx context.Context, env tool.Env, batch stagedBatch, states []*writeState) (tool.Outcome, error) {
@@ -206,12 +229,12 @@ type commitRun struct {
 
 func failCommit(ctx context.Context, env tool.Env, style Style, run commitRun) (tool.Outcome, error) {
 	rollbackFailures := rollback(ctx, env, run.effects)
-	if !style.profile() {
-		cleanBackups(ctx, env, run.states, len(rollbackFailures) > 0)
-		return tool.Outcome{}, writeError(run.failed, run.cause, run.states, rollbackFailures, false)
-	}
 	paths := verifiedStates(ctx, env, writtenPaths(run.files))
 	outcome := failedCommit(run.cause, paths, len(run.effects), len(rollbackFailures))
+	if !style.profile() {
+		cleanBackups(ctx, env, run.states, len(rollbackFailures) > 0)
+		return outcome, writeError(run.failed, run.cause, run.states, rollbackFailures, false)
+	}
 	keepAll := outcome.Commit == tool.CommitUnknown
 	cleanBackups(ctx, env, run.states, keepAll || len(rollbackFailures) > 0)
 	invalidatePaths(env, outcome)

@@ -32,18 +32,54 @@ func runMCP(ctx context.Context, args []string, std stdio) int {
 	return 0
 }
 
+type oauthPrompt struct {
+	open  func(string) error
+	paste func(context.Context) (string, error)
+}
+
 func mcpLogin(ctx context.Context, cfg config.Config, name string, std stdio) error {
+	spec, err := mcpOAuthSpec(cfg, name)
+	if err != nil {
+		return err
+	}
+	prompt := oauthPrompt{
+		open: func(url string) error {
+			_, writeErr := fmt.Fprintf(std.out, "Open this URL to log in to %s:\n%s\n", name, url)
+			return writeErr
+		},
+		paste: pasteCode(ctx, bufio.NewReader(std.in), std.out),
+	}
+	registration, token, err := mcpAuthorize(ctx, name, spec, prompt)
+	if err != nil {
+		return err
+	}
+	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
+	if err != nil {
+		return err
+	}
+	if err := mcpCommit(cfg.Home, store, name, registration, token); err != nil {
+		return err
+	}
+	fmt.Fprintf(std.out, "logged in to MCP server %s\n", name)
+	return nil
+}
+
+func mcpOAuthSpec(cfg config.Config, name string) (config.MCPServerSpec, error) {
 	spec, ok := cfg.MCPServers[name]
 	if !ok {
-		return fmt.Errorf("mcp server %s is not configured", name)
+		return spec, fmt.Errorf("mcp server %s is not configured", name)
 	}
 	if !spec.OAuth {
-		return fmt.Errorf("mcp server %s has no oauth value", name)
+		return spec, fmt.Errorf("mcp server %s has no oauth value", name)
 	}
+	return spec, nil
+}
+
+func mcpAuthorize(ctx context.Context, name string, spec config.MCPServerSpec, prompt oauthPrompt) (mcp.Registration, oauth.Token, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resolved, err := mcpResolve(ctx, client, spec)
 	if err != nil {
-		return err
+		return mcp.Registration{}, oauth.Token{}, err
 	}
 	provider := oauth.Provider{
 		ID:           "mcp-" + name,
@@ -56,12 +92,9 @@ func mcpLogin(ctx context.Context, cfg config.Config, name string, std stdio) er
 		RedirectPath: mcpCallbackPath,
 		Resource:     resolved.resource.URL,
 	}
-	token, err := oauth.PKCE(ctx, provider, func(url string) error {
-		_, writeErr := fmt.Fprintf(std.out, "Open this URL to log in to %s:\n%s\n", name, url)
-		return writeErr
-	}, pasteCode(ctx, bufio.NewReader(std.in), std.out))
+	token, err := oauth.PKCE(ctx, provider, prompt.open, prompt.paste)
 	if err != nil {
-		return err
+		return mcp.Registration{}, oauth.Token{}, err
 	}
 	registration := mcp.Registration{
 		Resource:              resolved.resource.URL,
@@ -71,18 +104,14 @@ func mcpLogin(ctx context.Context, cfg config.Config, name string, std stdio) er
 		ClientID:              resolved.clientID,
 		Scopes:                resolved.scopes,
 	}
-	if writeErr := mcp.WriteRegistration(cfg.Home, name, registration); writeErr != nil {
-		return writeErr
-	}
-	store, err := auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
-	if err != nil {
+	return registration, token, nil
+}
+
+func mcpCommit(home string, store *auth.Store, name string, registration mcp.Registration, token oauth.Token) error {
+	if err := mcp.WriteRegistration(home, name, registration); err != nil {
 		return err
 	}
-	if credErr := store.SetCredential(mcp.CredentialKey(name), mcp.TokenCredential(resolved.resource.URL, token)); credErr != nil {
-		return credErr
-	}
-	fmt.Fprintf(std.out, "logged in to MCP server %s\n", name)
-	return nil
+	return store.SetCredential(mcp.CredentialKey(name), mcp.TokenCredential(registration.Resource, token))
 }
 
 type mcpResolved struct {

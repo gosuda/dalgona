@@ -1,11 +1,8 @@
 package remote
 
 import (
-	"bytes"
 	"cmp"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/config"
@@ -312,6 +308,16 @@ func (r *boxRunner) Read(ctx context.Context, id string, offset int64) (runner.O
 	return out, err
 }
 
+func (r *boxRunner) ReadPage(ctx context.Context, id string, offset, limit int64) (runner.Output, error) {
+	var out runner.Output
+	err := r.do(ctx, func(l *link) error {
+		var err error
+		out, err = l.remote.ReadPage(ctx, id, offset, limit)
+		return err
+	})
+	return out, err
+}
+
 func (r *boxRunner) Signal(ctx context.Context, id string, s runner.Signal) error {
 	return r.do(ctx, func(l *link) error { return l.remote.Signal(ctx, id, s) })
 }
@@ -324,6 +330,17 @@ func (r *boxRunner) ReadFile(ctx context.Context, p string) ([]byte, error) {
 		return err
 	})
 	return data, err
+}
+
+func (r *boxRunner) ReadFilePage(ctx context.Context, p string, offset, limit int64) ([]byte, int64, error) {
+	var data []byte
+	var next int64
+	err := r.do(ctx, func(l *link) error {
+		var err error
+		data, next, err = l.remote.ReadFilePage(ctx, l.boxPath(p), offset, limit)
+		return err
+	})
+	return data, next, err
 }
 
 func (r *boxRunner) WriteFile(ctx context.Context, p string, data []byte, perm fs.FileMode) error {
@@ -364,44 +381,4 @@ func (r *boxRunner) Close() error {
 		l.close()
 	}
 	return nil
-}
-
-var boxKillGrace = 2 * time.Second
-
-func stopProcess(r runner.Runner, id string) {
-	runner.StopProcessWithGrace(r, id, boxKillGrace)
-}
-
-func boxRun(ctx context.Context, r runner.Runner, argv ...string) (string, int, error) {
-	var random [8]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return "", 0, fmt.Errorf("remote: process id: %w", err)
-	}
-	id := "remote-" + hex.EncodeToString(random[:])
-	if err := r.Start(ctx, runner.ProcessSpec{ID: id, Argv: argv, Dir: boxWorkspace}); err != nil {
-		stopProcess(r, id)
-		return "", 0, fmt.Errorf("remote: start %s: %w", argv[0], err)
-	}
-	var out bytes.Buffer
-	var offset int64
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		chunk, err := r.Read(ctx, id, offset)
-		if err != nil {
-			stopProcess(r, id)
-			return "", 0, fmt.Errorf("remote: read process %s: %w", id, err)
-		}
-		out.Write(chunk.Data)
-		offset = max(chunk.Next, offset+int64(len(chunk.Data)))
-		if chunk.Exit != nil {
-			return out.String(), chunk.Exit.Code, nil
-		}
-		select {
-		case <-ctx.Done():
-			stopProcess(r, id)
-			return "", 0, ctx.Err()
-		case <-ticker.C:
-		}
-	}
 }

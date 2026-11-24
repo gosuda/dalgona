@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/capabilities/read result",
+  "type": "object",
+  "required": [
+    "version",
+    "daemonInstanceId",
+    "backendBuild",
+    "platform",
+    "features",
+    "receiptMethods",
+    "limits"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "daemonInstanceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "backendBuild": {
+      "type": "string"
+    },
+    "platform": {
+      "type": "object",
+      "required": [
+        "os",
+        "arch",
+        "pathStyle"
+      ],
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "pathStyle": {
+          "enum": [
+            "posix",
+            "windows"
+          ]
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "receiptMethods": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "terminalCheckpointVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "frameBytes",
+        "resultBytes",
+        "subscriptions",
+        "snapshotHandles",
+        "workspaceHandles",
+        "terminalSessions"
+      ],
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  }
+}

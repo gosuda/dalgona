@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/item/image/read result",
+  "type": "object",
+  "required": [
+    "mimeType",
+    "digest",
+    "total",
+    "offset",
+    "next",
+    "dataBase64"
+  ],
+  "properties": {
+    "mimeType": {
+      "enum": [
+        "image/png",
+        "image/jpeg",
+        "image/gif"
+      ]
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "total": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "offset": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "next": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "dataBase64": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

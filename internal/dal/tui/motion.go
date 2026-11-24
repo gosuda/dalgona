@@ -49,7 +49,7 @@ func (m *model) scheduleTick() tea.Cmd {
 		return nil
 	}
 	m.screen.ticking = true
-	return m.screen.spin.Tick
+	return m.conn.link.scope(m.screen.spin.Tick)
 }
 
 func (m *model) updateTick(msg spinner.TickMsg) tea.Cmd {
@@ -59,7 +59,7 @@ func (m *model) updateTick(msg spinner.TickMsg) tea.Cmd {
 		m.screen.ticking = false
 		return nil
 	}
-	return command
+	return m.conn.link.scope(command)
 }
 
 func (m *model) retryRemaining() (time.Duration, bool) {

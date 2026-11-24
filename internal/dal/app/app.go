@@ -16,6 +16,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/decide"
+	"github.com/gosuda/dalgona/internal/dal/failure"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/runner"
@@ -49,13 +50,16 @@ type Base struct {
 }
 
 type Batteries struct {
-	Tools     func(ctx context.Context, cwd string) []tool.Tool
-	Skills    agent.SkillSet
-	Extension agent.ExtensionFactory
-	Runner    agent.RunnerFactory
-	Attach    func(*agent.Host)
-	Close     func() error
-	MCPStatus func(ctx context.Context, cwd string) []agent.MCPServerStatus
+	Tools           func(ctx context.Context, cwd string) []tool.Tool
+	ToolsGeneration func() uint64
+	Skills          agent.SkillSet
+	Extension       agent.ExtensionFactory
+	Runner          agent.RunnerFactory
+	Attach          func(*agent.Host)
+	Close           func() error
+	MCPStatus       func(ctx context.Context, cwd string) []agent.MCPServerStatus
+	MCPInventory    func(ctx context.Context, cwd string) (agent.MCPInventory, error)
+	FailureSink     func(failure.Record)
 }
 
 func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, error) {
@@ -92,15 +96,20 @@ func NewHost(ctx context.Context, opts Options) (*agent.Host, func() error, erro
 	if product == config.ProductDalgona {
 		editJudge = judges.resolve
 	}
+	failures := openFailureLog(ctx, cfg.Home, product, store, opts.Logger)
 	host, err := agent.NewHost(agent.HostConfig{
 		Journal: journalStore, Config: cfg, Auth: store, Tools: toolSet(cfg, extra.Tools),
 		Providers:        func(onRetry agent.RetryFunc) (*model.Registry, error) { return creds.registry(cfg, onRetry) },
 		ProvidersWithKey: func(provider, key string) (*model.Registry, error) { return creds.registryWithKey(cfg, provider, key) },
 		ProviderIDs:      providerIDs(cfg), Decider: judges.decider(), EditJudge: editJudge, Extension: extra.Extension, EditFeedback: cfg.EditReview.Feedback,
 		Runner: extra.Runner, Product: product, Logger: opts.Logger, Skills: extra.Skills,
-		MCPStatus:      extra.MCPStatus,
-		OnChildStarted: advisors.attach,
-		ShellEnv:       shellEnv,
+		ToolsGeneration: extra.ToolsGeneration,
+		MCPStatus:       extra.MCPStatus,
+		MCPInventory:    extra.MCPInventory,
+		OnChildStarted:  advisors.attach,
+		ShellEnv:        shellEnv,
+		Failures:        failures,
+		FailureSink:     extra.FailureSink,
 	})
 	if err != nil {
 		return nil, nil, errors.Join(err, release())
@@ -120,7 +129,7 @@ func loadConfig(opts Options) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	if err := InstallTLSRoots(cfg); err != nil {
+	if err := config.InstallTLSRoots(cfg.TLSCAFile); err != nil {
 		return config.Config{}, err
 	}
 	return cfg, nil
@@ -131,6 +140,15 @@ func openJournal(product config.Product, home string) (*journal.Store, error) {
 		return journal.OpenShared(home)
 	}
 	return journal.Open(home)
+}
+
+func openFailureLog(ctx context.Context, home string, product config.Product, masker *auth.Store, logger *slog.Logger) *failure.Store {
+	store, err := failure.Open(ctx, failure.Options{Home: home, Product: string(product), Version: config.Version(), Masker: masker})
+	if err != nil {
+		cmp.Or(logger, slog.Default()).Warn("failure log unavailable; failures are not recorded", "error", err)
+		return nil
+	}
+	return store
 }
 
 func loadBatteries(ctx context.Context, opts Options, base Base) (Batteries, error) {

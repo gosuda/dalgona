@@ -134,7 +134,7 @@ func TestEditorUpAndDownMoveBetweenWrappedRows(t *testing.T) {
 	}
 }
 
-func TestEditorDecomposedTextWrapsAsComposed(t *testing.T) {
+func TestEditorDecomposedTextWrapsLikeComposedText(t *testing.T) {
 	t.Parallel()
 	const units = 30
 	tests := []struct {
@@ -156,10 +156,10 @@ func TestEditorDecomposedTextWrapsAsComposed(t *testing.T) {
 				view := m.View()
 				return stripANSI(view.Content), view.Cursor
 			}
-			wantText, wantCursor := render(strings.Repeat("aé", units), test.caretComp)
+			wantText, wantCursor := render(strings.Repeat("a\u00e9", units), test.caretComp)
 			gotText, gotCursor := render(strings.Repeat("ae\u0301", units), test.caret)
-			if gotText != wantText {
-				t.Fatalf("decomposed text renders differently:\n%s\nwant:\n%s", gotText, wantText)
+			if want := strings.ReplaceAll(wantText, "\u00e9", "e\u0301"); gotText != want {
+				t.Fatalf("decomposed text renders other rows or other scalars:\n%q\nwant:\n%q", gotText, want)
 			}
 			if gotCursor == nil || wantCursor == nil {
 				t.Fatalf("cursor unset: decomposed %v, composed %v", gotCursor, wantCursor)
@@ -285,13 +285,17 @@ func TestShortPasteWithCRKeepsLineBreaks(t *testing.T) {
 	}
 }
 
-func TestPasteIntoFilterSplitsLinesAtCarriageReturn(t *testing.T) {
+func TestPasteIntoFilterRefusesMultilineWhole(t *testing.T) {
 	t.Parallel()
-	for _, in := range []string{"one\rtwo", "one\r\ntwo"} {
+	for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
 		m := openModelPicker(t, new(fakeCaller))
+		m.input.field = textField{text: []rune("prior"), cursor: 5}
 		m, _ = drive(t, m, tea.PasteMsg{Content: in})
-		if got := m.input.field.value(); got != "one" {
-			t.Fatalf("%q: filter holds %q, want the first line only", in, got)
+		if got := m.input.field.value(); got != "prior" {
+			t.Fatalf("%q: filter holds %q, want the prior value kept whole", in, got)
+		}
+		if m.input.field.cursor != 5 {
+			t.Fatalf("%q: cursor at %d, want 5", in, m.input.field.cursor)
 		}
 	}
 }
@@ -344,16 +348,17 @@ func TestOversizePasteRefused(t *testing.T) {
 	}
 }
 
-func TestPasteIntoFilterKeepsFirstLine(t *testing.T) {
+func TestPasteIntoFilterRefusesSecondLine(t *testing.T) {
 	t.Parallel()
 	m := openModelPicker(t, new(fakeCaller))
+	m.input.field = textField{text: []rune("prior"), cursor: 5}
 	m, _ = drive(t, m, tea.PasteMsg{Content: "one\ntwo"})
-	if got := m.input.field.value(); got != "one" {
-		t.Fatalf("filter holds %q, want the first line only", got)
+	if got := m.input.field.value(); got != "prior" {
+		t.Fatalf("filter holds %q, want the prior value kept whole", got)
 	}
 }
 
-func TestPasteIntoTheOtherOneLineFieldsKeepsTheFirstLine(t *testing.T) {
+func TestPasteIntoTheOtherOneLineFieldsRefusesWhole(t *testing.T) {
 	t.Parallel()
 	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
 		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
@@ -374,9 +379,13 @@ func TestPasteIntoTheOtherOneLineFieldsKeepsTheFirstLine(t *testing.T) {
 	for _, tt := range tests {
 		for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
 			m := tt.model(t)
+			m.input.field = textField{text: []rune("prior"), cursor: 5}
 			m, _ = drive(t, m, tea.PasteMsg{Content: in})
-			if got := m.input.field.value(); got != "one" {
-				t.Fatalf("%s: paste %q left %q, want the first line only", tt.name, in, got)
+			if got := m.input.field.value(); got != "prior" {
+				t.Fatalf("%s: paste %q left %q, want the prior value kept whole", tt.name, in, got)
+			}
+			if m.input.field.cursor != 5 {
+				t.Fatalf("%s: paste %q moved the cursor to %d, want 5", tt.name, in, m.input.field.cursor)
 			}
 		}
 	}
@@ -534,6 +543,140 @@ func TestApprovalCommandPrintsTabsAsSpaces(t *testing.T) {
 		assertFrame(t, strings.Split(view.Content, "\n"), width, 24)
 		if !strings.Contains(stripANSI(view.Content), "make") {
 			t.Fatalf("width %d: the approval card does not show the command:\n%s", width, stripANSI(view.Content))
+		}
+	}
+}
+
+func TestChipAnchorsHoldNoText(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = typeText(t, m, "ab")
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+	m = typeText(t, m, "cd")
+	if got := m.input.composer.Value(); got != "abcd" {
+		t.Fatalf("composer holds %q, want only the typed text", got)
+	}
+	if len(m.input.composer.chips) != 1 {
+		t.Fatalf("composer holds %d chips, want 1", len(m.input.composer.chips))
+	}
+	if at := m.input.composer.chips[0].at; at != 2 {
+		t.Fatalf("chip anchored at %d, want 2", at)
+	}
+	want := "ab" + pasteLines(12) + "cd"
+	if got := m.input.composer.Expanded(); got != want {
+		t.Fatalf("expanded = %q, want %q", got, want)
+	}
+}
+
+const (
+	firstPasteChip  = "[Paste #1 +12 lines]"
+	secondPasteChip = "[Paste #2 +13 lines]"
+)
+
+func caretShown(t *testing.T, m model) string {
+	t.Helper()
+	return draftShown(typeText(t, m, "|"))
+}
+
+func TestChipKeysActOnTheChipBesideTheCaret(t *testing.T) {
+	t.Parallel()
+	left, right := tea.KeyPressMsg{Code: tea.KeyLeft}, tea.KeyPressMsg{Code: tea.KeyRight}
+	backspace, del := tea.KeyPressMsg{Code: tea.KeyBackspace}, tea.KeyPressMsg{Code: tea.KeyDelete}
+	ctrlW, ctrlU, ctrlK := press('w', tea.ModCtrl, ""), press('u', tea.ModCtrl, ""), press('k', tea.ModCtrl, "")
+	cases := []struct {
+		name string
+		keys []tea.KeyPressMsg
+		want string
+	}{
+		{"the caret follows both chips", nil, "ab" + firstPasteChip + secondPasteChip + "|"},
+		{"left crosses one chip", []tea.KeyPressMsg{left}, "ab" + firstPasteChip + "|" + secondPasteChip},
+		{"left crosses the other chip", []tea.KeyPressMsg{left, left}, "ab|" + firstPasteChip + secondPasteChip},
+		{"left then crosses text", []tea.KeyPressMsg{left, left, left}, "a|b" + firstPasteChip + secondPasteChip},
+		{"right crosses one chip", []tea.KeyPressMsg{left, left, right}, "ab" + firstPasteChip + "|" + secondPasteChip},
+		{"backspace removes the chip before the caret", []tea.KeyPressMsg{backspace}, "ab" + firstPasteChip + "|"},
+		{"backspace before the chips removes text", []tea.KeyPressMsg{left, left, backspace}, "a|" + firstPasteChip + secondPasteChip},
+		{"delete removes the chip after the caret", []tea.KeyPressMsg{left, del}, "ab" + firstPasteChip + "|"},
+		{"delete before both chips removes the first", []tea.KeyPressMsg{left, left, del}, "ab|[Paste #1 +13 lines]"},
+		{"ctrl+w removes the chip before the caret", []tea.KeyPressMsg{ctrlW}, "ab" + firstPasteChip + "|"},
+		{"ctrl+u removes the line before the caret", []tea.KeyPressMsg{left, ctrlU}, "|[Paste #1 +13 lines]"},
+		{"ctrl+k removes the line after the caret", []tea.KeyPressMsg{left, left, ctrlK}, "ab|"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := typeText(t, paletteModel(t), "ab")
+			m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+			m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(13)})
+			m = pressKeys(t, m, tc.keys...)
+			if got := caretShown(t, m); got != tc.want {
+				t.Fatalf("draft with the caret typed as | = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUpAndDownStepThroughAChipRow(t *testing.T) {
+	t.Parallel()
+	up, down, home := tea.KeyPressMsg{Code: tea.KeyUp}, tea.KeyPressMsg{Code: tea.KeyDown}, tea.KeyPressMsg{Code: tea.KeyHome}
+	cases := []struct {
+		name string
+		keys []tea.KeyPressMsg
+		want string
+	}{
+		{"up from the text after the chip", []tea.KeyPressMsg{up}, "ab\n" + firstPasteChip + "|cd"},
+		{"up past the chip row", []tea.KeyPressMsg{up, up}, "ab|\n" + firstPasteChip + "cd"},
+		{"down from the line start onto the chip row", []tea.KeyPressMsg{up, up, home, down}, "ab\n|" + firstPasteChip + "cd"},
+		{"down past the chip row", []tea.KeyPressMsg{up, up, home, down, down}, "ab\n" + firstPasteChip + "|cd"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := typeText(t, paletteModel(t), "ab")
+			m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModShift})
+			m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+			m = pressKeys(t, typeText(t, m, "cd"), tc.keys...)
+			if got := caretShown(t, m); got != tc.want {
+				t.Fatalf("draft with the caret typed as | = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChipsExpandInOrder(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	first, second := pasteLines(12), pasteLines(13)
+	m = typeText(t, m, "a ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: first})
+	m = typeText(t, m, " b ")
+	m, _ = drive(t, m, tea.PasteMsg{Content: second})
+	want := "a " + first + " b " + second
+	if got := m.input.composer.Expanded(); got != want {
+		t.Fatalf("expanded = %q, want %q", got, want)
+	}
+}
+
+func TestPromptKeepsItsSurroundingWhitespaceWhenSentOrQueued(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ typed, sent string }{
+		{"  hello \u3000", "  hello \u3000"},
+		{"//ab \u3000", "/ab \u3000"},
+	}
+	for _, tc := range cases {
+		for _, key := range []tea.KeyPressMsg{{Code: tea.KeyEnter}, {Code: tea.KeyEnter, Mod: tea.ModAlt}} {
+			t.Run(tc.typed+key.String(), func(t *testing.T) {
+				t.Parallel()
+				caller := new(fakeCaller)
+				m := newTestModel(caller, Options{})
+				m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+				m.thread.id = "t1"
+				m = typeText(t, m, tc.typed)
+				m, command := drive(t, m, key)
+				runCommand(t, m, command, key.String()+" did not send the prompt")
+				requireLastPrompt(t, caller.calls, 1, "turn/start", tc.sent)
+			})
 		}
 	}
 }

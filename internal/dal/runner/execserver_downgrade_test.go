@@ -35,7 +35,7 @@ func TestExecWS_boxChannelRefusesSandboxOff(t *testing.T) {
 	}
 	defer func() { _ = remote.Close() }()
 	err = remote.Start(t.Context(), ProcessSpec{ID: "escape", Argv: []string{"sh", "-c", "echo hi"}})
-	if err == nil || !strings.Contains(err.Error(), "sandbox") {
+	if !errors.Is(err, ErrSandboxDowngrade) {
 		t.Fatalf("sandbox-off over box channel accepted, err = %v", err)
 	}
 	if _, err := local.Read(t.Context(), "escape", 0); !errors.Is(err, ErrProcessNotFound) {

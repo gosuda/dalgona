@@ -40,7 +40,7 @@ func ConsentText(method string) string {
 		"Authentication: " + method + ".\n"
 }
 
-func consentTextSHA(method string) string {
+func ConsentTextHash(method string) string {
 	sum := sha256.Sum256([]byte(ConsentText(method)))
 	return hex.EncodeToString(sum[:])
 }
@@ -54,7 +54,7 @@ func WriteConsent(home, method string, at time.Time) error {
 		Version:    1,
 		At:         at.UTC(),
 		Method:     method,
-		TextSHA256: consentTextSHA(method),
+		TextSHA256: ConsentTextHash(method),
 	})
 	if err != nil {
 		return fmt.Errorf("failure reporting write local state: %w", err)
@@ -67,7 +67,7 @@ func ConsentValid(home, method string) bool {
 	if err != nil {
 		return false
 	}
-	return stored.Method == method && stored.TextSHA256 == consentTextSHA(method)
+	return stored.Method == method && stored.TextSHA256 == ConsentTextHash(method)
 }
 
 func ConsentStored(home string) bool {

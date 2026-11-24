@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/failures/list result",
+  "type": "object",
+  "required": [
+    "records"
+  ],
+  "properties": {
+    "records": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "time",
+          "product",
+          "version",
+          "os",
+          "arch",
+          "class",
+          "tool",
+          "fingerprint",
+          "contentFree",
+          "reportable"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
+          },
+          "time": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+          },
+          "product": {
+            "enum": [
+              "dal",
+              "dalgona"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "os": {
+            "type": "string"
+          },
+          "arch": {
+            "type": "string"
+          },
+          "class": {
+            "enum": [
+              "panic",
+              "tool",
+              "model",
+              "journal",
+              "runtime"
+            ]
+          },
+          "tool": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "contentFree": {
+            "type": "boolean"
+          },
+          "reportable": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "nextCursor": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

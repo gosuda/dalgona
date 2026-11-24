@@ -532,15 +532,10 @@ func (s *server) keywordsList(context.Context, jsontext.Value) (jsontext.Value, 
 	return rpc.Marshal(list)
 }
 
-const maxKeywordText = 64 << 10
-
 func (s *server) keywordsMatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
 	var p rpc.KeywordsMatchParams
 	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "text": &p.Text, "kind": &p.Kind})); err != nil {
 		return nil, err
-	}
-	if len(p.Text) > maxKeywordText {
-		return nil, invalidParams("text exceeds 64 KiB")
 	}
 	kind := agent.InputKind(cmp.Or(p.Kind, string(agent.InputPrompt)))
 	if kind != agent.InputPrompt && kind != agent.InputSteer {

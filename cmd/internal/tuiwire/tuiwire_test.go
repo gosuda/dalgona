@@ -3,6 +3,7 @@ package tuiwire
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,13 +19,17 @@ import (
 
 const guard = 5 * time.Second
 
-const refusal = "the interactive interface needs a terminal on stdout; use -p <prompt> for one turn"
-
 type touchedConn struct {
+	dialed  atomic.Int32
 	touched atomic.Int32
 	closed  atomic.Int32
 	first   chan struct{}
 	once    sync.Once
+}
+
+func (c *touchedConn) dial(context.Context) (io.ReadWriteCloser, error) {
+	c.dialed.Add(1)
+	return c, nil
 }
 
 func (c *touchedConn) touch() {
@@ -56,18 +61,21 @@ func assertRefused(t *testing.T, stdout io.Writer, written func() int) {
 	conn := &touchedConn{}
 	ctx, cancel := context.WithTimeout(t.Context(), guard)
 	defer cancel()
-	err := Run(ctx, conn, app.TUIOptions{Stdin: strings.NewReader(""), Stdout: stdout})
+	err := Local(conn.dial)(ctx, app.TUIOptions{Stdin: strings.NewReader(""), Stdout: stdout})
 	if err == nil {
 		t.Fatal("Run returned nil for a non-terminal stdout, want the refusal")
 	}
-	if err.Error() != refusal {
-		t.Fatalf("Run error = %q, want %q", err, refusal)
+	if !errors.Is(err, errNoTerminal) {
+		t.Fatalf("Run error = %v, want %v", err, errNoTerminal)
 	}
 	if n := written(); n != 0 {
 		t.Fatalf("Run wrote %d bytes to a non-terminal stdout before refusing, want 0", n)
 	}
 	if n := conn.touched.Load(); n != 0 {
 		t.Fatalf("Run touched the connection %d times before refusing, want 0", n)
+	}
+	if n := conn.dialed.Load(); n != 0 {
+		t.Fatalf("Run dialed %d times before refusing, want 0", n)
 	}
 }
 
@@ -97,18 +105,17 @@ func TestRunRefusalExitsNonzeroWithOneStderrLine(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	env := app.CLIEnv{
 		Product: config.ProductDal,
-		Dial:    func(context.Context) (io.ReadWriteCloser, error) { return conn, nil },
 		Stdin:   strings.NewReader(""),
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		TUI:     Run,
+		TUI:     Local(conn.dial),
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), guard)
 	defer cancel()
 	if code := app.RunCLI(ctx, env, nil); code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr %q", code, stderr.String())
 	}
-	if got, want := stderr.String(), "dal: "+refusal+"\n"; got != want {
+	if got, want := stderr.String(), "dal: "+errNoTerminal.Error()+"\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 	if stdout.Len() != 0 {
@@ -117,7 +124,7 @@ func TestRunRefusalExitsNonzeroWithOneStderrLine(t *testing.T) {
 	if n := conn.touched.Load(); n != 0 {
 		t.Fatalf("connection touched %d times, want 0", n)
 	}
-	if n := conn.closed.Load(); n != 1 {
-		t.Fatalf("connection closed %d times, want 1", n)
+	if n := conn.dialed.Load(); n != 0 {
+		t.Fatalf("TUI dialed %d times before refusing, want 0", n)
 	}
 }

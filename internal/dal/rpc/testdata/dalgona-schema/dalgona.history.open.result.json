@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/history/open result",
+  "type": "object",
+  "required": [
+    "historyId",
+    "thread",
+    "pathRevision",
+    "streamId",
+    "cutOrdinal",
+    "pendingRequests",
+    "newestCursor",
+    "oldestCursor",
+    "expiresAt"
+  ],
+  "properties": {
+    "historyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "thread": {
+      "type": "object",
+      "required": [
+        "id"
+      ]
+    },
+    "pathRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "streamId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "cutOrdinal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "activeTurnId": {
+      "type": "string"
+    },
+    "pendingRequests": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "requestId",
+          "method",
+          "details"
+        ],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "method": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "required": [
+              "total",
+              "digest"
+            ],
+            "properties": {
+              "total": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "newestCursor": {
+      "type": "string"
+    },
+    "oldestCursor": {
+      "type": "string"
+    },
+    "expiresAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  }
+}

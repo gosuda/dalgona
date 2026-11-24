@@ -196,7 +196,7 @@ rules and a fixed coverage-policy choice, not a dynamic proof framework.
 | External drift | Remains a hard history boundary, not auto-relocation input. |
 | NEW final-newline behavior | Explicit rule for new profiles. Existing-file rules retained. |
 | No-clobber NEW/MV publication | Explicit implementation obligation for new profiles. No overwrite fallback. |
-| Invocation replay | Proposed runtime/store integration, not a claimed existing feature. |
+| Invocation replay | Implemented in `internal/dal/agent` as C16 states. Recovery replays a settled invocation and reports an unsettled one as indeterminate. |
 | Product defaults and aliases | Unchanged. |
 
 The source describes useful Chain mapping while some model-facing prose says to

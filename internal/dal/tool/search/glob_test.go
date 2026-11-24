@@ -22,17 +22,17 @@ func TestRecursiveGlobMatchesRootAndNestedFiles(t *testing.T) {
 
 func TestRootAnchoredIgnoreRule(t *testing.T) {
 	root := t.TempDir()
-	stack := ignoreStack{}
+	stack := IgnoreRules{}
 	stack.loadFile(root, filepath.Join(root, ".gitignore"))
 	rule, ok := parseIgnoreRule(root, "/drop.log")
 	if !ok {
 		t.Fatal("rule rejected")
 	}
 	stack.rules = append(stack.rules, rule)
-	if !stack.ignored(filepath.Join(root, "drop.log"), false) {
+	if !stack.Ignored(filepath.Join(root, "drop.log"), false) {
 		t.Fatal("root file was not ignored")
 	}
-	if stack.ignored(filepath.Join(root, "sub", "drop.log"), false) {
+	if stack.Ignored(filepath.Join(root, "sub", "drop.log"), false) {
 		t.Fatal("anchored rule ignored nested file")
 	}
 }

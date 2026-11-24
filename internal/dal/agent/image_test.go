@@ -168,6 +168,43 @@ func TestSubmitImageStoresBlobAndMasksPath(t *testing.T) {
 	}
 }
 
+func TestSubmitImageMasksNameAndAlt(t *testing.T) {
+	t.Setenv("TEST_API_KEY", "sk-test-0123456789")
+	store, err := auth.NewWithPatterns(t.TempDir(), []string{`token-[a-z0-9]{8,}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, func(h *harness) { h.cfg.Auth = store })
+	h.model.push(text("done"))
+	thread := h.start()
+	data := []byte("\x89PNG\r\n\x1a\nxyz")
+	err = thread.Submit(t.Context(), Input{
+		Kind: InputPrompt,
+		Text: "what is this",
+		Images: []Image{{
+			Path:    "/tmp/shots/plain.png",
+			Mime:    "image/png",
+			Data:    data,
+			Name:    "token-abcdefgh.png",
+			AltText: "a token-abcdefgh diagram",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	h.waitIdle(thread)
+	image := storedImageMessage(t, h, thread.ID()).Images[0]
+	if strings.Contains(image.Name, "token-abcdefgh") || !strings.Contains(image.Name, "{{secret:") {
+		t.Fatalf("image name = %q, want the secret masked", image.Name)
+	}
+	if strings.Contains(image.AltText, "token-abcdefgh") || !strings.Contains(image.AltText, "{{secret:") {
+		t.Fatalf("image alt = %q, want the secret masked", image.AltText)
+	}
+	if image.Path != "/tmp/shots/plain.png" {
+		t.Fatalf("image path = %q, want it unchanged", image.Path)
+	}
+}
+
 func storedImageMessage(t *testing.T, h *harness, id string) event.UserMessage {
 	t.Helper()
 	for _, item := range h.events(id) {

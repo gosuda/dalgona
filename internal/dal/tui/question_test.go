@@ -152,13 +152,14 @@ func TestQuestionCardClosedByTimedOutNotification(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("timed-out question printed %d rows, want 1", len(rows))
 	}
-	if key := rows[0].key; key != "question:t1:turn-1:call-q" {
-		t.Fatalf("row key %q, want question:t1:turn-1:call-q", key)
+	const timeoutKey = `question-timeout:"t1":"turn-1":"call-q":"req-1":0`
+	if key := rows[0].key; key != timeoutKey {
+		t.Fatalf("row key %q, want %s", key, timeoutKey)
 	}
 	if got := rows[0].text; got != "Database: Timed out\nFeatures: Timed out" {
 		t.Fatalf("row text %q", got)
 	}
-	m.commit("question:t1:turn-1:call-q", []string{"again"})
+	m.commit(timeoutKey, []string{"again"})
 	if len(m.out.entries) != 1 {
 		t.Fatal("second commit with the same key was kept")
 	}
@@ -296,11 +297,12 @@ func TestQuestionCardCommitsAnswerRow(t *testing.T) {
 	if len(m.out.pending) == 0 && len(m.out.entries) == 0 {
 		t.Fatal("answer row was not committed")
 	}
-	if key := m.out.entries[len(m.out.entries)-1].key; key != "question:t1:turn-1:call-q" {
-		t.Fatalf("answer row key %q, want question:t1:turn-1:call-q", key)
+	const submissionKey = `question-submission:"t1":"turn-1":"call-q":"req-1":1`
+	if key := m.out.entries[len(m.out.entries)-1].key; key != submissionKey {
+		t.Fatalf("answer row key %q, want %s", key, submissionKey)
 	}
 	before := len(m.out.entries)
-	m.commit("question:t1:turn-1:call-q", []string{"again"})
+	m.commit(submissionKey, []string{"again"})
 	if len(m.out.entries) != before {
 		t.Fatal("second commit with the same key was kept")
 	}
@@ -310,13 +312,14 @@ func TestQuestionAnswerRowsShareCallIDAcrossTurns(t *testing.T) {
 	t.Parallel()
 	m, _ := openQuestion(t, questionParamsJSON)
 	m, _ = drive(t, m, press('s', 0, "s"))
+	m, _ = drive(t, m, requestResolved("t1", "req-1", "answered"))
 	second := strings.Replace(questionParamsJSON, `"turnId":"turn-1"`, `"turnId":"turn-2"`, 1)
 	m, _ = drive(t, m, questionRequest(make(chan requestAnswer, 1), second))
 	m, _ = drive(t, m, press('s', 0, "s"))
 	if len(m.out.entries) != 2 {
 		t.Fatalf("one call id in two turns printed %d answer rows, want 2", len(m.out.entries))
 	}
-	want := []string{"question:t1:turn-1:call-q", "question:t1:turn-2:call-q"}
+	want := []string{`question-submission:"t1":"turn-1":"call-q":"req-1":1`, `question-submission:"t1":"turn-2":"call-q":"req-1":1`}
 	for i, key := range want {
 		if m.out.entries[i].key != key {
 			t.Fatalf("row %d key %q, want %q", i, m.out.entries[i].key, key)
@@ -555,5 +558,109 @@ func TestQuestionReviewKeepsSTextAndDismissesEmptyRequest(t *testing.T) {
 	}
 	if got := answerJSON(t, empty); got != `{"answers":{}}` {
 		t.Fatalf("empty request = %s", got)
+	}
+}
+
+func TestQuestionAnswerPreservesCanonicalText(t *testing.T) {
+	t.Parallel()
+	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
+	m, answer := openQuestion(t, free)
+	text := "ab\u200ee\u0301\U000F0001"
+	for _, r := range text {
+		m, _ = drive(t, m, press(r, 0, string(r)))
+	}
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m, _ = drive(t, m, press('s', 0, "s"))
+	_ = m
+	got := answerJSON(t, answer)
+	var decoded struct {
+		Answers map[string]struct {
+			Answers []string `json:"answers"`
+		} `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("answer %s does not decode: %v", got, err)
+	}
+	if !reflect.DeepEqual(decoded.Answers["q1"].Answers, []string{text}) {
+		t.Fatalf("answer = %s, want the canonical text %q", got, text)
+	}
+}
+
+func TestQuestionAnswerOverLimitRefusedWhole(t *testing.T) {
+	t.Parallel()
+	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
+	for _, route := range []string{"typing", "paste"} {
+		t.Run(route, func(t *testing.T) {
+			t.Parallel()
+			assertAnswerOverLimit(t, free, route)
+		})
+	}
+}
+
+func assertAnswerOverLimit(t *testing.T, question, route string) {
+	t.Helper()
+	m, answer := openQuestion(t, question)
+	m = pressKeys(t, typeText(t, m, "ab"), press(tea.KeyLeft, 0, ""))
+	text := "e" + strings.Repeat("\u0301", 2000)
+	var insertion tea.Msg = press(tea.KeyExtended, 0, text)
+	if route == "paste" {
+		insertion = tea.PasteMsg{Content: text}
+	}
+	m, _ = drive(t, m, insertion)
+	assertAnswerField(t, m, "ab", 1)
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if !m.typingAnswer() || m.notice == "" {
+		t.Fatal("over-limit candidate advanced or did not explain how to correct it")
+	}
+	select {
+	case got := <-answer:
+		t.Fatalf("over-limit answer was sent: %#v", got)
+	default:
+	}
+	m = pressKeys(t, m, press('e', tea.ModAlt, ""), press(tea.KeyBackspace, 0, ""), press('x', 0, "x"), press(tea.KeyEnter, 0, ""))
+	assertAnswerField(t, m, "axb", 2)
+}
+
+func assertAnswerField(t *testing.T, m model, want string, caret int) {
+	t.Helper()
+	if got := m.input.field; got.value() != want || got.cursor != caret || !m.typingAnswer() {
+		t.Fatalf("answer field = %d scalars at %d, typing = %t; want %q at %d while typing", len(got.text), got.cursor, m.typingAnswer(), want, caret)
+	}
+}
+
+func TestQuestionOptionLiteralEscapeDoesNotMimicControl(t *testing.T) {
+	t.Parallel()
+	data := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Choice","question":"Which?","isOther":false,"isSecret":false,"multiSelect":false,` +
+		`"options":[{"label":"Pick<U+200E>","description":"d"},{"label":"Pick\u200e","description":"e"}]}]}`
+	m, _ := openQuestion(t, data)
+	card := m.approvals[0].card
+	assertContains(t, card.optionLine(&m.screen, 80, 0), "Pick<U+003C>U+200E>")
+	assertContains(t, card.optionLine(&m.screen, 80, 1), "Pick<U+200E>")
+	assertContains(t, strings.Join(card.reviewLines(), "\n"), "Pick<U+003C>U+200E>")
+}
+
+func TestQuestionOptionLabelSentByteExact(t *testing.T) {
+	t.Parallel()
+	label := "Pick\u2028\u200e\U000F0001"
+	data := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Choice","question":"Which?","isOther":false,"isSecret":false,"multiSelect":false,` +
+		`"options":[{"label":"` + label + `","description":"d"},{"label":"Other","description":"e"}]}]}`
+	m, answer := openQuestion(t, data)
+	m, _ = drive(t, m, press('1', 0, "1"))
+	_, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	got := answerJSON(t, answer)
+	var decoded struct {
+		Answers map[string]struct {
+			Answers []string `json:"answers"`
+		} `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("answer %s does not decode: %v", got, err)
+	}
+	if !reflect.DeepEqual(decoded.Answers["q1"].Answers, []string{label}) {
+		t.Fatalf("answer = %s, want the exact server label %q", got, label)
 	}
 }

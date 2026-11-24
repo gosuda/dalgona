@@ -98,7 +98,7 @@ func TestRunStreamsTurnAndAnswersApproval(t *testing.T) {
 			},
 		}
 		runResult := make(chan error, 1)
-		go func() { runResult <- Run(ctx, client, opts) }()
+		go func() { runResult <- Run(ctx, openTestMachine(client), opts) }()
 		serverResult := make(chan error, 1)
 		go func() { serverResult <- serveTurn(server) }()
 
@@ -128,6 +128,71 @@ func warmSignalPackage() {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT)
 	signal.Stop(signals)
+}
+
+func TestRunPreservesAndValidatesRawBracketedPaste(t *testing.T) {
+	t.Parallel()
+	warmSignalPackage()
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+		want   string
+	}{
+		{"literal replacement character", []string{"\x1b[2", "00~paste:\xef", "\xbf\xbd\xc3", "\xa9\x1b[20", "1~"}, "paste:\ufffdé"},
+		{"malformed transaction", []string{"\x1b[200~discard:\xff", "rest\x1b[201", "~"}, "Paste holds invalid UTF-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				assertRunBracketedPaste(t, tc.chunks, tc.want)
+			})
+		})
+	}
+}
+
+func openTestMachine(conn io.ReadWriteCloser) OpenMachines {
+	return Local(func(context.Context) (io.ReadWriteCloser, error) { return conn, nil })
+}
+
+func assertRunBracketedPaste(t *testing.T, chunks []string, want string) {
+	t.Helper()
+	client, server := net.Pipe()
+	input, keyboard := io.Pipe()
+	defer keyboard.Close()
+	ctx, cancel := context.WithTimeoutCause(t.Context(), 3*time.Second, errors.New("paste integration timed out"))
+	defer cancel()
+	output := newOutputBuffer()
+	runResult := make(chan error, 1)
+	opts := Options{Input: input, Output: output, Width: 80, Height: 24}
+	go func() { runResult <- Run(ctx, openTestMachine(client), opts) }()
+	serverResult := make(chan error, 1)
+	go func() { serverResult <- serveTurn(server) }()
+	output.waitFor(ctx, t, "Approval · Run command")
+	writeKeyboard(t, keyboard, "y")
+	output.waitFor(ctx, t, "settled")
+	for _, chunk := range chunks {
+		writeKeyboard(t, keyboard, chunk)
+	}
+	output.waitFor(ctx, t, want)
+	if strings.Contains(output.String(), "discard:rest") {
+		t.Fatal("the malformed paste changed the composer")
+	}
+	cancel()
+	if err := <-runResult; err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatalf("test server returned %v", err)
+	}
+	time.Sleep(time.Minute)
+	synctest.Wait()
+}
+
+func writeKeyboard(t *testing.T, keyboard *io.PipeWriter, input string) {
+	t.Helper()
+	if _, err := io.WriteString(keyboard, input); err != nil {
+		t.Fatalf("write terminal input: %v", err)
+	}
 }
 
 func assertChildSpawned(t *testing.T, children chan [2]string) {

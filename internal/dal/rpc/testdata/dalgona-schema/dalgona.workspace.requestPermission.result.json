@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/requestPermission result",
+  "type": "object",
+  "required": [
+    "decision"
+  ],
+  "properties": {
+    "decision": {
+      "enum": [
+        "allowOnce",
+        "decline"
+      ]
+    }
+  }
+}

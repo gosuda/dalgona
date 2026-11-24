@@ -65,13 +65,15 @@ The shim MUST write `pid` before it starts the command. `pid` MUST store the pro
 
 The shim MUST start the command in a new process group on Unix. It MUST record the group id in `pgid`. A group whose members are all zombies MUST count as stopped. On Windows it MUST assign the command to a named job object. On Windows it MUST start the command suspended. It MUST assign the suspended command to the job object. It MUST resume the command after the assignment. The shim MUST start the command on Windows with `CREATE_NO_WINDOW`. On Windows the shim MUST run a `cmd /C <command>` argv verbatim as `cmd /S /C "<command>"`. The `/S` switch MUST make `cmd` strip exactly the outer quote pair. The parent MUST reap the shim without waiting for the command in the caller.
 
-On Windows the shim MUST start a `workspace-write` command with the restricted token that [sandbox.md](sandbox.md) describes. The shim MUST create the token and apply the root grants before it starts the command. The shim MUST close the token handle when it assigns the started command to the job object. A failed process start leaves the handle open until the shim exits. The shim MUST NOT apply the token to a command in mode `off`.
+On Windows the shim MUST start a `workspace-write` command with the restricted token that [sandbox.md](sandbox.md) describes. The shim MUST create the token and apply the root grants before it starts the command. The shim MUST close the token handle after each start attempt, including a failed start. The shim MUST NOT apply the token to a command in mode `off`.
 
 On every exit path the shim MUST stop the remaining command process group members. It MUST send `SIGTERM`, wait up to two seconds, and then send `SIGKILL` to the group. On Windows the shim MUST set the kill-on-close limit on the job object. Closing the job handle MUST let the system stop the remaining children in the job.
 
 The shim MUST bound output draining at one second after the command exits. A drain timeout MUST NOT replace the command's own exit code or signal.
 
 `Read` MUST take a byte offset into `out`. It MUST return `Data`, `Next`, `Exit`, `Alive`, and `Path`. `Data` MUST be the bytes from the offset. `Next` MUST be the next unread offset. `Exit` MUST be the exit record when `exit` exists, otherwise unset. `Alive` MUST be true only when the stored pid and start time still name the shim. `Path` MUST name the `out` file. `Read` MUST check `exit` before taking the final output snapshot, and when `exit` appears after an empty check it MUST drain `out` again. A terminal response MUST carry every byte written before the exit record, across as many pages as that takes. For a call directory that `Start` kept after an unconfirmed stop, `Read` MUST report the stored bytes. It MUST set `Alive` to false and MUST NOT return an `Exit` record.
+
+`ReadPage` MUST return no more than one page and MUST cap the page at 1 MiB. An exit record in a page does not mean the page holds the final byte. Live polling and recovery of an `exec` tool call MUST use bounded process pages.
 
 On Windows the runner MUST retry a call-directory file open that fails with a sharing violation. It MUST retry for up to one second and then fail. The rename that publishes the file can fail a concurrent open with a sharing violation. A sharing violation MUST NOT count as a missing file.
 
@@ -146,13 +148,48 @@ On Linux, if `DALGONA_SYNCFS` is set, the shim MUST call `syncfs` on that path a
 
 Crash recovery for class `Exec` MUST follow these rules. A recorded `exit` MUST complete the call with that output. A live shim MUST stay running until exit. A gone process with no `exit` MUST complete with the output so far and error `interrupted: the host restarted while this command ran; it may have partly run`. Recovery MUST set `recovered=interrupted`. Recovery MUST NOT start the command again.
 
-File methods MUST be `ReadFile`, `WriteFile`, `Stat`, `ReadDir`, and `Remove`. `WriteFile` MUST write a temporary file and rename it. The write MUST keep the requested permission mode. On Windows `WriteFile` MUST replace a read-only destination file. The replaced file MUST keep the read-only attribute. Each method MUST stop when the context is cancelled before the operation. `ReadFile` and `Stat` MUST NOT follow a symbolic link in the final path component. The call MUST fail instead. On a Unix host, `ReadFile` MUST open the file without blocking. On a Unix host, `ReadFile` MUST fail for a path that is not a regular file.
+File methods MUST be `ReadFile`, `WriteFile`, `Stat`, `ReadDir`, and `Remove`. `WriteFile` MUST write a temporary file and rename it. The write MUST keep the requested permission mode. On Windows `WriteFile` MUST replace a read-only destination file. The replaced file MUST keep the read-only attribute. Each method MUST stop when the context is cancelled before the operation. `ReadFile` and `Stat` MUST NOT follow a symbolic link in the final path component. The call MUST fail instead. On Windows, `ReadFile` MUST also refuse a junction or another reparse point that redirects the open. On a Unix host, `ReadFile` MUST open the file without blocking. On a Unix host, `ReadFile` MUST fail for a path that is not a regular file.
 
-Output projection for `exec` MUST use `tool.Project` with `Keep` `Tail`. Output of 64 KiB or less MUST be returned whole. Larger output MUST keep the last 64 KiB. The cut MUST fall on a UTF-8 rune boundary. The projected text MUST end with this line, with `<N>` the total byte count and `<spill>` the `out` path:
+### Workspace operations
+
+`Local`, `Remote`, and the dalgona box runner implement `Workspace(ctx, WorkspaceRequest)`.
+The request names an operation, an absolute root, and slash-separated relative paths.
+The operations are `stat`, `list`, `read`, `stage`, `publish`, `discard`, `mkdir`, `rename`, and `remove`.
+`Local` opens the root once as a Go `os.Root`. It reuses the pinned root for each request. Every path step stays inside the root, so a symbolic link that leaves the root fails with `ErrWorkspaceEscape`.
+`read` opens without blocking, requires a regular file, returns at most 1 MiB, and fails with `StaleRevisionError` when the expected or post-read revision differs.
+`stage` writes a `.dalgona-upload-*` file with mode 0600 beside the target. `publish` checks the target revision and keeps the mode of an existing regular file, or uses 0644. It then renames the staging file over the target and syncs the parent directory.
+A failed `publish` removes its staging file. `rename` without `replace` refuses an existing destination. `remove` without `recursive` refuses a nonempty directory. `mkdir`, `rename`, and `remove` refuse the root itself.
+`list` returns at most 10000 entries sorted by name and skips names that are not valid UTF-8.
+The box runner retries a read operation once on a dead connection and never retries a mutation.
+
+An `exec` projection MUST keep the tail. A projection MUST retain masked output of 64 KiB or less whole.
+If the raw output exceeds 64 KiB, the daemon MUST read the recorded output in bounded pages.
+It MUST [mask](secrets.md) the pages as one logical input before projecting them.
+The projection MUST retain at most the last 64 KiB of masked output. The cut MUST fall on a UTF-8 rune boundary.
+The projection MUST append this line, with `<N>` the raw byte count and `<spill>` the `out` path.
+The daemon MUST mask the line and any diagnostic before returning them.
 
 ```
 [output truncated: <N> bytes total; full output: <spill>; page it with read offset/limit]
 ```
+
+When secret masking is enabled, live `exec` deltas MUST contain only a verified stable prefix.
+The daemon MUST mask that prefix before it records or publishes it.
+Every referenced placeholder MUST be recoverable before publication.
+A possible match can depend on later bytes, including bytes beyond a runner page.
+The daemon MUST defer the uncertain suffix to verified completion or spill output.
+It MUST NOT disable ordinary verified live output merely because masking is enabled.
+Prefix verification MUST use the authenticated masking view at release.
+A changed masking view or a failed reload MUST stop further live deltas for that call.
+Completion MUST retain its normal credential reload behavior.
+The daemon MUST append a held inline suffix only when the completed masked output has the emitted prefix.
+
+For a spill, the daemon MUST stream all masked output to a journal blob.
+The blob reference MUST name the SHA-256 digest and length of the masked bytes.
+The daemon MUST publish the complete blob atomically after masking and writing succeed.
+A cancelled or failed spill MUST remove its owned staging files and MUST NOT produce a spill reference.
+
+When masking needs to reread the input, the daemon MUST capture the recorded byte range once. Scratch storage outside the journal MUST encrypt and authenticate each page with a per-capture key kept only in memory. The daemon MUST NOT stage plaintext command output. Buffers for paging, masking, and projection MUST stay bounded independently of the output size. Reversible secret state can grow with the number and lengths of distinct secret values, as required by [secret masking](secrets.md).
 
 ## Web fetch
 

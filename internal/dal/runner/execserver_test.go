@@ -130,6 +130,38 @@ func TestExecRPC_terminateReportsRunning(t *testing.T) {
 	requireExecTerminateRunning(t, local, params)
 }
 
+func TestExecRPC_terminateBoundsCompletedOutput(t *testing.T) {
+	const size = 33 << 20
+	local := newLocalContractRunner(t).(*Local)
+	run := filepath.Join(local.dir, "large")
+	if err := os.Mkdir(run, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(run, "out")
+	writeRunFile(t, out, "")
+	if err := os.Truncate(out, size); err != nil {
+		t.Fatal(err)
+	}
+	writeRunExit(t, run)
+	params, err := encodeSignalParams("large", "kill")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	requireExecTerminateRunning(t, local, params)
+	runtime.ReadMemStats(&after)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 12<<20 {
+		t.Fatalf("terminate allocated %d bytes for a %d-byte completed output; budget is 12 MiB", allocated, size)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := callMethod(ctx, local, "process/terminate", params, trustedExecPolicy()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("terminate with canceled context = %v, want context.Canceled", err)
+	}
+}
+
 func requireExecTerminateRunning(t *testing.T, local *Local, params []byte) {
 	t.Helper()
 	result, err := callMethod(t.Context(), local, "process/terminate", params, trustedExecPolicy())

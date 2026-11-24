@@ -38,7 +38,7 @@ func (m *model) setHint(text, pending string) tea.Cmd {
 	m.hint.id++
 	m.hint.text, m.hint.pending = text, pending
 	id := m.hint.id
-	return tea.Tick(hintWindow, func(time.Time) tea.Msg { return hintExpiredMsg{id: id} })
+	return m.conn.link.scope(tea.Tick(hintWindow, func(time.Time) tea.Msg { return hintExpiredMsg{id: id} }))
 }
 
 func (m *model) clearHint() {
@@ -48,7 +48,7 @@ func (m *model) clearHint() {
 
 type caller interface {
 	Call(context.Context, string, any, any) error
-	Notify(string, any) error
+	Respond(context.Context, string, any) error
 }
 
 type model struct {
@@ -72,6 +72,7 @@ type model struct {
 	confirm       *confirmation
 	login         *loginPanel
 	help          *helpPanel
+	machines      *machinePanel
 	matchSeq      int
 	listSeq       int
 	review        *reviewState
@@ -92,6 +93,12 @@ type pendingResume struct {
 
 type connInfo struct {
 	client         caller
+	link           Link
+	machine        string
+	machinePhase   string
+	threadOpen     bool
+	foreground     bool
+	remote         string
 	opts           Options
 	done           <-chan struct{}
 	resumeSlot     chan struct{}

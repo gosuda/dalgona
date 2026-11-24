@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
@@ -633,8 +634,15 @@ func historyItems(entries []historyEntry) []listItem {
 }
 
 func historyLabel(text string) string {
-	head := strings.ToValidUTF8(text[:min(len(text), historyLabelBytes)], "")
-	return strings.Join(strings.Fields(head), " ")
+	end := 0
+	for end < len(text) {
+		next, err := inputtext.NextBoundary(text, end)
+		if err != nil || next > historyLabelBytes {
+			break
+		}
+		end = next
+	}
+	return displayText(strings.Join(strings.Fields(text[:end]), " "))
 }
 
 func historyID(item listItem) uint64 {

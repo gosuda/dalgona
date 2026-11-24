@@ -1,0 +1,153 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/history/page result",
+  "type": "object",
+  "required": [
+    "turns",
+    "pathRevision"
+  ],
+  "properties": {
+    "turns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "turnId",
+          "turnRevision",
+          "status",
+          "firstItemIndex",
+          "nextItemIndex",
+          "itemsComplete",
+          "items"
+        ],
+        "properties": {
+          "turnId": {
+            "type": "string"
+          },
+          "turnRevision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "status": {
+            "type": "string"
+          },
+          "firstItemIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "nextItemIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "itemsComplete": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "type",
+                "itemRevision",
+                "metadata",
+                "contents"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "itemRevision": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "metadata": {
+                  "type": "object"
+                },
+                "contents": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "source",
+                      "contentId",
+                      "field",
+                      "encoding",
+                      "total",
+                      "digest"
+                    ],
+                    "properties": {
+                      "source": {
+                        "type": "object",
+                        "required": [
+                          "kind"
+                        ],
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "snapshot",
+                              "live"
+                            ]
+                          },
+                          "historyId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "streamId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          }
+                        }
+                      },
+                      "contentId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "field": {
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "enum": [
+                          "utf8",
+                          "json",
+                          "binary"
+                        ]
+                      },
+                      "total": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]*)$"
+                      },
+                      "digest": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "nextCursor": {
+      "type": "string"
+    },
+    "previousCursor": {
+      "type": "string"
+    },
+    "pathRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

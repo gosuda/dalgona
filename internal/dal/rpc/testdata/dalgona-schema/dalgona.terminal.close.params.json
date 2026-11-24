@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/close params",
+  "type": "object",
+  "required": [
+    "terminalId",
+    "operationId"
+  ],
+  "properties": {
+    "terminalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "operationId": {
+      "type": "string"
+    }
+  }
+}

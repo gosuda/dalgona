@@ -4,10 +4,45 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gosuda/dalgona/internal/dal/inputtext"
 )
+
+func TestFieldWindowShowsWholeClustersAndEscapes(t *testing.T) {
+	t.Parallel()
+	draft := strings.Repeat("e\u0301\U0001F468\u200D\U0001F469x\u0007", 3)
+	bounds := inputtext.Boundaries(draft)
+	shown := make([]string, 0, len(bounds)-1)
+	for i := range bounds[1:] {
+		shown = append(shown, displayText(draft[bounds[i]:bounds[i+1]]))
+	}
+	screen := screenState{method: ansi.GraphemeWidth}
+	for room := 10; room <= 24; room++ {
+		for _, at := range bounds {
+			window, _ := fieldWindow(&screen, []rune(draft), utf8.RuneCountInString(draft[:at]), room)
+			inner := strings.TrimSuffix(strings.TrimPrefix(window, "..."), "...")
+			if !joinsWholeClusters(shown, inner) {
+				t.Fatalf("fieldWindow at byte %d in %d cells = %q, want whole clusters with whole escapes", at, room, window)
+			}
+		}
+	}
+}
+
+func joinsWholeClusters(shown []string, inner string) bool {
+	for first := range shown {
+		joined := ""
+		for _, cluster := range shown[first:] {
+			if joined += cluster; joined == inner {
+				return true
+			}
+		}
+	}
+	return inner == ""
+}
 
 func fieldWindowProblem(screen *screenState, text []rune, cursor, room int) string {
 	window, caret := fieldWindow(screen, text, cursor, room)

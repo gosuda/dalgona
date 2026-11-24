@@ -44,7 +44,7 @@ func (s *server) question(ctx context.Context, w *watch, ch <-chan agent.Update,
 		params:    userInputParams(update.Thread, w.tracker.currentTurn(), prompt),
 	}
 	askCtx, cancel := context.WithCancel(ctx)
-	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
+	started, dup := s.spawnRequest(prompt.RequestID, update.Thread, cancel, func() {
 		defer s.settle(prompt.RequestID)
 		s.requestInput(ctx, askCtx, q)
 	})
@@ -75,7 +75,7 @@ func (s *server) requestInput(serveCtx, askCtx context.Context, q questionAsk) {
 		return
 	}
 	var response jsontext.Value
-	err = s.conn.CallID(askCtx, q.requestID, methodRequestUserInput, params, &response)
+	err = s.conn.CallIDValidated(askCtx, rpc.ValidatedCall{ID: q.requestID, Method: methodRequestUserInput, Params: params, Check: s.answerCheck(q)}, &response)
 	switch {
 	case err == nil:
 		s.answerQuestion(q, inputReply(q.questions, response))

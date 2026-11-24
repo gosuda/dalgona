@@ -1,7 +1,8 @@
 # Hashline v1: conformance and integration
 
-Status: proposed implementation acceptance suite. Only V01's bounded model was
-executed. The product tests below are requirements, not claimed completed work.
+Status: implementation acceptance suite. A Go test that cites a row ID in a
+subtest name covers that row. A row without such a test is a requirement, not
+claimed completed work. V01's bounded model is executed separately.
 Contracts: [Common](hashline-common-v1.md), [Light](hashline-light-v1.md),
 [Enhanced](hashline-enhanced-v1.md).
 
@@ -124,6 +125,7 @@ Run all L-series and E-series cases in their profile specifications, plus:
 | REP-04 | Started but unsettled after crash | Indeterminate, no blind retry. |
 | REP-05 | Replay contains old header/preview | No fresh reference or observation credit. |
 | REP-06 | Repeated bare CallId in different rounds | Different runtime invocation identities. |
+| REP-07 | Pending call from an earlier host open | `reference_expired`. No preparation and no target effect. |
 
 ## T07. Resources and compatibility tests
 

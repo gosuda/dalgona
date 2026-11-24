@@ -6,6 +6,72 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
+func displayText(text string) string {
+	for i := 0; i < len(text); i++ {
+		if b := text[i]; b == '\n' || b == '\t' || b >= ' ' && b < 0x7f {
+			continue
+		}
+		return string(appendDisplay(nil, text))
+	}
+	return text
+}
+
+func appendDisplay(dst []byte, src string) []byte {
+	for i := 0; i < len(src); {
+		r, size := utf8.DecodeRuneInString(src[i:])
+		if r == utf8.RuneError && size <= 1 {
+			dst = append(dst, src[i])
+			i++
+			continue
+		}
+		if esc, ok := controlEscape(r); ok {
+			dst = append(dst, esc...)
+		} else {
+			dst = append(dst, src[i:i+size]...)
+		}
+		i += size
+	}
+	return dst
+}
+
+func controlEscape(r rune) (string, bool) {
+	switch {
+	case r == '\n' || r == '\t':
+		return "", false
+	case r < 0x20 || r == 0x7f || r >= 0x80 && r <= 0x9f || isBidiControl(r):
+		return "<U+" + hex4(r) + ">", true
+	}
+	return "", false
+}
+
+func isBidiControl(r rune) bool {
+	switch {
+	case r == 0x061c:
+		return true
+	case r >= 0x200e && r <= 0x200f:
+		return true
+	case r >= 0x202a && r <= 0x202e:
+		return true
+	case r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
+}
+
+func controlDisplay(cluster string) string {
+	if r, size := utf8.DecodeRuneInString(cluster); size == len(cluster) {
+		if esc, ok := controlEscape(r); ok {
+			return esc
+		}
+	}
+	return cluster
+}
+
+func hex4(r rune) string {
+	const digits = "0123456789ABCDEF"
+	return string([]byte{digits[r>>12&0xf], digits[r>>8&0xf], digits[r>>4&0xf], digits[r&0xf]})
+}
+
 func sanitizeText(text string) string {
 	return string(appendSanitized(nil, []byte(text)))
 }

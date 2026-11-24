@@ -72,6 +72,7 @@ const (
 	ReasonRollbackFailed         Reason = "rollback_failed"
 	ReasonSyncFailed             Reason = "sync_failed"
 	ReasonCommitUnknown          Reason = "commit_unknown"
+	ReasonInvocationMismatch     Reason = "invocation_mismatch"
 )
 
 const (

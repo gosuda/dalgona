@@ -4,9 +4,6 @@ import (
 	"context"
 	json "encoding/json/v2"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,17 +13,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/github"
 )
 
-func newStubGitHub(t *testing.T) *httptest.Server {
-	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("[]"))
-	}))
-	t.Cleanup(server.Close)
-	return server
-}
-
-func barrierRecords(t *testing.T, home string) []serviceRecord {
+func recordsOfKind(t *testing.T, home, kind string) []serviceRecord {
 	t.Helper()
 	j, err := journal.OpenShared(serviceJournalDir(home))
 	if err != nil {
@@ -39,7 +26,7 @@ func barrierRecords(t *testing.T, home string) []serviceRecord {
 		if decodeErr := json.Unmarshal(ev, &record); decodeErr != nil {
 			return decodeErr
 		}
-		if record.Kind == kindControlChanged {
+		if kind == "" || record.Kind == kind {
 			records = append(records, record)
 		}
 		return nil
@@ -50,47 +37,15 @@ func barrierRecords(t *testing.T, home string) []serviceRecord {
 	return records
 }
 
-type fakeGraphs struct {
-	mu     sync.Mutex
-	cancel int
-}
-
-func (f *fakeGraphs) CancelAll(ctx context.Context) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.cancel++
-	return nil
-}
-
-type fakeWorktrees struct {
-	mu     sync.Mutex
-	closed int
-}
-
-func (f *fakeWorktrees) Close() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.closed++
-	return nil
+func barrierRecords(t *testing.T, home string) []serviceRecord {
+	t.Helper()
+	return recordsOfKind(t, home, kindControlChanged)
 }
 
 type stubCredential struct{}
 
 func (stubCredential) Token(ctx context.Context, req github.CredentialRequest) (github.Token, error) {
 	return github.Token{Value: "test-token"}, nil
-}
-
-func testClient(t *testing.T) *github.Client {
-	t.Helper()
-	client, err := github.NewClient(github.ClientConfig{
-		BaseURL:      newStubGitHub(t).URL,
-		Repositories: []github.Repository{{Owner: "octo", Name: "repo"}},
-		Policy:       "bot",
-	}, stubCredential{}, nil)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	return client
 }
 
 func testStore(t *testing.T) *auth.Store {
@@ -107,11 +62,12 @@ func enabledConfig() Config {
 		Enabled:                 true,
 		AppID:                   42,
 		PrivateKeyFile:          "/nonexistent/key.pem",
+		Repositories:            []github.Repository{{Owner: "octo", Name: "repo"}},
 		PollInterval:            60 * time.Second,
 		Concurrency:             2,
 		JobsPerDay:              20,
 		Model:                   "model",
-		Profile:                 "daltoki",
+		Profile:                 "hashline-light",
 		JobTokenLimit:           100000,
 		DailyTokenLimit:         500000,
 		JobCostLimitUSDMicros:   5000000,
@@ -152,7 +108,7 @@ func TestConfigBounds(t *testing.T) {
 		Enabled: true, AppID: 7, PrivateKeyFile: "/keys/app.pem",
 		Repositories:        []string{"Gosuda/Dalgona", "octo/repo"},
 		PollIntervalSeconds: 60, Concurrency: 2, JobsPerDay: 20,
-		Model: "model", Profile: "daltoki",
+		Model: "model", Profile: "hashline-light",
 		JobTokenLimit: 100000, DailyTokenLimit: 500000,
 		JobCostLimitUSDMicros: 5000000, DailyCostLimitUSDMicros: 20000000,
 	}
@@ -172,7 +128,9 @@ func TestConfigBounds(t *testing.T) {
 		{"key file", func(c *config.DaltokiConfig) { c.PrivateKeyFile = "" }, "daltoki: invalid private_key_file"},
 		{"model", func(c *config.DaltokiConfig) { c.Model = "" }, "daltoki: invalid model"},
 		{"profile", func(c *config.DaltokiConfig) { c.Profile = "" }, "daltoki: invalid profile"},
-		{"no repositories", func(c *config.DaltokiConfig) { c.Repositories = nil }, "daltoki: invalid repositories"},
+		{"profile caps", func(c *config.DaltokiConfig) { c.Profile = "DalToki" }, "daltoki: invalid profile"},
+		{"profile spaces", func(c *config.DaltokiConfig) { c.Profile = "dal toki" }, "daltoki: invalid profile"},
+		{"profile unknown", func(c *config.DaltokiConfig) { c.Profile = "no-such-style" }, "daltoki: unknown profile \"no-such-style\""},
 		{"bad repository", func(c *config.DaltokiConfig) { c.Repositories = []string{"not a repo!"} }, "daltoki: invalid repositories"},
 		{"dot repository", func(c *config.DaltokiConfig) { c.Repositories = []string{"./x"} }, "daltoki: invalid repositories"},
 		{"duplicate repository", func(c *config.DaltokiConfig) { c.Repositories = []string{"a/b", "A/B"} }, "daltoki: invalid repositories"},
@@ -248,7 +206,7 @@ func assertShutdownBarrier(t *testing.T, home string) {
 }
 
 func TestStartsAfterRecovery(t *testing.T) {
-	svc, err := New(context.Background(), enabledConfig(), Dependencies{Home: t.TempDir(), Client: testClient(t), Auth: testStore(t)})
+	svc, err := New(context.Background(), enabledConfig(), fakeDeps(t, t.TempDir()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -270,7 +228,7 @@ func TestStartsAfterRecovery(t *testing.T) {
 
 func assertFailedRecoveryRefusesRun(t *testing.T) {
 	t.Helper()
-	failed, err := New(context.Background(), enabledConfig(), Dependencies{Home: t.TempDir(), Client: testClient(t), Auth: testStore(t)})
+	failed, err := New(context.Background(), enabledConfig(), fakeDeps(t, t.TempDir()))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -288,11 +246,10 @@ func assertFailedRecoveryRefusesRun(t *testing.T) {
 
 func TestRetirePreservesState(t *testing.T) {
 	home := t.TempDir()
-	graphs := &fakeGraphs{}
-	worktrees := &fakeWorktrees{}
-	svc, err := New(context.Background(), enabledConfig(), Dependencies{
-		Home: home, Graphs: graphs, Worktrees: worktrees, Client: testClient(t), Auth: testStore(t),
-	})
+	deps := fakeDeps(t, home)
+	graphs, _ := deps.Graphs.(*fakeGraphs)
+	worktrees, _ := deps.Worktrees.(*fakeWorktrees)
+	svc, err := New(context.Background(), enabledConfig(), deps)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -300,8 +257,8 @@ func TestRetirePreservesState(t *testing.T) {
 	svc.StartAfterRecovery(nil)
 	runUntilClosed(t, svc)
 	assertShutdownBarrier(t, home)
-	if graphs.cancel != 1 || worktrees.closed != 1 {
-		t.Fatalf("graphs=%d worktrees=%d", graphs.cancel, worktrees.closed)
+	if graphs.cancelled() != 1 || worktrees.closedCount() != 1 {
+		t.Fatalf("graphs=%d worktrees=%d", graphs.cancelled(), worktrees.closedCount())
 	}
 	if closeErr := svc.Close(context.Background()); closeErr != nil {
 		t.Fatalf("second Close: %v", closeErr)
@@ -311,7 +268,7 @@ func TestRetirePreservesState(t *testing.T) {
 	}
 
 	blockedHome := t.TempDir()
-	blocked, err := New(context.Background(), enabledConfig(), Dependencies{Home: blockedHome, Client: testClient(t), Auth: testStore(t)})
+	blocked, err := New(context.Background(), enabledConfig(), fakeDeps(t, blockedHome))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

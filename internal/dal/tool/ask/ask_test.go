@@ -122,7 +122,7 @@ func TestCleanStripsTerminalControls(t *testing.T) {
 		{"c1 control", "\u009bq", false, "q"},
 		{"invalid utf8 replaced", "bad\xffbyte", false, "bad\uFFFDbyte"},
 		{"apc with st terminator", "\x1b_app\x1b\\y", false, "y"},
-		{"escape before multibyte rune", "a\x1b\u00e9b", false, "ab"},
+		{"escape before multibyte rune", "a\x1b\u00e9b", false, "a\\u001B\u00e9b"},
 		{"newline folds to space", "a\nb", false, "a b"},
 		{"newline kept when multiline", "a\nb", true, "a\nb"},
 		{"tab becomes four spaces", "\tx", true, "    x"},

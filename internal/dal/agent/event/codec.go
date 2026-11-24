@@ -157,9 +157,9 @@ func decodeByTypeMail(kind string, reader *objectReader) (Event, error) {
 func decodeMetadataEvent(kind string, reader *objectReader) Event {
 	switch kind {
 	case TypeThreadNamed:
-		return ThreadNamed{Name: reader.str("name")}
+		return ThreadNamed{Name: reader.str("name"), Operation: reader.str("operation_id")}
 	case TypeThreadArchived:
-		return ThreadArchived{Archived: reader.boolean("archived")}
+		return ThreadArchived{Archived: reader.boolean("archived"), Operation: reader.str("operation_id")}
 	case TypeSandboxChosen:
 		return SandboxChosen{RequestID: reader.str("request_id"), Choice: reader.str("choice"), Cause: reader.str("cause")}
 	default:

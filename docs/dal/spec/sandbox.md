@@ -51,7 +51,7 @@ On Windows, the shim MUST start a `workspace-write` command with an unelevated r
 
 The restricting SIDs are the logon SID, one read-only capability SID, and one capability SID for each writable root. The token default DACL MUST also grant the logon SID full access (`GENERIC_ALL`). This lets the command open pipes that it creates when initialization requests rights beyond read and write. The writable roots are the roots of `workspace-write`. A mode with no writable root MUST grant no root.
 
-The runner MUST derive each capability SID with HMAC-SHA256 from a seed and the lower-case cleaned root path. The seed is 32 random bytes in the file `windows-sandbox-seed` under `os.UserConfigDir()` in the directory `dalgona`. The runner MUST create the seed once and MUST reuse it. A command can read the seed. The capability SIDs name no user and no group.
+The runner MUST derive each capability SID with HMAC-SHA256 from a seed and the lower-case cleaned root path. The seed is 32 random bytes in the file `windows-sandbox-seed` under `os.UserConfigDir()` in the directory `dalgona`. The runner MUST create the seed once and MUST reuse it. The runner MUST NOT replace an existing seed file. Concurrent first uses MUST share the seed that is published first. A seed file that does not hold 32 bytes MUST fail the command. A command can read the seed. The capability SIDs name no user and no group.
 
 Before it starts the command, the shim MUST add one allow entry for the capability SID to the DACL of each root. The entry MUST grant read, write, execute, and delete rights. The entry MUST inherit to files and subdirectories of a directory root. The shim MUST keep every existing entry of the DACL. The shim MUST skip a root whose DACL already holds the entry. A root with no DACL or a null DACL already grants every SID. The shim MUST skip such a root.
 
@@ -61,7 +61,8 @@ The shim MUST open each root without following a reparse point. The shim MUST fa
 
 The Windows filesystem MUST support persistent ACLs.
 An ACL operation failure MUST refuse the command before it starts.
-The workspace-write roots include the command directory, temporary directory, user cache directory, and configured writable roots.
+The workspace-write roots are the caller-declared writable roots, the temporary directory, and the user cache directory.
+The shim MUST NOT add the command directory to the workspace-write roots.
 Read-only policy MUST ignore configured writable roots and grant no filesystem writes.
 The shim MUST close its token handle after each start attempt, including a failed start.
 Windows MUST refuse a nonempty denied socket list before token creation.

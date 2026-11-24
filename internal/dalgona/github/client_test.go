@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,32 @@ func TestNotModifiedIsSuccess(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("calls = %d", calls)
+	}
+}
+
+func TestIssuesFirstPageListsRepositoryIssues(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.Query()
+		fmt.Fprint(w, `[{"id":5,"number":7,"title":"Crash","state":"open"}]`)
+	}))
+	defer server.Close()
+	client := testClient(t, server, policyBot, &stubCredential{tokens: []string{"tok"}})
+	since := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	page, _, err := client.Issues(context.Background(), IssuesRequest{Repository: repo(), Labels: []string{"daltoki"}, Since: since})
+	if err != nil {
+		t.Fatalf("Issues: %v", err)
+	}
+	if gotPath != "/repos/octo/repo/issues" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	want := url.Values{"state": {"all"}, "labels": {"daltoki"}, "since": {"2026-02-03T04:05:06Z"}, "per_page": {"100"}}
+	if gotQuery.Encode() != want.Encode() {
+		t.Fatalf("query = %q, want %q", gotQuery.Encode(), want.Encode())
+	}
+	if len(page.Items) != 1 || page.Items[0].Number != 7 {
+		t.Fatalf("items = %+v", page.Items)
 	}
 }
 
@@ -827,13 +854,14 @@ func assertTokenPermissions(t *testing.T, body map[string]any) {
 	if !ok {
 		t.Fatalf("permissions = %v", body["permissions"])
 	}
-	for _, family := range []string{"issues", "pull_requests", "metadata"} {
-		if _, ok := perms[family]; !ok {
-			t.Fatalf("missing permission %s in %v", family, perms)
-		}
+	want := map[string]any{"issues": "write", "pull_requests": "write", "contents": "write"}
+	if len(perms) != len(want) {
+		t.Fatalf("permissions = %v, want exactly %v", perms, want)
 	}
-	if _, ok := perms["workflows"]; ok {
-		t.Fatal("workflows permission requested")
+	for family, access := range want {
+		if perms[family] != access {
+			t.Fatalf("permission %s = %v in %v, want %v", family, perms[family], perms, access)
+		}
 	}
 }
 

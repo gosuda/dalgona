@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json/jsontext"
+	"strconv"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
@@ -11,7 +12,10 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/inputtext"
 )
+
+type imageSource func(admit func(int64) error) (agent.Image, error)
 
 type turnParams struct {
 	threadID       string
@@ -22,6 +26,8 @@ type turnParams struct {
 	approvalPolicy string
 	sandboxPolicy  string
 	text           []string
+	texts          []inputtext.Item
+	imageSources   []imageSource
 	images         []agent.Image
 	imageErr       error
 	imageBytes     int64
@@ -116,31 +122,88 @@ func stricterApproval(thread, turn config.Approval) config.Approval {
 	return turn
 }
 
+func resolveImageAlt(altText, altAlias string) string {
+	if altText != "" {
+		return altText
+	}
+	return altAlias
+}
+
+func (p *turnParams) recordImageMeta(name, altText, altAlias string) {
+	if name != "" {
+		p.addInputText("name", name)
+	}
+	if altText != "" {
+		p.addInputText("altText", altText)
+	}
+	if altAlias != "" {
+		p.addInputText("alt", altAlias)
+	}
+}
+
+func (p *turnParams) queueURLImage(url, name, altText, altAlias string) {
+	p.addInputText("url", url)
+	p.recordImageMeta(name, altText, altAlias)
+	alt := resolveImageAlt(altText, altAlias)
+	p.imageSources = append(p.imageSources, func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, name, alt, admit) })
+}
+
+func (p *turnParams) queuePathImage(path, name, altText, altAlias string) {
+	p.addInputText("path", path)
+	p.recordImageMeta(name, altText, altAlias)
+	alt := resolveImageAlt(altText, altAlias)
+	p.imageSources = append(p.imageSources, func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, name, alt, admit) })
+}
+
 func (p *turnParams) readInput(d *jsontext.Decoder) error {
-	var kind, text, path, url string
-	err := rpc.ReadMembers(d, stringMembers(map[string]*string{"type": &kind, "text": &text, "path": &path, "url": &url}))
+	var kind, text, path, url, name, altText, altAlias string
+	err := rpc.ReadMembers(d, stringMembers(map[string]*string{"type": &kind, "text": &text, "path": &path, "url": &url, "name": &name, "altText": &altText, "alt": &altAlias}))
 	if err != nil {
 		return err
 	}
 	switch kind {
 	case "text":
+		p.addInputText("text", text)
 		p.text = append(p.text, text)
 	case "mention", "skill":
+		p.addInputText("path", path)
 		p.text = append(p.text, "@"+path)
 	case "image":
-		p.takeImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, admit) })
+		p.queueURLImage(url, name, altText, altAlias)
 	case "localImage":
-		p.takeImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, admit) })
+		p.queuePathImage(path, name, altText, altAlias)
 	default:
 		return invalidParams("unsupported input type " + kind)
 	}
 	return nil
 }
 
-func decodeTurn(params jsontext.Value) (turnParams, error) {
+func (p *turnParams) addInputText(member, text string) {
+	field := "input[" + strconv.Itoa(len(p.texts)) + "]." + member
+	p.texts = append(p.texts, inputtext.Item{Field: field, Policy: directTextPolicy, Text: text})
+}
+
+func parseTurn(params jsontext.Value) (turnParams, error) {
 	var p turnParams
 	err := decodeParams(params, p.member)
+	p.texts = append(p.texts, inputtext.Item{Field: "model", Policy: directTextPolicy, Text: p.model})
 	return p, err
+}
+
+func turnTexts(params jsontext.Value) ([]inputtext.Item, error) {
+	p, err := parseTurn(params)
+	return p.texts, err
+}
+
+func decodeTurn(params jsontext.Value) (turnParams, error) {
+	p, err := parseTurn(params)
+	if err != nil {
+		return p, err
+	}
+	for _, source := range p.imageSources {
+		p.takeImage(source)
+	}
+	return p, nil
 }
 
 func (s *server) turnStart(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {

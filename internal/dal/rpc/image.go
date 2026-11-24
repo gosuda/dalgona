@@ -7,5 +7,7 @@ func (img ItemImage) Encode(o *Writer) {
 	o.Str("mime", img.Mime)
 	o.Int("bytes", img.Bytes)
 	o.OptStr("path", img.Path)
+	o.OptStr("name", img.Name)
+	o.OptStr("altText", img.AltText)
 	o.Close()
 }

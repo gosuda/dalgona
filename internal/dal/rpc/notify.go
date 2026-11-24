@@ -302,6 +302,9 @@ func (p CommandExecutionRequestApprovalParams) Encode(o *Writer) {
 	o.OptStr("command", p.Command)
 	o.OptStr("cwd", p.Cwd)
 	o.OptStr("reason", p.Reason)
+	if p.Escalated {
+		o.Bool("escalated", true)
+	}
 	o.Close()
 }
 

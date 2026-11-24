@@ -18,8 +18,8 @@ const (
 )
 
 type mcpStatusParams struct {
-	cursor, serverName, threadID string
-	limit                        int
+	cursor, serverName, threadID, configVersion string
+	limit                                       int
 }
 
 func decodeMCPStatusParams(params jsontext.Value) (mcpStatusParams, error) {
@@ -35,6 +35,8 @@ func decodeMCPStatusParams(params jsontext.Value) (mcpStatusParams, error) {
 			p.threadID, err = rpc.ReadString(d)
 		case "limit":
 			p.limit, err = rpc.ReadInt(d)
+		case "configVersion":
+			p.configVersion, err = rpc.ReadString(d)
 		default:
 			err = d.SkipValue()
 		}
@@ -57,6 +59,9 @@ func (s *server) mcpServerStatusList(ctx context.Context, params jsontext.Value)
 	cwd, err := s.mcpWorkspace(p.threadID)
 	if err != nil {
 		return nil, err
+	}
+	if s.mcpProvenance() {
+		return s.nativeMCPStatus(ctx, p, cwd)
 	}
 	start, err := cursorOffset(p.cursor)
 	if err != nil {
@@ -87,8 +92,9 @@ func (s *server) mcpWorkspace(threadID string) (string, error) {
 }
 
 type mcpStatusResponse struct {
-	servers    []agent.MCPServerStatus
-	nextCursor string
+	servers       []agent.MCPServerStatus
+	nextCursor    string
+	configVersion string
 }
 
 func (r mcpStatusResponse) Encode(o *rpc.Writer) {
@@ -96,18 +102,28 @@ func (r mcpStatusResponse) Encode(o *rpc.Writer) {
 	o.Key("data")
 	o.OpenArray()
 	for _, status := range r.servers {
-		writeMCPServerStatus(o, status)
+		source := ""
+		if r.configVersion != "" {
+			source = status.Source
+		}
+		writeMCPServerStatus(o, status, source)
 	}
 	o.CloseArray()
 	if r.nextCursor != "" {
 		o.Str("nextCursor", r.nextCursor)
 	}
+	if r.configVersion != "" {
+		o.Str("configVersion", r.configVersion)
+	}
 	o.Close()
 }
 
-func writeMCPServerStatus(o *rpc.Writer, status agent.MCPServerStatus) {
+func writeMCPServerStatus(o *rpc.Writer, status agent.MCPServerStatus, source string) {
 	o.Open()
 	o.Str("name", status.Name)
+	if source != "" {
+		o.Str("source", source)
+	}
 	o.Str("authStatus", cmp.Or(status.AuthStatus, "unsupported"))
 	o.Key("tools")
 	o.Open()

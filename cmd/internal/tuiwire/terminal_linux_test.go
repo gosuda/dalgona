@@ -56,7 +56,7 @@ func TestRunStartsOnTerminalStdout(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, conn, app.TUIOptions{Stdin: strings.NewReader(""), Stdout: stdout})
+		done <- Local(conn.dial)(ctx, app.TUIOptions{Stdin: strings.NewReader(""), Stdout: stdout})
 	}()
 	select {
 	case <-conn.first:
@@ -73,5 +73,8 @@ func TestRunStartsOnTerminalStdout(t *testing.T) {
 		}
 	case <-time.After(guard):
 		t.Fatal("Run did not return after ctx ended")
+	}
+	if n := conn.closed.Load(); n != 1 {
+		t.Fatalf("terminal closed its transport %d times, want 1", n)
 	}
 }

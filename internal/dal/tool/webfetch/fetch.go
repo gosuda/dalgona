@@ -360,7 +360,7 @@ func textualMediaType(mediaType string) bool {
 
 func executeRemote(ctx context.Context, id string, args arguments, env tool.Env) (tool.Result, error) {
 	if id == "" {
-		return tool.Result{}, errors.New("web_fetch: call id is required for remote fetch")
+		return tool.Result{Failure: tool.FailureInternal}, errors.New("web_fetch: call id is required for remote fetch")
 	}
 	remoteCtx, cancel := context.WithTimeoutCause(ctx, 35*time.Second, errFetchTimeout)
 	defer cancel()
@@ -371,17 +371,18 @@ func executeRemote(ctx context.Context, id string, args arguments, env tool.Env)
 		Sandbox: env.Sandbox,
 	}
 	if err := env.Runner.Start(remoteCtx, spec); err != nil {
-		return tool.Result{}, fmt.Errorf("web_fetch: start subprocess: %w", err)
+		return tool.Result{Failure: tool.MachineryFailure(remoteCtx, err)}, fmt.Errorf("web_fetch: start subprocess: %w", err)
 	}
 	result, err := collectRemote(remoteCtx, env.Runner, id)
 	if err != nil {
+		failed := tool.Result{Failure: tool.MachineryFailure(remoteCtx, err)}
 		if killErr := killRemote(remoteCtx, env.Runner, id); killErr != nil {
-			return tool.Result{}, errors.Join(err, killErr)
+			return failed, errors.Join(err, killErr)
 		}
 		if waitErr := runner.AwaitExit(ctx, env.Runner, id, 5*time.Second); waitErr != nil {
-			return tool.Result{}, errors.Join(err, fmt.Errorf("web_fetch: wait for subprocess exit: %w", waitErr))
+			return failed, errors.Join(err, fmt.Errorf("web_fetch: wait for subprocess exit: %w", waitErr))
 		}
-		return tool.Result{}, err
+		return failed, err
 	}
 	code := result.exit.Code
 	return tool.Result{Output: result.data, OK: code == 0, ExitCode: &code, Path: result.path}, nil

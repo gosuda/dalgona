@@ -22,7 +22,10 @@ func (m *model) imageRefusal() string {
 }
 
 func (m *model) imagePasteCmd(content string, at int) tea.Cmd {
-	text := sanitizeText(pasteLineBreaks.Replace(content))
+	text, ok := foldValidPaste(content)
+	if !ok {
+		return nil
+	}
 	path, ok := imagePath(strings.TrimSuffix(text, "\n"))
 	if !ok {
 		return nil
@@ -31,7 +34,7 @@ func (m *model) imagePasteCmd(content string, at int) tea.Cmd {
 		m.noticef("%s", refusal)
 		return nil
 	}
-	return pastedImage(text, at, path)
+	return m.conn.link.scope(pastedImage(text, at, path))
 }
 
 func (m *model) clipboardImage() tea.Cmd {
@@ -48,9 +51,9 @@ func (m *model) clipboardImage() tea.Cmd {
 		return nil
 	}
 	if runtime.GOOS == "windows" {
-		return clipboardBase64(argv)
+		return m.conn.link.scope(clipboardBase64(argv))
 	}
-	return clipboardBinary(argv)
+	return m.conn.link.scope(clipboardBinary(argv))
 }
 
 func (m *model) applyImage(msg imageMsg) {

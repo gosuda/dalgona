@@ -57,7 +57,12 @@ Sha values MUST be SHA-256 of the file bytes, as lowercase hex. An absent file M
 
 An edit that recovery runs, replays, or completes MUST NOT be judged.
 
-A call with `hashline.invocation_started` and no `tool.completed` MUST match the table row of its other records. Recovery MUST NOT read the invocation records.
+A call with `hashline.invocation_started` and no `tool.completed` MUST NOT match the `tool.started` edit rows. Recovery MUST NOT run it again and MUST NOT change its files. Recovery reads its invocation records, as [C16](hashline/hashline-common-v1.md#c16-invocation-identity-and-replay) states:
+
+- With `hashline.invocation_settled`, recovery MUST journal the settled `ok`, output, spill, and metadata with `recovered=replayed`. The `hashline` object MUST carry `replayed=true`.
+- Without it, recovery MUST journal `ok=false` and `recovered=interrupted`. The `hashline` object MUST carry status `indeterminate`, commit state `unknown`, reason `commit_unknown`, and the current state of each started file.
+
+A `hashline-light` or `hashline-enhanced` call in the row `approval.requested` without `approval.resolved` comes from an earlier open, so its evidence expired. Recovery MUST NOT decide it again or run it. Recovery MUST journal `approval.resolved` with `decline` and the existing request id, then `tool.completed` with `ok=false` and reason `reference_expired`.
 
 Recovery MUST NOT run the [turn review](edit-review.md).
 

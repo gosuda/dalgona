@@ -106,7 +106,7 @@ func (m *history) revert() {
 		return
 	}
 	target := turns[m.rng.IntN(len(turns))]
-	if err := m.thread.Revert(m.path[target].turn); err != nil {
+	if err := m.thread.Revert(m.t.Context(), m.path[target].turn); err != nil {
 		m.t.Fatal(err)
 	}
 	keep := target

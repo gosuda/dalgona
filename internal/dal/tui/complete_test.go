@@ -136,9 +136,6 @@ func TestPaletteCompletionKeepsChips(t *testing.T) {
 		if got, want := m.input.composer.Expanded(), "/model "+pasted; got != want {
 			t.Fatalf("%s gave %q, want %q", key.String(), got, want)
 		}
-		if hasPrivateUse(m.input.composer.Expanded()) {
-			t.Fatalf("%s left a chip atom in the sent text: %q", key.String(), m.input.composer.Expanded())
-		}
 		if got, want := m.input.composer.cursor, len([]rune("/model ")); got != want {
 			t.Fatalf("%s left the caret at %d, want %d after the space", key.String(), got, want)
 		}
@@ -490,6 +487,23 @@ func TestSubmittedCommandEndsAtChipLikeThePalette(t *testing.T) {
 	}
 }
 
+func TestSubmittedCommandReadsTheChipAfterItAsItsArgument(t *testing.T) {
+	t.Parallel()
+	for _, between := range []string{"", " "} {
+		t.Run("/model"+between, func(t *testing.T) {
+			t.Parallel()
+			caller := new(fakeCaller)
+			submitBesideChip(t, caller, "/model"+between)
+			if len(caller.calls) != 1 || caller.calls[0].method != "config/value/write" {
+				t.Fatalf("enter on /model%s and a chip made calls %#v, want one config/value/write", between, caller.calls)
+			}
+			if params, ok := caller.calls[0].params.(rpc.ConfigValueWriteParams); !ok || params.Value != pasteLines(12) {
+				t.Fatalf("model written = %#v, want the chip text as the argument", caller.calls[0].params)
+			}
+		})
+	}
+}
+
 func completeFileBesideChip(t *testing.T, side string, key tea.KeyPressMsg) (model, string) {
 	t.Helper()
 	pasted := pasteLines(12)
@@ -526,6 +540,20 @@ func TestFilePaletteEndsTheTokenAtAChip(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestFilePaletteClosesWhenTheCaretPassesAChipAfterTheToken(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(&fileSearchCaller{hits: []fileHit{{Path: "src/main.go"}}}, Options{Cwd: "/work"})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = typeCommand(t, m, "@sr")
+	if popup := m.input.popup; popup == nil || popup.kind != popupFile {
+		t.Fatalf("typing @sr opened %+v, want the file palette", popup)
+	}
+	m, _ = drive(t, m, tea.PasteMsg{Content: pasteLines(12)})
+	if m.input.popup != nil {
+		t.Fatalf("palette %+v stayed open with the caret after a chip, outside the @ token", m.input.popup)
 	}
 }
 

@@ -290,7 +290,7 @@ func TestParallelCallsShareCutoffAgentBatch(t *testing.T) {
 	}
 }
 
-func TestEvidenceCutoffInBand(t *testing.T) {
+func TestEvidenceCutoffInBandIncludesEarlierRequest(t *testing.T) {
 	t.Parallel()
 	log := newEvidenceLog()
 	h := newHarness(t, func(h *harness) {
@@ -312,6 +312,11 @@ func TestEvidenceCutoffInBand(t *testing.T) {
 		{ID: "d1", Name: "deliver", Args: jsontext.Value(`{}`)},
 		{ID: "p1", Name: "probe", Args: jsontext.Value(`{}`)},
 	} {
+		status, err := thread.Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.inBand.begin(uint64(status.Head))
 		if _, err := w.inBandEvents(t.Context(), item); err != nil {
 			t.Fatalf("agent: in-band %s: %v", item.ID, err)
 		}

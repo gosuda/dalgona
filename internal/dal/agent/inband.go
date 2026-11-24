@@ -12,6 +12,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/cursor"
 	"github.com/gosuda/dalgona/internal/dal/tool"
+	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
 type inBandCalls struct {
@@ -19,10 +20,60 @@ type inBandCalls struct {
 	calls   map[string]event.ToolCall
 	events  map[string][]event.Event
 	cancel  bool
+	request uint64
+	owners  map[string]*invocationOwner
+	reviews *reviewRound
 }
 
 func newInBandCalls() *inBandCalls {
-	return &inBandCalls{calls: make(map[string]event.ToolCall), events: make(map[string][]event.Event)}
+	return &inBandCalls{
+		calls: make(map[string]event.ToolCall), events: make(map[string][]event.Event),
+		owners: make(map[string]*invocationOwner),
+	}
+}
+
+func (c *inBandCalls) begin(request uint64) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.request = request
+	c.owners = make(map[string]*invocationOwner)
+}
+
+func (c *inBandCalls) requestSeq() uint64 {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.request
+}
+
+func (c *inBandCalls) own(claim invocationClaim) (*invocationOwner, bool) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if owner, held := c.owners[claim.identity]; held {
+		return owner, true
+	}
+	owner := &invocationOwner{fingerprint: claim.fingerprint, done: make(chan struct{})}
+	c.owners[claim.identity] = owner
+	return owner, false
+}
+
+func (c *inBandCalls) reviewRound() *reviewRound {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.reviews == nil {
+		c.reviews = &reviewRound{}
+	}
+	return c.reviews
+}
+
+func (c *inBandCalls) takeReviews() *reviewRound {
+	if c == nil {
+		return nil
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	round := c.reviews
+	c.reviews = nil
+	return round
 }
 
 func (c *inBandCalls) put(call event.ToolCall, events []event.Event) {
@@ -35,10 +86,10 @@ func (c *inBandCalls) put(call event.ToolCall, events []event.Event) {
 func (c *inBandCalls) take(callID string) ([]event.Event, bool) {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	events, ok := c.events[callID]
-	delete(c.calls, callID)
+	_, resolved := c.calls[callID]
+	events := c.events[callID]
 	delete(c.events, callID)
-	return events, ok
+	return events, resolved
 }
 
 func (c *inBandCalls) drain() ([]event.ToolCall, []event.Event) {
@@ -86,10 +137,11 @@ func (w *worker) interruptTurn(ctx context.Context) {
 	_, _ = ask(ctx, w.t, func(a *actor) bool { a.interrupt(); return true })
 }
 
-func (w *worker) openStream(ctx context.Context, providerID string, req model.Request) (model.Stream, error) {
+func (w *worker) openStream(ctx context.Context, providerID string, req model.Request, contextSeq uint64) (model.Stream, error) {
 	if w.inBand == nil {
 		w.inBand = newInBandCalls()
 	}
+	w.inBand.begin(contextSeq)
 	provider, ok := w.registry.Provider(providerID)
 	if native, inBand := provider.(*cursor.Provider); ok && inBand {
 		return native.StreamWith(ctx, req, cursor.StreamOptions{InBand: w.runInBand})
@@ -133,19 +185,51 @@ func (w *worker) inBandEvents(ctx context.Context, call model.ToolCall) (event.T
 
 	toolCall := event.ToolCall{ID: call.ID, Name: call.Name, Args: args, Freeform: call.Freeform}
 	requestID := newID("req-")
-	guard, err := w.prepareGuard(ctx, toolCall, requestID)
+	p, denial := w.prepareInBand(toolCall)
+	if denial != nil {
+		return w.denyInBand(ctx, toolCall, requestID, *denial)
+	}
+	return w.dispatchInBand(ctx, p, requestID)
+}
+
+func (w *worker) dispatchInBand(ctx context.Context, p *prepared, requestID string) (event.ToolCompleted, error) {
+	p.evidence = snapshot.Evidence{Consumer: snapshot.ConsumerModel, Cutoff: w.inBand.requestSeq()}
+	profile, ok := profileOf(p.tool)
+	if !ok {
+		return w.runInBandCall(ctx, p, requestID)
+	}
+	claim := w.claimFor(p, profile, p.evidence.Cutoff)
+	owner, held := w.inBand.own(*claim)
+	if held {
+		return owner.join(ctx, *claim, p.call.ID)
+	}
+	p.claim = claim
+	completed, err := w.runInBandCall(ctx, p, requestID)
+	owner.finish(completed, err)
+	return completed, err
+}
+
+func (w *worker) runInBandCall(ctx context.Context, p *prepared, requestID string) (event.ToolCompleted, error) {
+	repeated, err := w.repeated(ctx, p.call.Name, p.args)
+	if err != nil {
+		return event.ToolCompleted{}, err
+	}
+	if repeated {
+		return w.denyInBand(ctx, p.call, requestID, inBandDenial{p.class, "", decline("rule:loop-guard", loopGuardMessage)})
+	}
+	guard, err := w.guardInBand(ctx, p, requestID)
 	if err != nil {
 		return event.ToolCompleted{}, err
 	}
 	if guard.denial != nil {
-		return w.denyInBand(ctx, toolCall, requestID, *guard.denial)
+		return w.denyInBand(ctx, p.call, requestID, *guard.denial)
 	}
-	v, err := w.approveInBand(ctx, guard.p, guard.gc, requestID)
+	v, err := w.approveInBand(ctx, p, guard.gc, requestID)
 	if err != nil {
-		guard.p.discardPlan()
+		p.discardPlan()
 		return event.ToolCompleted{}, err
 	}
-	return w.resolveInBand(ctx, guard.p, toolCall, v)
+	return w.resolveInBand(ctx, p, p.call, v)
 }
 
 func (w *worker) resolveInBand(ctx context.Context, p *prepared, toolCall event.ToolCall, v verdict) (event.ToolCompleted, error) {
@@ -166,12 +250,11 @@ func (w *worker) resolveInBand(ctx context.Context, p *prepared, toolCall event.
 }
 
 func (w *worker) journalCover(ctx context.Context, toolCall event.ToolCall) error {
-	status, err := w.t.Status()
-	if err != nil {
-		return err
+	cover := event.AssistantMessage{
+		ItemID: newID("item-"), TurnID: w.turnID, ToolCalls: []event.ToolCall{toolCall},
+		StopReason: "tool_calls", ContextSeq: w.inBand.requestSeq(),
 	}
-	cover := event.AssistantMessage{ItemID: newID("item-"), TurnID: w.turnID, ToolCalls: []event.ToolCall{toolCall}, StopReason: "tool_calls", ContextSeq: uint64(status.Head)}
-	_, err = w.t.appendEvents(ctx, cover)
+	_, err := w.t.appendEvents(ctx, cover)
 	return err
 }
 
@@ -194,16 +277,11 @@ func (w *worker) approveInBand(ctx context.Context, p *prepared, gc gateCall, re
 }
 
 type inBandGuard struct {
-	p      *prepared
 	gc     gateCall
 	denial *inBandDenial
 }
 
-func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requestID string) (inBandGuard, error) {
-	p, denial, err := w.prepareInBand(ctx, toolCall)
-	if err != nil || denial != nil {
-		return inBandGuard{denial: denial}, err
-	}
+func (w *worker) guardInBand(ctx context.Context, p *prepared, requestID string) (inBandGuard, error) {
 	by := "mode:" + string(w.settings.Approval)
 	gc, gateErr := w.gateCall(ctx, p, requestID)
 	if gateErr != nil {
@@ -212,34 +290,30 @@ func (w *worker) prepareGuard(ctx context.Context, toolCall event.ToolCall, requ
 		refusal.meta = planRefusalMeta(gateErr)
 		return inBandGuard{gc: gc, denial: &inBandDenial{p.class, summary(gc), refusal}}, nil
 	}
-	if err := w.journalCover(ctx, toolCall); err != nil {
+	if err := w.journalCover(ctx, p.call); err != nil {
 		p.discardPlan()
 		return inBandGuard{}, err
 	}
-	return inBandGuard{p: p, gc: gc}, nil
+	return inBandGuard{gc: gc}, nil
 }
 
-func (w *worker) prepareInBand(ctx context.Context, toolCall event.ToolCall) (*prepared, *inBandDenial, error) {
+func (w *worker) prepareInBand(toolCall event.ToolCall) (*prepared, *inBandDenial) {
 	by := "mode:" + string(w.settings.Approval)
 	item, ok := w.tools.byName[toolCall.Name]
 	if !ok {
-		return nil, &inBandDenial{tool.ClassRemote, "", decline(by, "Tool "+toolCall.Name+" not found")}, nil
+		return nil, &inBandDenial{tool.ClassRemote, "", decline(by, "Tool "+toolCall.Name+" not found")}
+	}
+	if refusal, refused := w.readOnlyRefusal(item.Class(), toolCall.Name); refused {
+		return nil, &inBandDenial{item.Class(), "", refusal}
 	}
 	if err := w.t.ext.Direct(toolCall.Name); err != nil {
-		return nil, &inBandDenial{item.Class(), "", decline(by, err.Error())}, nil
+		return nil, &inBandDenial{item.Class(), "", decline(by, err.Error())}
 	}
 	args, repairs, fail := repairArgs(item.Spec(), toolCall.Args)
 	if fail != "" {
-		return nil, &inBandDenial{item.Class(), "", decline(by, "invalid arguments for "+toolCall.Name+": "+fail)}, nil
+		return nil, &inBandDenial{item.Class(), "", decline(by, "invalid arguments for "+toolCall.Name+": "+fail)}
 	}
-	repeated, err := w.repeated(ctx, toolCall.Name, args)
-	if err != nil {
-		return nil, nil, err
-	}
-	if repeated {
-		return nil, &inBandDenial{item.Class(), "", decline("rule:loop-guard", loopGuardMessage)}, nil
-	}
-	return &prepared{call: toolCall, tool: item, class: item.Class(), args: args, repairs: repairs}, nil, nil
+	return &prepared{call: toolCall, tool: item, class: item.Class(), args: args, repairs: repairs}, nil
 }
 
 func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolCompleted, error) {
@@ -254,6 +328,7 @@ func (w *worker) executeInBand(ctx context.Context, p *prepared) (event.ToolComp
 	}
 	w.deliver(completed, head)
 	w.inBand.put(p.call, nil)
+	w.queueReview(w.turnCtx, w.inBand.reviewRound(), p, completed)
 	return completed, nil
 }
 
@@ -293,8 +368,12 @@ func (w *worker) journalInBand(ctx context.Context, calls []event.ToolCall) ([]e
 	pending := make([]event.ToolCall, 0, len(calls))
 	var events []event.Event
 	for _, call := range calls {
+		if !call.Resolved {
+			pending = append(pending, call)
+			continue
+		}
 		recorded, ok := w.inBand.take(call.ID)
-		if !ok || !call.Resolved {
+		if !ok {
 			pending = append(pending, call)
 			continue
 		}
@@ -308,6 +387,13 @@ func (w *worker) flushInBand(ctx context.Context, head uint64) {
 	if w.inBand == nil {
 		return
 	}
+	w.journalStranded(ctx, head)
+	if err := w.joinReviews(ctx); err != nil {
+		w.t.host.log.Warn("agent: journal in-band edit reviews", "thread", w.t.id, "error", err)
+	}
+}
+
+func (w *worker) journalStranded(ctx context.Context, head uint64) {
 	calls, events := w.inBand.drain()
 	if len(calls) == 0 || len(events) == 0 {
 		return

@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/checkpoint/open result",
+  "type": "object",
+  "required": [
+    "checkpoint",
+    "status"
+  ],
+  "properties": {
+    "checkpoint": {
+      "type": "object",
+      "required": [
+        "checkpointId",
+        "version",
+        "engineVersion",
+        "nextOffset",
+        "resizeOrdinal",
+        "columns",
+        "rows",
+        "total",
+        "digest",
+        "expiresAt"
+      ],
+      "properties": {
+        "checkpointId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "engineVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nextOffset": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "resizeOrdinal": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 240
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 120
+        },
+        "total": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expiresAt": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "required": [
+        "state",
+        "inputState"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "running",
+            "exited",
+            "closed"
+          ]
+        },
+        "inputState": {
+          "enum": [
+            "ready",
+            "uncertain",
+            "closed"
+          ]
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "finalOffset": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "finalResizeOrdinal": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "outputExpiresAt": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        }
+      }
+    }
+  }
+}

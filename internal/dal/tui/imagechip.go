@@ -14,8 +14,8 @@ func (ch chip) tag(number int) string {
 
 func (c editor) images() []chip {
 	var out []chip
-	for _, r := range c.text {
-		if ch, ok := c.chipOf(r); ok && ch.image != "" {
+	for _, ch := range c.chips {
+		if ch.image != "" {
 			out = append(out, ch)
 		}
 	}
@@ -30,22 +30,34 @@ func (c editor) imageBytes() int {
 	return total
 }
 
+func (c editor) holds(run []rune, at int) bool {
+	end := at + len(run)
+	if len(run) == 0 || end > len(c.text) || !slices.Equal(c.text[at:end], run) {
+		return false
+	}
+	return c.chipIndex(at+1) == c.chipIndex(end)
+}
+
 func (c *editor) attach(pasted string, at int, ch chip) {
 	run := []rune(pasted)
-	end := at + len(run)
-	c.chips = append(c.chips, ch)
-	n := len(c.chips)
-	c.chips[n-1].label = c.chips[n-1].tag(n)
-	atom := chipAtom(n - 1)
-	if len(run) == 0 || end > len(c.text) || !slices.Equal(c.text[at:end], run) {
-		c.insert([]rune{atom})
+	if !c.holds(run, at) {
+		c.addChip(ch)
 		return
 	}
-	c.text = slices.Replace(c.text, at, end, atom)
+	end := at + len(run)
+	slot, resident := c.chipIndex(at+1), c.chipsAt(at)
+	c.cutText(at, end)
+	ch.at = at
+	c.chips = slices.Concat(c.chips[:slot], []chip{ch}, c.chips[slot:])
 	switch {
 	case c.cursor >= end:
-		c.cursor += 1 - len(run)
+		c.cursor -= len(run)
+		if c.cursor == at {
+			c.lead += resident + 1
+		}
 	case c.cursor > at:
-		c.cursor = at + 1
+		c.cursor, c.lead = at, resident+1
 	}
+	c.verbatimText = nil
+	c.prune()
 }

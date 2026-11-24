@@ -26,6 +26,8 @@ func serveExecRPC(ctx context.Context, conn io.ReadWriteCloser, local *Local, po
 	stop := context.AfterFunc(ctx, closeConn)
 	defer stop()
 	defer closeConn()
+	pinnedCtx, pins := contextWithPinTable(ctx)
+	defer pins.closeAll()
 	reader := bufio.NewReaderSize(conn, 32<<10)
 	writer := rpcWriter{w: conn, mu: &sync.Mutex{}}
 	for {
@@ -36,7 +38,7 @@ func serveExecRPC(ctx context.Context, conn io.ReadWriteCloser, local *Local, po
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		if err := dispatchRPC(ctx, writer, local, line, policy); err != nil {
+		if err := dispatchRPC(pinnedCtx, writer, local, line, policy); err != nil {
 			return err
 		}
 	}
@@ -126,6 +128,16 @@ var rpcMethods = map[string]func(context.Context, *Local, jsontext.Value) (jsont
 	"fs/getMetadata":    rpcMetadata,
 	"fs/readDirectory":  rpcReadDir,
 	"fs/remove":         rpcRemove,
+	"workspace/call":    rpcWorkspace,
+	"workspace/open":    rpcWorkspaceOpen,
+	"workspace/close":   rpcWorkspaceClose,
+	"workspace/check":   rpcWorkspaceCheck,
+	"terminal/open":     rpcTerminalOpen,
+	"terminal/read":     rpcTerminalRead,
+	"terminal/write":    rpcTerminalWrite,
+	"terminal/resize":   rpcTerminalResize,
+	"terminal/signal":   rpcTerminalSignal,
+	"terminal/close":    rpcTerminalClose,
 }
 
 func rpcInitialize(context.Context, *Local, jsontext.Value) (jsontext.Value, error) {
@@ -148,7 +160,7 @@ func rpcRead(ctx context.Context, local *Local, params jsontext.Value) (jsontext
 	if err != nil {
 		return nil, err
 	}
-	out, err := local.readPage(ctx, page.id, page.offset, page.limit)
+	out, err := local.ReadPage(ctx, page.id, page.offset, page.limit)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +186,7 @@ func rpcTerminate(ctx context.Context, local *Local, params jsontext.Value) (jso
 	if signalErr := local.Signal(ctx, id, SignalKill); signalErr != nil {
 		return nil, signalErr
 	}
-	state, err := local.Read(ctx, id, 0)
+	state, err := local.ReadPage(ctx, id, 0, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +198,7 @@ func rpcReadFile(ctx context.Context, local *Local, params jsontext.Value) (json
 	if err != nil {
 		return nil, err
 	}
-	data, next, err := local.readFileAt(ctx, page.path, page.offset, page.limit)
+	data, next, err := local.ReadFilePage(ctx, page.path, page.offset, page.limit)
 	if err != nil {
 		return nil, err
 	}

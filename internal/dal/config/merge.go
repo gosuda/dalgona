@@ -187,11 +187,18 @@ type (
 		URL      string `toml:"url"`
 	}
 	remoteDoc struct {
-		Service  *string `toml:"service"`
-		Image    *string `toml:"image"`
-		Template *string `toml:"template"`
-		URL      *string `toml:"url"`
-		BoxID    *string `toml:"box_id"`
+		Kind           *string `toml:"kind"`
+		Service        *string `toml:"service"`
+		Image          *string `toml:"image"`
+		Template       *string `toml:"template"`
+		URL            *string `toml:"url"`
+		BoxID          *string `toml:"box_id"`
+		TokenFile      *string `toml:"token_file"`
+		MachineID      *string `toml:"machine_id"`
+		PublicKeyPin   *string `toml:"public_key_pin"`
+		SSHDestination *string `toml:"ssh_destination"`
+		SSHPlatform    *string `toml:"ssh_platform"`
+		SSHInstall     *string `toml:"ssh_install"`
 	}
 	mcpDoc struct {
 		Command           string            `toml:"command"`
@@ -381,13 +388,7 @@ func (c *Config) mergeBoxes(doc *fileDoc) {
 		c.Runners[name] = RunnerSpec(value)
 	}
 	for name, value := range doc.Remotes {
-		spec := c.Remotes[name]
-		set(value.Service, &spec.Service)
-		set(value.Image, &spec.Image)
-		set(value.Template, &spec.Template)
-		set(value.URL, &spec.URL)
-		set(value.BoxID, &spec.BoxID)
-		c.Remotes[name] = spec
+		c.Remotes[name] = c.mergeRemote(c.Remotes[name], value)
 	}
 }
 
@@ -486,6 +487,7 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateEnums()...)
 	errs = append(errs, c.validateApprovalDecider()...)
 	errs = append(errs, c.validateEditStyle()...)
+	errs = append(errs, c.validateRemotes()...)
 	errs = append(errs, c.validateRunners()...)
 	errs = append(errs, c.validateKeywords()...)
 	errs = append(errs, c.validateAdvisors()...)
@@ -601,6 +603,10 @@ var editStyleError = "edit_style must be one of " + strings.Join(editStyleOption
 
 func validEditStyle(style string) bool {
 	return one(style, editStyleOptions...)
+}
+
+func ValidEditStyle(style string) bool {
+	return validEditStyle(style)
 }
 
 func (c *Config) validateRunners() []error {

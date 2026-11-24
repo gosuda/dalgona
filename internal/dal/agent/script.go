@@ -67,7 +67,7 @@ func (w *worker) runExternalTurn(ctx context.Context, run func(context.Context) 
 	}
 	o := outcome{status: statusCompleted, final: true}
 	if err != nil {
-		o = failure(ctx, err)
+		o = failedOutcome(ctx, err)
 		o.final = true
 	}
 	w.end(ctx, o)

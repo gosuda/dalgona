@@ -6,7 +6,7 @@ The reporter files bounded failure reports to `gosuda/dalgona` through the share
 
 Reporting is controlled by `[failure_reports]` with `enabled` and `auth`. Both keys are dalgona-only and user-home-only. `auth` accepts exactly `app` and `gh` and defaults to `app`. Invalid values MUST fail with `config: failure_reports.auth must be one of app, gh`. Model, project, or environment configuration MUST NOT enable reporting or switch authentication.
 
-Opt-in shows the exact substituted consent text naming the product, the included fields, the excluded fields, and the selected method. Only an exact terminal `yes` line opts in. Any other text, EOF, or no terminal prints `automatic failure reporting remains off`. No `--yes` bypass exists.
+Opt-in shows the exact substituted consent text naming the product, the included fields, the excluded fields, and the selected method. Only an exact terminal `yes` line opts in. Any other text, EOF, or no terminal prints `automatic failure reporting remains off`. No `--yes` bypass exists. The native `dalgona/reporting/enable` method also opts in only with the exact typed confirmation `yes` and the SHA-256 of the consent text it showed. It follows [native protocol R15](native-protocol.md#r15-consented-reporting).
 
 Consent persists schema-1 JSON with UTC time, the selected method, and the SHA-256 of the substituted text in `<home>/failure-reporting/consent.json`, then enables config. A write error leaves reporting off. Enabled config with true value but no consent prints `automatic failure reporting is off: consent is required`.
 
@@ -15,6 +15,8 @@ Changing `auth` invalidates consent for remote work. It MUST print `automatic fa
 A running process that opened without consent MUST activate reporting once consent and a credential exist, without a restart. Withdrawing consent while it runs MUST stop new enqueues and remote work.
 
 `Off` disables before more work, removes consent and the App credential, and deletes queued excerpts. It preserves local logs, dedup receipts, counters, and restriction deadlines. It prints `automatic failure reporting disabled; queued reports deleted` and `published GitHub issues are not deleted`.
+The native disable operation waits for the daemon reporter to stop before it deletes the queue.
+The daemon does not enable reporting while this operation is in progress.
 
 ## Authentication
 

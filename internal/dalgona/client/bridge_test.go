@@ -114,7 +114,7 @@ func TestRemotesRefuseCloudflareEndpoints(t *testing.T) {
 	remotes := NewRemotes(cfg, services)
 	session := Remote(remotes, "cf")
 	_, connectErr := session.Connect(t.Context())
-	_, specErr := remotes.Spec("edge")
+	_, specErr := remotes.boxSpec("edge")
 	for name, err := range map[string]error{"connect": connectErr, "runner spec": specErr} {
 		if err == nil || err.Error() != cloudflareRefusal {
 			t.Errorf("%s error = %v, want %q", name, err, cloudflareRefusal)

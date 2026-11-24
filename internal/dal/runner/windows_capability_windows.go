@@ -4,10 +4,8 @@ package runner
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,26 +36,11 @@ func capabilitySeed() ([]byte, error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("runner: create capability seed directory: %w", err)
 	}
-	path := filepath.Join(directory, capabilitySeedFile)
-	if seed, ok := readCapabilitySeed(path); ok {
-		return seed, nil
+	seed, err := loadSeed(filepath.Join(directory, capabilitySeedFile), capabilitySeedSize)
+	if err != nil {
+		return nil, fmt.Errorf("runner: capability seed: %w", err)
 	}
-	fresh := make([]byte, capabilitySeedSize)
-	if _, err := rand.Read(fresh); err != nil {
-		return nil, fmt.Errorf("runner: generate capability seed: %w", err)
-	}
-	if err := writeAtomic(path, fresh, 0o600); err != nil {
-		return nil, fmt.Errorf("runner: write capability seed: %w", err)
-	}
-	if seed, ok := readCapabilitySeed(path); ok {
-		return seed, nil
-	}
-	return nil, errors.New("runner: capability seed is unreadable")
-}
-
-func readCapabilitySeed(path string) ([]byte, bool) {
-	data, err := os.ReadFile(path)
-	return data, err == nil && len(data) == capabilitySeedSize
+	return seed, nil
 }
 
 func capabilityPathKey(path string) string {

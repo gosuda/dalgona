@@ -717,7 +717,7 @@ func stagedCommit(t *testing.T, input string) (tool.Env, stagedBatch) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, err := stage(t.Context(), HashlineLight, parsed, env, text)
+	batch, err := stage(t.Context(), HashlineLight, parsed, env)
 	if err != nil {
 		t.Fatal(err)
 	}

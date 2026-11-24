@@ -261,7 +261,7 @@ func (w *worker) stream(ctx context.Context, req model.Request, contextSeq uint6
 		return nil, err
 	}
 	w.flushInBand(context.WithoutCancel(ctx), contextSeq)
-	stream, err := w.openStream(ctx, provider, req)
+	stream, err := w.openStream(ctx, provider, req, contextSeq)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +331,7 @@ func (w *worker) journalAssistant(ctx context.Context, result *reply) error {
 	if w.inBand != nil {
 		pending := make([]event.ToolCall, 0, len(result.calls))
 		for _, call := range result.calls {
-			if !w.inBand.resolved(call.ID) {
+			if !call.Resolved || !w.inBand.resolved(call.ID) {
 				pending = append(pending, call)
 			}
 		}

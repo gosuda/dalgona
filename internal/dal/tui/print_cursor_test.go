@@ -107,6 +107,7 @@ func closedPanels() []closedPanel {
 			close: func(run *emulatedRun) {
 				run.send(press('2', 0, "2"))
 				run.send(press(tea.KeyEnter, 0, ""))
+				run.send(requestResolved("t1", "req-1", "answered"))
 			},
 		},
 	}

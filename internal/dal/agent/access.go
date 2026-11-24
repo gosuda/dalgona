@@ -70,6 +70,15 @@ func (h *Host) MCPStatus(ctx context.Context, cwd string) []MCPServerStatus {
 	return h.cfg.MCPStatus(ctx, cwd)
 }
 
+var errNoMCPInventory = errors.New("agent: this product has no MCP configuration")
+
+func (h *Host) MCPInventory(ctx context.Context, cwd string) (MCPInventory, error) {
+	if h.cfg.MCPInventory == nil {
+		return MCPInventory{}, errNoMCPInventory
+	}
+	return h.cfg.MCPInventory(ctx, cwd)
+}
+
 func (h *Host) Models(ctx context.Context) ([]model.Model, error) {
 	registry, err := h.cfg.Providers(nil)
 	if err != nil {
@@ -155,7 +164,7 @@ func (t *Thread) Tree() ([]event.TurnNode, error) {
 }
 
 func (t *Thread) SetName(ctx context.Context, name string) error {
-	_, err := t.appendEvents(ctx, event.ThreadNamed{Name: name})
+	_, err := t.appendEvents(ctx, event.ThreadNamed{Name: name, Operation: operationOf(ctx)})
 	return err
 }
 
@@ -168,7 +177,7 @@ func (h *Host) Archive(ctx context.Context, id string) error {
 		if a.busy || a.state.TurnID != "" {
 			return runningError(id)
 		}
-		_, err := a.append(ctx, event.ThreadArchived{Archived: true})
+		_, err := a.append(ctx, event.ThreadArchived{Archived: true, Operation: operationOf(ctx)})
 		return err
 	})
 }
@@ -178,7 +187,7 @@ func (h *Host) Unarchive(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	_, err = thread.appendEvents(ctx, event.ThreadArchived{Archived: false})
+	_, err = thread.appendEvents(ctx, event.ThreadArchived{Archived: false, Operation: operationOf(ctx)})
 	return err
 }
 

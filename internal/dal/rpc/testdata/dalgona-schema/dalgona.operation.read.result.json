@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/operation/read result",
+  "type": "object",
+  "required": [
+    "state",
+    "method",
+    "expiresAt"
+  ],
+  "properties": {
+    "state": {
+      "enum": [
+        "reserved",
+        "running",
+        "succeeded",
+        "failed",
+        "unknown"
+      ]
+    },
+    "method": {
+      "type": "string"
+    },
+    "result": {},
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "expiresAt": {
+      "type": "string"
+    }
+  }
+}

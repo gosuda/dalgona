@@ -72,7 +72,8 @@ func turnEventMembers(e Event) ([]member, error) {
 		return []member{field("turn_id", stringValue(value.TurnID)), field("effort", stringValue(value.Effort))}, nil
 	case TurnCompleted:
 		fields := []member{field("turn_id", stringValue(value.TurnID)), field("status", stringValue(value.Status))}
-		return timeField(optionalString(fields, "error", value.Error), "completed_at", value.CompletedAt), nil
+		fields = timeField(optionalString(fields, "error", value.Error), "completed_at", value.CompletedAt)
+		return optionalString(fields, "operation_id", value.Operation), nil
 	case TurnRecovery:
 		return []member{field("turn_id", stringValue(value.TurnID)), field("attempt", intValue(value.Attempt))}, nil
 	case TurnJudged:
@@ -94,6 +95,11 @@ func sessionCreatedMembers(e SessionCreated) []member {
 	fields = optionalString(fields, "fork_of", e.ForkOf)
 	fields = optionalString(fields, "effort", e.Effort)
 	fields = optionalString(fields, "advisor", e.Advisor)
+	fields = optionalString(fields, "operation_id", e.Operation)
+	fields = optionalString(fields, "profile", e.Profile)
+	if e.ReadOnly {
+		fields = append(fields, field("read_only", boolValue(true)))
+	}
 	if !e.CreatedAt.IsZero() {
 		fields = append(fields, field("created_at", stringValue(e.CreatedAt.UTC().Format(time.RFC3339Nano))))
 	}
@@ -120,9 +126,9 @@ func metadataMembers(e Event) ([]member, error) {
 	case AdvisorNote:
 		return advisorNoteMembers(value)
 	case ThreadNamed:
-		return []member{field("name", stringValue(value.Name))}, nil
+		return optionalString([]member{field("name", stringValue(value.Name))}, "operation_id", value.Operation), nil
 	case ThreadArchived:
-		return []member{field("archived", boolValue(value.Archived))}, nil
+		return optionalString([]member{field("archived", boolValue(value.Archived))}, "operation_id", value.Operation), nil
 	case SandboxChosen:
 		return []member{field("request_id", stringValue(value.RequestID)), field("choice", stringValue(value.Choice)), field("cause", stringValue(value.Cause))}, nil
 	default:
@@ -178,7 +184,8 @@ func userMessageMembers(e UserMessage) []member {
 	fields = optionalString(fields, "model", e.Model)
 	fields = optionalString(fields, "approval", e.Approval)
 	fields = optionalString(fields, "sandbox", e.Sandbox)
-	return optionalString(fields, "effort", e.Effort)
+	fields = optionalString(fields, "effort", e.Effort)
+	return optionalString(fields, "operation_id", e.Operation)
 }
 
 func noticeValue(e Notice) jsontext.Value {
@@ -194,6 +201,8 @@ func mentionValue(e Mention) jsontext.Value {
 func imageValue(e Image) jsontext.Value {
 	fields := []member{field("mime", stringValue(e.Mime))}
 	fields = optionalString(fields, "path", e.Path)
+	fields = optionalString(fields, "name", e.Name)
+	fields = optionalString(fields, "alt_text", e.AltText)
 	return objectValue(optionalBlobField(fields, "image", &e.Blob)...)
 }
 
@@ -422,7 +431,7 @@ func stateMembers(e Event) ([]member, error) {
 	case ChildSpawned:
 		return childSpawnedMembers(value), nil
 	case Branch:
-		return []member{field("parent_seq", uint64Value(value.ParentSeq))}, nil
+		return optionalString([]member{field("parent_seq", uint64Value(value.ParentSeq))}, "operation_id", value.Operation), nil
 	default:
 		return nil, fmt.Errorf("event: %T does not match type %s", e, e.Type())
 	}
@@ -440,11 +449,11 @@ func childSpawnedMembers(e ChildSpawned) []member {
 }
 
 func compactionMembers(e Compaction) []member {
-	return []member{
+	return optionalString([]member{
 		field("first_kept_seq", uint64Value(e.FirstKeptSeq)), field("summary", stringValue(e.Summary)),
 		field("method", stringValue(e.Method)), field("tokens_before", intValue(e.TokensBefore)),
 		field("tokens_after", intValue(e.TokensAfter)),
-	}
+	}, "operation_id", e.Operation)
 }
 
 func scriptMembers(e Event) ([]member, error) {

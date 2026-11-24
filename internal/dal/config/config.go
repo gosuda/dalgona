@@ -220,8 +220,11 @@ type (
 		Requires     []string
 		Enabled      bool
 	}
-	RunnerSpec   struct{ Service, Image, Template, URL string }
-	RemoteSpec   struct{ Service, Image, Template, URL, BoxID string }
+	RunnerSpec struct{ Service, Image, Template, URL string }
+	RemoteSpec struct {
+		Kind, Service, Image, Template, URL, BoxID, TokenFile            string
+		MachineID, PublicKeyPin, SSHDestination, SSHPlatform, SSHInstall string
+	}
 	ProviderSpec struct{ BaseURL, APIKeyEnv string }
 	ModelSpec    struct {
 		ContextWindow int
@@ -347,7 +350,7 @@ func defaultConfigWithHome(product Product, home, cwd string) Config {
 		MCPServers: map[string]MCPServerSpec{}, Keywords: map[string]KeywordSpec{},
 		FailureReports: FailureReportsConfig{Auth: "app"},
 		Daltoki: DaltokiConfig{
-			PollIntervalSeconds: 60, Concurrency: 2, JobsPerDay: 20, Profile: "daltoki",
+			PollIntervalSeconds: 60, Concurrency: 2, JobsPerDay: 20, Profile: "hashline-light",
 			JobTokenLimit: 100000, DailyTokenLimit: 500000,
 			JobCostLimitUSDMicros: 5000000, DailyCostLimitUSDMicros: 20000000,
 		},

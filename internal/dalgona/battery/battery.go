@@ -19,6 +19,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/failure"
 	corescripthost "github.com/gosuda/dalgona/internal/dal/scripthost"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 	"github.com/gosuda/dalgona/internal/dalgona/daltoki"
@@ -48,6 +49,7 @@ type Daemon struct {
 	reportHome        string
 	reportLogger      *slog.Logger
 	reporter          *report.Reporter
+	mcp               atomic.Pointer[projects]
 }
 type TrustDecision int
 
@@ -70,14 +72,15 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 		logger.Error("plugins: some files did not load", "error", err)
 	}
 	life := context.WithoutCancel(ctx)
-	native := nativeServers(base.Config)
+	native := nativeServers(base.Config.MCPServers)
 	creds := mcpAuth{home: base.Config.Home, store: base.Auth}
 	projects := &projects{
 		cfg: base.Config, home: base.Config.Home, userHome: userHome, log: logger, life: life, nativeList: native,
-		creds: creds, native: startServers(life, native, logger, creds), byCwd: make(map[string]*servers),
+		creds: creds, native: startServers(life, native, logger, creds, userSource), byCwd: make(map[string]*servers),
 		approver: d.WorkspaceApprover, trusted: map[string]bool{}, refused: map[string]bool{}, pending: map[string]chan struct{}{},
 	}
 	projects.trusted = loadTrusted(base.Config.Home, logger)
+	d.mcp.Store(projects)
 	d.Remote = remote.Options{Config: base.Config, Auth: base.Auth, Journal: base.Journal, Local: base.Local, Logger: logger}
 	d.binder = remote.NewBinder(d.Remote)
 	d.openReporter(ctx, base.Config.Home, logger)
@@ -95,7 +98,8 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 			out := append(projects.tools(ctx, cwd), ratchetTools(ctx)...)
 			return append(out, postbox.Tools(ctx, d.postboxSvc.Load())...)
 		},
-		Skills: projects.skills, Runner: d.binder.Runner,
+		ToolsGeneration: projects.toolEpoch.Load,
+		Skills:          projects.skills, Runner: d.binder.Runner,
 		Extension: batteryscripthost.New(d.Scripts),
 		Attach: func(h *agent.Host) {
 			d.binder.SetRecorder(h)
@@ -113,7 +117,13 @@ func (d *Daemon) Load(ctx context.Context, base app.Base) (app.Batteries, error)
 			}
 			return errors.Join(closeErr, projects.close(), d.closeReporter())
 		}),
-		MCPStatus: projects.status,
+		MCPStatus:    projects.status,
+		MCPInventory: projects.inventory,
+		FailureSink: func(record failure.Record) {
+			if err := d.ReportFailure(life, record); err != nil {
+				logger.Error("failure report not queued", "error", err)
+			}
+		},
 	}, nil
 }
 
@@ -146,11 +156,13 @@ func loadDaltoki(ctx context.Context, base app.Base, logger *slog.Logger) (*dalt
 		return nil, err
 	}
 	return daltoki.New(ctx, cfg, daltoki.Dependencies{
-		Home:   base.Config.Home,
-		Client: client,
-		Auth:   base.Auth,
-		Clock:  time.Now,
-		Logger: logger,
+		Home:      base.Config.Home,
+		Client:    client,
+		Graphs:    daltoki.NewScheduler(daltoki.HostNodes{}),
+		Worktrees: daltoki.NewWorktrees(base.Config.Home, "https://github.com/", cred),
+		Auth:      base.Auth,
+		Clock:     time.Now,
+		Logger:    logger,
 	})
 }
 
@@ -225,6 +237,7 @@ type projects struct {
 	life       context.Context
 	nativeList []discovery.MCPServer
 	native     *servers
+	toolEpoch  atomic.Uint64
 	approver   WorkspaceApprover
 	mu         sync.Mutex
 	closed     bool
@@ -240,14 +253,14 @@ func (p *projects) discover(cwd string) (discovery.Result, error) {
 	if err != nil {
 		return discovery.Result{}, fmt.Errorf("skills: %w", err)
 	}
-	native := discovery.Result{Skills: listed, MCPServers: p.nativeList}
+	native := discovery.Result{Skills: listed, MCPServers: p.userServers()}
 	return discovery.Discover(p.userHome, cwd, p.cfg.Discovery.Sources, native)
 }
 
-func nativeServers(cfg config.Config) []discovery.MCPServer {
-	out := make([]discovery.MCPServer, 0, len(cfg.MCPServers))
-	for _, name := range slices.Sorted(maps.Keys(cfg.MCPServers)) {
-		out = append(out, nativeServer(name, cfg.MCPServers[name]))
+func nativeServers(specs map[string]config.MCPServerSpec) []discovery.MCPServer {
+	out := make([]discovery.MCPServer, 0, len(specs))
+	for _, name := range slices.Sorted(maps.Keys(specs)) {
+		out = append(out, nativeServer(name, specs[name]))
 	}
 	return out
 }
@@ -325,7 +338,7 @@ func (p *projects) resolveOwned(ctx context.Context, cwd string) *servers {
 	if err != nil {
 		p.log.Warn("mcp: discovery failed", "cwd", cwd, "error", err)
 	}
-	kept := stripNative(found.MCPServers, p.nativeList)
+	kept := stripNative(found.MCPServers, p.userServers())
 	home, workspace := splitWorkspace(kept)
 	allowed, prompt := p.classify(cwd, home, kept, workspace)
 	cache := true
@@ -340,7 +353,7 @@ func (p *projects) resolveOwned(ctx context.Context, cwd string) *servers {
 		close(done)
 		return &servers{}
 	}
-	started := startServers(p.life, allowed, p.log, p.creds)
+	started := startServers(p.life, allowed, p.log, p.creds, discoveredSource)
 	p.mu.Lock()
 	done := p.pending[cwd]
 	delete(p.pending, cwd)
@@ -534,56 +547,90 @@ func failedState(name string, err error) serverState {
 	return serverState{Status: "failed", Error: err.Error()}
 }
 
-type servers struct {
-	cancel  context.CancelFunc
-	started sync.WaitGroup
-	mu      sync.Mutex
-	clients []*mcp.Client
-	byName  map[string][]tool.Tool
-	order   []string
-	states  map[string]serverState
-	specs   map[string]discovery.MCPServer
-	creds   mcpAuth
+type serverRun struct {
+	spec   discovery.MCPServer
+	state  serverState
+	client *mcp.Client
+	tools  []tool.Tool
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
-func startServers(ctx context.Context, found []discovery.MCPServer, logger *slog.Logger, creds mcpAuth) *servers {
-	ctx, cancel := context.WithCancel(ctx)
-	s := &servers{
-		cancel: cancel, byName: make(map[string][]tool.Tool, len(found)), states: make(map[string]serverState, len(found)),
-		specs: make(map[string]discovery.MCPServer, len(found)), creds: creds,
-	}
-	s.mu.Lock()
+type servers struct {
+	life   context.Context
+	cancel context.CancelFunc
+	logger *slog.Logger
+	creds  mcpAuth
+	source func(discovery.MCPServer) string
+	mu     sync.Mutex
+	order  []string
+	runs   map[string]*serverRun
+}
+
+func startServers(ctx context.Context, found []discovery.MCPServer, logger *slog.Logger, creds mcpAuth, source func(discovery.MCPServer) string) *servers {
+	life, cancel := context.WithCancel(ctx)
+	s := &servers{life: life, cancel: cancel, logger: logger, creds: creds, source: source, runs: make(map[string]*serverRun, len(found))}
 	for _, server := range found {
-		s.order = append(s.order, server.Name)
-		s.specs[server.Name] = server
-		s.states[server.Name] = serverState{Status: "starting"}
-	}
-	s.mu.Unlock()
-	for _, server := range found {
-		s.started.Go(func() {
-			client, tools, err := connect(ctx, server, creds)
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if err != nil {
-				logger.Warn("mcp: server skipped", "server", server.Name, "error", err)
-				s.states[server.Name] = failedState(server.Name, err)
-				return
-			}
-			s.clients = append(s.clients, client)
-			s.byName[server.Name] = tools
-			s.states[server.Name] = serverState{Status: "connected"}
-		})
+		s.start(server)
 	}
 	return s
 }
 
+func (s *servers) start(server discovery.MCPServer) {
+	ctx, cancel := context.WithCancel(s.life)
+	run := &serverRun{spec: server, state: serverState{Status: "starting"}, cancel: cancel, done: make(chan struct{})}
+	s.mu.Lock()
+	s.order = append(s.order, server.Name)
+	s.runs[server.Name] = run
+	s.mu.Unlock()
+	go func() {
+		defer close(run.done)
+		client, tools, err := connect(ctx, server, s.creds)
+		s.discard(s.settle(run, client, tools, err))
+	}()
+}
+
+func (s *servers) discard(client *mcp.Client) {
+	if client == nil {
+		return
+	}
+	if err := client.Close(); err != nil {
+		s.logger.Warn("mcp: close a replaced transport", "error", err)
+	}
+}
+
+func (s *servers) settle(run *serverRun, client *mcp.Client, tools []tool.Tool, err error) *mcp.Client {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runs[run.spec.Name] != run {
+		return client
+	}
+	if err != nil {
+		s.logger.Warn("mcp: server skipped", "server", run.spec.Name, "error", err)
+		run.state = failedState(run.spec.Name, err)
+		return nil
+	}
+	run.client, run.tools, run.state = client, tools, serverState{Status: "connected"}
+	return nil
+}
+
+func (s *servers) pending() []*serverRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Collect(maps.Values(s.runs))
+}
+
 func (s *servers) tools() []tool.Tool {
-	s.started.Wait()
+	for _, run := range s.pending() {
+		<-run.done
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []tool.Tool
 	for _, name := range s.order {
-		out = append(out, s.byName[name]...)
+		if run := s.runs[name]; run != nil {
+			out = append(out, run.tools...)
+		}
 	}
 	return out
 }
@@ -591,11 +638,14 @@ func (s *servers) tools() []tool.Tool {
 func (s *servers) statuses() []agent.MCPServerStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]agent.MCPServerStatus, 0, len(s.states))
-	for _, name := range slices.Sorted(maps.Keys(s.states)) {
-		state := s.states[name]
-		status := agent.MCPServerStatus{Name: name, AuthStatus: mcp.AuthStatus(s.creds.options(s.specs[name])), Status: state.Status, Error: state.Error}
-		for _, t := range s.byName[name] {
+	out := make([]agent.MCPServerStatus, 0, len(s.runs))
+	for _, name := range slices.Sorted(maps.Keys(s.runs)) {
+		run := s.runs[name]
+		status := agent.MCPServerStatus{
+			Name: name, Source: s.source(run.spec), ConfigDigest: configDigest(run.spec),
+			AuthStatus: mcp.AuthStatus(s.creds.options(run.spec)), Status: run.state.Status, Error: run.state.Error,
+		}
+		for _, t := range run.tools {
 			status.Tools = append(status.Tools, agent.MCPToolStatus{Name: mcp.LocalToolName(t), Spec: t.Spec()})
 		}
 		out = append(out, status)
@@ -607,12 +657,13 @@ func (s *servers) close() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.started.Wait()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	errs := make([]error, 0, len(s.clients))
-	for _, client := range s.clients {
-		errs = append(errs, client.Close())
+	runs := s.pending()
+	errs := make([]error, 0, len(runs))
+	for _, run := range runs {
+		<-run.done
+		if run.client != nil {
+			errs = append(errs, run.client.Close())
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -654,17 +705,41 @@ func (d *Daemon) openReporter(ctx context.Context, home string, logger *slog.Log
 }
 
 func (d *Daemon) closeReporter() error {
+	d.reportMu.Lock()
+	defer d.reportMu.Unlock()
+	d.reportHome = ""
+	return d.retireReporter()
+}
+
+func (d *Daemon) retireReporter() error {
 	if d.reporter == nil {
 		return nil
 	}
-	return d.reporter.Close(context.Background())
+	reporter := d.reporter
+	d.reporter = nil
+	return reporter.Close(context.Background())
 }
 
-func (d *Daemon) FailureReporter() *report.Reporter {
+func (d *Daemon) ReloadReporter() {
+	d.reportMu.Lock()
+	defer d.reportMu.Unlock()
+	if d.reportHome == "" {
+		return
+	}
+	if err := d.retireReporter(); err != nil {
+		d.reportLogger.Error("failure reporter did not close", "error", err)
+	}
+	d.openReporter(context.Background(), d.reportHome, d.reportLogger)
+}
+
+func (d *Daemon) ReportFailure(ctx context.Context, record failure.Record) error {
 	d.reportMu.Lock()
 	defer d.reportMu.Unlock()
 	if d.reporter == nil && d.reportHome != "" && report.ConsentStored(d.reportHome) {
 		d.openReporter(context.Background(), d.reportHome, d.reportLogger)
 	}
-	return d.reporter
+	if d.reporter == nil {
+		return nil
+	}
+	return d.reporter.Enqueue(ctx, record)
 }

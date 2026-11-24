@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/write params",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "stage",
+        "workspaceId",
+        "path",
+        "expectedRevision",
+        "total",
+        "digest",
+        "operationId"
+      ],
+      "properties": {
+        "stage": {
+          "const": "begin"
+        },
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "expectedRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "total": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "stage",
+        "uploadId",
+        "offset",
+        "dataBase64"
+      ],
+      "properties": {
+        "stage": {
+          "const": "chunk"
+        },
+        "uploadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "offset": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "dataBase64": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "stage",
+        "uploadId",
+        "operationId"
+      ],
+      "properties": {
+        "stage": {
+          "const": "commit"
+        },
+        "uploadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "stage",
+        "uploadId"
+      ],
+      "properties": {
+        "stage": {
+          "const": "abort"
+        },
+        "uploadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    }
+  ]
+}

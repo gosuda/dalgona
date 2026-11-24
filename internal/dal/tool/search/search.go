@@ -55,7 +55,7 @@ func (Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Result,
 		result, err = runSearch(runCtx, env, id, call.Args, indexRef{})
 	}
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{Failure: failureOf(err)}, err
 	}
 	return makeResult(result, env.Snapshots), nil
 }
@@ -67,6 +67,26 @@ type exitError struct {
 
 func (e exitError) Error() string {
 	return fmt.Sprintf("search: subprocess exited %d: %s", e.code, e.output)
+}
+
+type machineryError struct{ err error }
+
+func (e machineryError) Error() string { return e.err.Error() }
+
+func (e machineryError) Unwrap() error { return e.err }
+
+func machinery(ctx context.Context, err error) error {
+	if tool.MachineryFailure(ctx, err) == tool.FailureNone {
+		return err
+	}
+	return machineryError{err: err}
+}
+
+func failureOf(err error) tool.FailureKind {
+	if _, ok := errors.AsType[machineryError](err); ok {
+		return tool.FailureInternal
+	}
+	return tool.FailureNone
 }
 
 func newProcessID(prefix string) (string, error) {
@@ -99,7 +119,7 @@ func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value,
 		Dir: env.Cwd, Sandbox: env.Sandbox,
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
-		return outcome{}, fmt.Errorf("search: start subprocess: %w", err)
+		return outcome{}, machinery(ctx, fmt.Errorf("search: start subprocess: %w", err))
 	}
 	data, err := collect(ctx, env.Runner, id)
 	if err != nil {
@@ -107,7 +127,7 @@ func runSearch(ctx context.Context, env tool.Env, id string, raw jsontext.Value,
 	}
 	result, err := decodeOutcome(data)
 	if err != nil {
-		return outcome{}, errors.New(string(data))
+		return outcome{}, machinery(ctx, errors.New(string(data)))
 	}
 	return result, nil
 }
@@ -125,7 +145,7 @@ func childFailure(ctx context.Context, run runner.Runner, id string, err error) 
 	if errors.Is(context.Cause(ctx), errParseDeadline) {
 		return errors.Join(errParseDeadline, cleanup)
 	}
-	return errors.Join(err, cleanup)
+	return machinery(ctx, errors.Join(err, cleanup))
 }
 
 func killAndAwait(ctx context.Context, run runner.Runner, id string) error {

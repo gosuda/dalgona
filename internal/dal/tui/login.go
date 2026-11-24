@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
@@ -178,7 +179,7 @@ func (m *model) loginBodyWidth() int {
 }
 
 func (m *model) loginURLRows(url string) []string {
-	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(m.screen.expand(url)), m.loginBodyWidth(), true), "\n")
+	return strings.Split(m.screen.method.Hardwrap(m.screen.expand(url), m.loginBodyWidth(), true), "\n")
 }
 
 func (m *model) loginCodeRows(code string) []string {
@@ -318,8 +319,8 @@ func (m *model) startLogin(method loginMethod) tea.Cmd {
 }
 
 func (m *model) submitAPIKey() tea.Cmd {
-	key := strings.TrimSpace(m.input.field.value())
-	if key == "" {
+	key := m.input.field.value()
+	if inputtext.Blank(key) {
 		m.login.err = "Enter the API key."
 		return nil
 	}

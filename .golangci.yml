@@ -190,6 +190,86 @@ linters:
               desc: tui reaches the core only through internal/dal/rpc
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
+            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+        gui-imports:
+          list-mode: lax
+          files:
+            - "**/internal/dalgona/gui/**"
+            - "!**/internal/dalgona/gui/terminal/**"
+            - "!**/internal/dalgona/gui/manage/*_test.go"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: the desktop reaches the daemon only through internal/dal/rpc, the lifecycle client and approved shared state contracts
+          allow:
+            - "github.com/gosuda/dalgona/internal/dal/rpc$"
+            - "github.com/gosuda/dalgona/internal/dalgona/client$"
+            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dalgona/gui"
+        gui-terminal-imports:
+          list-mode: lax
+          files:
+            - "**/internal/dalgona/gui/terminal/**"
+            - "**/internal/dalgona/gui/manage/*_test.go"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: terminal cells read the shared VTStateV1 model from internal/dalgona/vtstate and otherwise follow gui-imports
+          allow:
+            - "github.com/gosuda/dalgona/internal/dal/rpc$"
+            - "github.com/gosuda/dalgona/internal/dalgona/client$"
+            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dalgona/gui"
+            - "github.com/gosuda/dalgona/internal/dalgona/vtstate$"
+        gui-root-imports:
+          list-mode: lax
+          files:
+            - "**/cmd/dalgona-gui/**"
+            - "!**/cmd/dalgona-gui/*_test.go"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: the desktop composition root adds only configuration loading and doctor checks to gui-imports
+          allow:
+            - "github.com/gosuda/dalgona/internal/dal/rpc$"
+            - "github.com/gosuda/dalgona/internal/dalgona/client$"
+            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dalgona/gui"
+            - "github.com/gosuda/dalgona/internal/dal/config$"
+            - "github.com/gosuda/dalgona/internal/dalgona/doctor$"
+        gui-root-test-imports:
+          list-mode: lax
+          files:
+            - "**/cmd/dalgona-gui/*_test.go"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: desktop integration tests may start an in-process daemon through internal/dal/app and internal/dal/rpcserver
+          allow:
+            - "github.com/gosuda/dalgona/internal/dal/rpc$"
+            - "github.com/gosuda/dalgona/internal/dalgona/client$"
+            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dalgona/gui"
+            - "github.com/gosuda/dalgona/internal/dal/config$"
+            - "github.com/gosuda/dalgona/internal/dalgona/doctor$"
+            - "github.com/gosuda/dalgona/internal/dal/app$"
+            - "github.com/gosuda/dalgona/internal/dal/rpcserver$"
+        vtstate-leaf:
+          files:
+            - "**/internal/dalgona/vtstate/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: the VTStateV1 model is a leaf shared by the daemon terminal and the desktop terminal cells
+        headless-graphics:
+          files:
+            - $all
+            - "!**/internal/dalgona/gui/**"
+            - "!**/cmd/dalgona-gui/**"
+          deny:
+            - pkg: "gioui.org"
+              desc: headless binaries and the daemon keep a graphics-free build; only cmd/dalgona-gui and internal/dalgona/gui import Gio
+        design-tokens:
+          files:
+            - "**/internal/dalgona/gui/theme/**"
+          deny:
+            - pkg: "gioui.org"
+              desc: design tokens stay pure Go so headless tests cover them
         rpc-wire:
           files:
             - "**/internal/dal/rpc/**"
@@ -258,6 +338,9 @@ linters:
       - path: _test\.go
         text: "G301|G306|G404|G703"
         linters: [gosec]
+      # A headless run cannot see the gui-tagged callers of these packages' untagged files; desktop-check runs the same linter with the gui tag.
+      - path: internal/dalgona/gui/(transcript|figure)/
+        linters: [unused]
 
 formatters:
   enable:

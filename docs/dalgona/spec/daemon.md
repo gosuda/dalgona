@@ -137,7 +137,27 @@ cannot safely identify the old daemon; stop it manually and retry dalgona restar
 
 The dalgona host MUST bind `[runners.<name>]` runners through the remote binder and MUST use the local runner for every other runner name. `dalgona pull <thread>` and `dalgona runner gc [--yes]` MUST run inside the daemon through the protocol extensions `dalgona/remote/pull {threadId}` and `dalgona/remote/gc {yes}`, because the daemon holds the journal lock. Each extension MUST answer `{"exitCode":<int>,"output":<text>}`. Without `--yes`, `runner gc` MUST answer no to every destroy question. `dalgona cloud up|down|pull` MUST run in the client process.
 
-`dalgona bridge` MUST splice standard input and output to a local session connection. `dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path. The TUI, `models`, `dalgona app-server`, `dalgona web`, `dalgona acp`, `pull`, and `runner gc` MUST open one session per process and dial the local daemon through its `Connect`. When `--remote <name>` is given, or `remote` is set in configuration, the session MUST dial the remote box daemon through the `client.Remotes` bridge instead. The flag MUST win over the configuration. `bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
+`dalgona bridge` MUST splice standard input and output to a local session connection.
+`dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path.
+`models`, `dalgona app-server`, `dalgona web`, `dalgona acp`, `pull`, and `runner gc` MUST open one session per process and dial the local daemon through its `Connect`.
+When `--remote <name>` is given, or `remote` is set in configuration, the session MUST select that configured endpoint through the shared client transport owner.
+The flag MUST win over the configuration.
+A leading `--local` MUST select the local endpoint for TUI and headless clients despite a configured default remote.
+It MUST NOT remove the remote catalog or change an existing thread's runner binding.
+It MUST conflict with every explicit `--remote` selector, including an empty `--remote=`.
+Without `--local`, an empty remote flag MUST retain its existing configuration fallback.
+A session MUST reject an unsupported headless transport before dialing it.
+Legacy daemon relays MUST retain their existing headless refusal.
+Paired-device remotes MUST direct the caller to the terminal machine selector.
+SSH sessions MUST retain write-side EOF and drain replies without stopping the shared daemon.
+`bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
+
+The TUI MUST use one `EndpointSet` for simultaneous local and remote machines.
+Its machine controls MUST add, connect, select, disconnect, and report endpoints.
+Selection MUST NOT reconnect a machine.
+Threads, drafts, queues, approvals, workspace paths, and terminal operations MUST retain their endpoint identity.
+The TUI MUST support SSH onboarding and device pairing through the same client transport owner.
+Pairing and SSH MUST follow the trust and lifecycle requirements in [native architecture](native-architecture.md#a07-connection-ownership-and-backpressure).
 
 `--config <key>=<value>`, `--config=<key>=<value>`, and `-c <key>=<value>` pairs MAY come before the `app-server` subcommand, as the Codex clients send them. When the first argument after these pairs is `app-server`, the pairs MUST reach the app-server command unchanged. In every other case, `-c` keeps its client meaning.
 

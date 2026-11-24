@@ -17,9 +17,9 @@ func repoPath(repo Repository) string {
 	return "/repos/" + repo.Owner + "/" + repo.Name
 }
 
-func repoQuery(params url.Values, repo Repository) string {
+func issuesQuery(params url.Values, repo Repository) string {
 	params.Set("per_page", "100")
-	return repoPath(repo) + "?" + params.Encode()
+	return repoPath(repo) + "/issues?" + params.Encode()
 }
 
 type listQuery struct {
@@ -169,7 +169,7 @@ func (c *Client) Issues(ctx context.Context, request IssuesRequest) (IssuesPage,
 		params.Set("labels", strings.Join(request.Labels, ","))
 	}
 	setSinceParam(params, request.Since)
-	fallback := c.apiURL(repoQuery(params, request.Repository))
+	fallback := c.apiURL(issuesQuery(params, request.Repository))
 	result, err := c.fetchList(ctx, listQuery{
 		repository: request.Repository,
 		nextURL:    request.NextURL,
