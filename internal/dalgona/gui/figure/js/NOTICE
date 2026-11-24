@@ -1,0 +1,34 @@
+Vendored diagram engines for native figures
+
+These files are byte-exact copies of the pinned npm artifacts that web/package.json and web/pnpm-lock.yaml select.
+SHA256SUMS lists the digest of every vendored file. The figure package refuses to start an engine whose bytes differ.
+
+beautiful-mermaid 1.1.3
+  file: beautiful-mermaid/index.js (dist/index.js)
+  license: MIT, beautiful-mermaid/LICENSE
+  source: https://github.com/lukilabs/beautiful-mermaid
+  integrity: sha512-TItrtrAyHp1vwFfFVYauWGrquouk/6SS21Aq3RsxindSYZODcN4xYrPZD6BiZRU+o5mKJzDPz9MUSMvELdylyg==
+
+elkjs 0.11.1
+  file: elkjs/elk.bundled.js (lib/elk.bundled.js)
+  license: EPL-2.0, elkjs/LICENSE (upstream LICENSE.md)
+  source: https://github.com/kieler/elkjs
+  integrity: sha512-zxxR9k+rx5ktMwT/FwyLdPCrq7xN6e4VGGHH8hA01vVYKjTFik7nHOxBnAYtrgYUB1RpAiLvA1/U2YraWxyKKg==
+
+entities 7.0.1
+  files: entities/*.js (dist/esm)
+  license: BSD-2-Clause, entities/LICENSE
+  source: https://github.com/fb55/entities
+  integrity: sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA==
+
+nomnoml 1.7.0
+  file: nomnoml/nomnoml.js (dist/nomnoml.js)
+  license: MIT, nomnoml/LICENSE
+  source: https://github.com/skanaar/nomnoml
+  integrity: sha512-l4eP+/2oSLT+zybLhvaWAQhPluiVbJuD3YUsLM0ggPbQMKH5ni2Vfc0YQPQRsolRHSt5H9SXtzng9MBVCbd+Ag==
+
+graphre 0.1.3
+  file: graphre/graphre.js (dist/graphre.js)
+  license: MIT, graphre/LICENSE
+  source: https://github.com/skanaar/graphre
+  integrity: sha512-F4OO/+BQj3R2UB3PQOGLgdAUy+SQuwy2A5cVGELAQDJlloSyyHqRe60ESFouRf8W0K+sm6gtWKotOwZoX3BL8w==

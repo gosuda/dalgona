@@ -14,7 +14,7 @@ Minimal design means few simultaneous controls, not missing components or inacce
 ## Scope
 
 This decision authorizes the package boundaries required by the native specification.
-The wire and server split and the lifecycle package exist. The GUI packages do not exist yet.
+Connection trust and lifecycle policy MUST remain shared across the desktop, TUI, and other first-party clients.
 
 The runtime remains in one Go module.
 The desktop entry is `cmd/dalgona-gui`.
@@ -23,10 +23,14 @@ Only native adapters and rendering code import Gio or platform GUI libraries.
 
 Shared connection policy lives in `internal/dalgona/client`.
 Local and remote transport code must expose the same security and lifecycle rules to all clients.
-The CLI, web relay, app-server, and desktop migrate to that policy.
-The migration removes the displaced connection implementations in the same change.
+The CLI, TUI, web relay, app-server, and desktop MUST use that policy.
+Each migration MUST remove the displaced connection implementation in the same change.
 `client.Session` owns startup, reconnect, restart, and close for one endpoint.
-`client.Remotes` owns the `[remotes]` table and the remote bridge.
+`client.EndpointSet` MUST own simultaneous endpoint sessions and their admission limits.
+The TUI launch adapter MUST supply that owner without adding backend implementation imports to the TUI.
+The Dalgona-only TUI adapter MUST live in `cmd/internal/tuiwire/dalgonawire`.
+Shared `cmd/internal/tuiwire` code and `cmd/dal` MUST NOT import that adapter.
+`client.Remotes` owns the `[remotes]` table, SSH onboarding, device pairing, and remote transports.
 `internal/dalgona/daemon` imports `client` for the home, socket, and peer checks it shares with dialing.
 `internal/dalgona/remote` imports `client.Remotes` for cloud up, down, and pull.
 `client` imports neither of them.
@@ -92,6 +96,11 @@ The implementation must update `.golangci.yml` in the same change that introduce
 The `lifecycle-client` rule keeps `client` free of the agent core, journal, tools, server handlers, the daemon runtime, and thread runner binding.
 Core packages must continue to reject presentation imports.
 The GUI must not import journal or agent internals to bypass the wire.
+The `gui-imports` rule holds `internal/dalgona/gui` to `internal/dal/rpc`, `client`, `inputtext`, and the GUI packages.
+The `gui-terminal-imports` rule also lets `internal/dalgona/gui/terminal` and the `manage` tests import `internal/dalgona/vtstate`.
+The `gui-root-imports` rule also lets `cmd/dalgona-gui` import `internal/dal/config` and `internal/dalgona/doctor`.
+The `gui-root-test-imports` rule also lets the `cmd/dalgona-gui` tests import `internal/dal/app` and `internal/dal/rpcserver` to start a daemon in the same process.
+The `vtstate-leaf` rule keeps `internal/dalgona/vtstate` free of other internal packages.
 Only the shared lifecycle package may select and start the backend.
 
 The existing headless build and remote box build remain free of GUI dependencies.

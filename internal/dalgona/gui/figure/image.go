@@ -31,10 +31,7 @@ const (
 	ImagePixelByteLimit = 128 << 20
 )
 
-const (
-	imageTileSideLimit = 256
-	rgbaPixelBytes     = 4
-)
+const rgbaPixelBytes = 4
 
 var (
 	ErrImageFormat = errors.New("unsupported image format")
@@ -489,18 +486,34 @@ func DecodeImage(data []byte) (*image.NRGBA, ImageHeader, error) {
 	if err != nil {
 		return nil, ImageHeader{}, err
 	}
-	if buffer := imageProduct(imageProduct(int64(header.Width), int64(header.Height)), rgbaPixelBytes); buffer > ImagePixelByteLimit {
-		return nil, ImageHeader{}, fmt.Errorf("%w: the %d-byte display buffer exceeds the %d-byte limit; resize the image", ErrImageLimit, buffer, ImagePixelByteLimit)
-	}
-	decoded, err := decodeFirstFrame(header.Format, data)
+	img, err := decodeImage(data, header)
 	if err != nil {
-		return nil, ImageHeader{}, fmt.Errorf("%w: the %s data is damaged or uses an unsupported feature (%w); export the image again", ErrImageDecode, header.Format, err)
+		return nil, ImageHeader{}, err
+	}
+	return img, header, nil
+}
+
+func decodeImage(data []byte, header ImageHeader) (*image.NRGBA, error) {
+	if buffer := imageProduct(imageProduct(int64(header.Width), int64(header.Height)), rgbaPixelBytes); buffer > ImagePixelByteLimit {
+		return nil, fmt.Errorf("%w: the %d-byte display buffer exceeds the %d-byte limit; resize the image or save it with 8 bits per channel", ErrImageLimit, buffer, ImagePixelByteLimit)
+	}
+	decoded, err := decodeCheckedFrame(data, header.Format)
+	if err != nil {
+		return nil, err
 	}
 	orientation := imageOrientations[header.Orientation]
 	if straight, ok := decoded.(*image.NRGBA); ok && orientation == (imageOrientation{}) {
-		return straight, header, nil
+		return straight, nil
 	}
-	return orientPixels(imageSource(decoded), header.Width, header.Height, orientation), header, nil
+	return orientPixels(imageSource(decoded), header.Width, header.Height, orientation), nil
+}
+
+func decodeCheckedFrame(data []byte, format ImageFormat) (image.Image, error) {
+	decoded, err := decodeFirstFrame(format, data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the %s data is damaged or uses an unsupported feature (%w); export the image again", ErrImageDecode, format, err)
+	}
+	return decoded, nil
 }
 
 func decodeFirstFrame(format ImageFormat, data []byte) (image.Image, error) {
@@ -634,8 +647,8 @@ func (s previewSum) color(area int64) color.NRGBA {
 
 func ImageTile(src *image.NRGBA, r image.Rectangle) (*image.NRGBA, error) {
 	width, height := imageSpan(r.Min.X, r.Max.X), imageSpan(r.Min.Y, r.Max.Y)
-	if width > imageTileSideLimit || height > imageTileSideLimit {
-		return nil, fmt.Errorf("%w: the tile request covers %dx%d pixels and a tile may cover at most %dx%d; request smaller tiles", ErrImageLimit, width, height, imageTileSideLimit, imageTileSideLimit)
+	if width > TileSideLimit || height > TileSideLimit {
+		return nil, fmt.Errorf("%w: the tile request covers %dx%d pixels and a tile may cover at most %dx%d; request smaller tiles", ErrImageLimit, width, height, TileSideLimit, TileSideLimit)
 	}
 	area := r.Intersect(src.Rect)
 	tile := image.NewNRGBA(area)

@@ -96,6 +96,12 @@ Selection repair MUST NOT select unrelated text.
 Stale parsing, highlighting, image, and figure results MUST be discarded by document revision and content key.
 Results from another thread MUST never change the current document.
 
+Status: `internal/dalgona/gui/document` keeps immutable source, revisions, block keys, and positions with an affinity.
+Each run in a projection maps to its source span.
+Tail blocks keep a provisional key until they close.
+`State.Publish` remaps the selection, focus, scroll anchor, and pending renderer keys in one step.
+Grapheme boundaries and unit conversions come from `internal/dal/inputtext`.
+
 ## D04. Render Markdown and GFM
 
 The parser MUST support CommonMark and the GFM features listed below.
@@ -129,6 +135,13 @@ It MUST NOT assume that only the last paragraph can change.
 An open code or diagram fence MUST show its growing source immediately.
 Closing a valid diagram fence MUST replace that presentation with its figure when compilation completes.
 An incomplete fragment MUST not erase the last valid rendered revision.
+
+Status: `internal/dalgona/gui/document` builds typed blocks from the goldmark GFM tree without the HTML renderer.
+A stream parses only its tail region again.
+A changed link definition parses the earlier regions that mention its label.
+The package also scans math delimiters, and each formula projects as one atomic run whose source span includes its delimiters.
+Markdown is limited to 4 MiB per message, 64 KiB per line, and 32 nesting levels.
+Content above a limit shows as literal source with a diagnostic.
 
 ## D05. Implement real text selection
 
@@ -170,6 +183,19 @@ Selection MUST survive new output, syntax highlighting, theme changes, font load
 Find MUST search the complete selected document scope, including unloaded pages.
 It MUST identify the scope and result count before moving focus to a match.
 
+Status: `internal/dalgona/gui/document` implements one selection across blocks and documents with grapheme, word, and block movement.
+Copy uses the plain text projection, and `Markdown` returns the exact source slice.
+Copy and Find page unloaded documents and return an error instead of partial text.
+Copy is limited to 32 MiB.
+A `gui` build shapes rows with Gio. It breaks lines only where the Gio shaper's UAX 14 line breaking allows. It uses each style's own glyph advances.
+Run direction comes from one shaper pass over the whole row, so the visual order follows the shaper's bidirectional runs across style boundaries.
+The shaper reorders whole runs. A number inside right-to-left text in a left-to-right paragraph keeps the paragraph order instead of the UAX 9 level 2 order.
+Hit testing, carets with affinity, and selection highlights follow the shaped visual lines.
+An inline formula reserves the box that `Typography.Inline` measures, and it breaks, hits, moves, and copies as one unit.
+`Viewport.LineUp` and `Viewport.LineDown` move by visual line and keep the horizontal goal across rows and documents.
+`Viewport.LineStart` and `Viewport.LineEnd` stop at the visual line edges, and `Document.LineSelection` selects the visual line for a triple-click.
+`CopyText`, `CopyMarkdown`, and `CopySource` obtain the complete content before they write it through the platform clipboard adapter, which refuses NUL and text above 32 MiB.
+
 ## D06. Virtualize documents without losing position
 
 The client MUST virtualize blocks, code lines, diff lines, and large table rows.
@@ -204,9 +230,41 @@ Source pages MUST remain recoverable through the client protocol.
 
 Selection, Find, and export MUST page source as needed.
 They MUST report cancellation and source retrieval failures without truncating successful-looking output.
+A selection across rows MUST include each row's complete selected text projection, including nonresident prefixes.
+A complete cached tail MUST NOT stand in for a complete source.
+Copy MUST read cold rows through their captured source references without loading the whole selection into the pane cache.
+A cold structured row MUST reserve its source and projection backings against the same window budget.
+Its raw source MUST NOT exceed 8 MiB, and occupied leases MAY reduce that limit.
+A source-budget failure MUST leave the clipboard unchanged.
+Structured formatting MUST check its expanded extent and reserve all retained source backings before creating the expanded output.
+It MUST reserve five times the formatted extent against the window budget.
+The five backings cover the formatter buffer with its spare quarter, the formatted string, the combined row and the document source.
+This requirement MUST apply to visible rows, cold selection copies, and Full text.
+The view MUST show a projection-budget failure without offering a daemon read retry.
+An independent action with complete captured raw source MUST remain available when only its formatted projection fails.
 Windows MUST share immutable pixel allocations through the application LRU rather than copy them into separate caches.
 Full-image previews MUST use bounded viewport tiles and release obsolete tiles before admitting replacements.
 These ceilings are design limits, not measured performance claims.
+
+The user MUST be able to fold a code block of ten or more lines.
+The user MUST be able to fold a diff file section of more than one line.
+The user MUST be able to fold a top-level quotation.
+A folded block MUST show one header row.
+The header row MUST show the first row of the block and the count of hidden rows.
+The header row MUST give the user an action to expand the block.
+The document scope MUST keep the fold state, and the fold MUST stay when rows are added to or removed from the transcript.
+A fold MUST follow its block key when a stream closes the block.
+A fold toggle MUST keep the reader's anchor.
+If the anchor is in the folded rows, the anchor MUST move to the header row at or below the top of the viewport.
+Line movement MUST skip folded rows and MUST go from the header row to the first row after the fold.
+Copy, Find, and export MUST use the full source of a folded block.
+
+Status: `internal/dalgona/gui/document` implements the height index, the overscan window, the scroll anchor, following, and a geometry cache with a byte budget.
+The anchor keeps its source position when content arrives above it.
+Only `gui` code measures real row heights.
+Code blocks of ten or more lines, diff file sections with more than one line, and top-level quotations fold to one header row.
+Toggling a fold keeps the reader's anchor, and an anchor inside the fold moves to the fold header at or below the viewport top.
+Folds follow their block keys when a stream closes, and line movement skips folded rows.
 
 ## D07. Draw code and diffs
 
@@ -239,6 +297,10 @@ Opening a remote file MUST use the daemon's file contract rather than a matching
 An approval decision MUST answer its corresponding pending server request through the approval component.
 Reading a review result MUST not create an approval request or imply approval.
 Expanding or copying a diff MUST never approve an edit.
+
+Status: `internal/dalgona/gui/document` splits a patch into one block per file section.
+A section starts at a `diff` command or `diff --git` header, a unified `---` header, or a standalone `Binary files` line.
+The splitter counts hunk lines, so a changed line that starts with `---` or `+++` stays inside its hunk.
 
 ## D08. Render diagrams and static SVG
 
@@ -299,6 +361,25 @@ Source inspection MUST remain a secondary view of a successfully rendered figure
 A failure MUST show its cause, source location when known, Retry, and intact source.
 Retry MUST follow the worker restart policy in D11.
 
+Status: `internal/dalgona/gui/figure` compiles D2 with the bundled dagre layout.
+It refuses D2 imports, icons, and image shapes at their source spans.
+It also refuses sketch mode, fill patterns, and other layout engines at their source spans.
+D2 Markdown labels are parsed by the `internal/dalgona/gui/document` model and laid out as native text runs measured with the D2 Source Sans Pro faces.
+`internal/dalgona/gui/figure/math` parses and lays out D2 LaTeX labels. It draws them as glyph outlines. The formula source is the semantic label.
+It runs the vendored Mermaid, elkjs, entities, nomnoml, and graphre bundles in QuickJS without a host API.
+The files `js/SHA256SUMS` and `js/NOTICE` pin the bytes, versions, and licenses of these bundles.
+The owned decoder changes raw SVG and engine SVG into a validated display list.
+The decoder covers the geometry, path, coordinate, paint, definition, gradient, and text rows of the profile.
+It also resolves the engine styles and the engine shadow filter.
+Gio fills paths only with the nonzero rule.
+Thus even-odd fills and radial gradients become raster tiles.
+Masks and clips are decomposed into exact trapezoid regions, so overlapping mask shapes, partial luminance or alpha, and `evenodd` clip children keep their meaning.
+A gradient inside a mask is drawn in bands of 1/64 of its offset. At most one mask gradient may shade one area.
+D2 sequence-diagram groups use multiply blending. The decoder draws the group under its backdrop. It replays the backdrop inside the group tinted by the multiply factor.
+Nomnoml and D2 measure labels with the Source Sans Pro faces that the drawer receives.
+The Mermaid bundle keeps its own width estimate.
+A `gui` build draws the display list through `Canvas`.
+
 ## D09. Render mathematical notation
 
 The client MUST support inline `\(...\)` and display `\[...\]` math.
@@ -354,6 +435,27 @@ Save SVG and Save PNG MUST export the rendered formula.
 Accessibility MUST expose a formula role, source, and a navigable semantic expression.
 Source inspection alone MUST NOT satisfy the math accessibility gate.
 
+Status: `internal/dalgona/gui/figure/math` parses this grammar into an owned semantic tree with source spans.
+It enforces the formula source, nesting, node, and array bounds in D11.
+It reports each refusal with its source span.
+It reads the OpenType MATH table itself.
+The layout puts fractions, scripts, primes, operator limits, radicals, accents, and braces into positioned glyphs, rules, and text runs.
+It also lays out stretchy delimiters, arrays, alignment environments, and tags.
+A `gui` build draws these items from the glyph outlines of the math font and the document text face.
+`internal/dalgona/gui/platform` embeds STIX Two Math 2.13 b171, and `MathFontData` returns it only after it checks the pinned SHA-256.
+The caller passes those bytes to `ParseFont`. The caller passes Hanken Grotesk with the Pretendard fallback from `MathTextFaceData` to `NewTextFont` for text runs and missing math glyphs.
+The math package does not import the platform package.
+Script and scriptscript glyphs take the `ssty` alternates of the `math` script, or of the `DFLT` script when `math` has none.
+An accent over a base taller than `FlattenedAccentBaseHeight` takes its `flac` form, and a wide accent keeps its size variants.
+MATH device tables adjust constants, italic corrections, accent attachments, kerns, and assembly italic corrections at the rendered pixel size. A malformed device table adds nothing.
+Copy TeX copies `Formula.Source`, the exact formula source, through the caller's clipboard path.
+`Layout.WriteSVG` writes each glyph outline once and places each use of it, with rules and text runs as paths.
+`Layout.WritePNG` rasterizes the same outlines at the chosen scale in bands of 256 rows and tiles of 256 columns.
+It refuses more than 32 million pixels or 256 MiB of encoded output.
+`Layout.Expression` returns math-owned nodes in reading order, each after its parent, for the caller to map into the platform semantic model.
+Each node names its role, speaks its subtree, carries its source text, and has its bounds in layout pixels.
+Markdown delimiter scanning remains.
+
 ## D10. Handle image attachments
 
 The client MUST accept file selection, file drop, and clipboard image input through the [platform adapters](native-platform.md).
@@ -399,6 +501,12 @@ Copy image and Save image MUST work from authorized stored bytes without changin
 Image decoding MUST use the renderer child and the D11 deadlines.
 No image decoder MAY block the frame handler.
 Screen readers MUST receive meaningful names, dimensions, attachment order, and control labels.
+
+Status: `internal/dalgona/gui/figure` finds the image format from magic bytes and reads PNG, JPEG, and GIF headers.
+It applies the size, side, pixel, and pixel-byte limits before a decoder allocates pixels.
+The renderer child decodes the first frame, applies the EXIF orientation, and returns preview tiles.
+The `Supervisor` admits every received preview tile into its `PixelCache`. The `PixelCache` is a 64 MiB least-recently-used cache. It is keyed by the image SHA-256 digest, the preview side, and the tile origin.
+An image outcome carries only that key. `Release` drops the tiles of an image when its viewer closes.
 
 ## D11. Bound renderer execution
 
@@ -483,6 +591,17 @@ The user MAY retry that figure once after changing the source or explicitly choo
 Three child failures within sixty seconds MUST pause automatic rendering and show Resume rendering.
 Text, input, approvals, and terminal operation MUST remain available during this state.
 
+Status: `internal/dalgona/gui/figure` supplies the private renderer child as `ServeChild` behind `ChildArgument`.
+The parent is `Supervisor`.
+It checks the frames, the nonce, the manifests, the chunk digests, and each result.
+It stops the child at the deadline, keeps one queue of eight jobs, and pauses after three failures.
+It permits one retry of failed input.
+On Linux, the parent samples the resident memory of the child from `/proc`.
+The macOS sampler reads `proc_pidinfo` task information. The Windows sampler reads `GetProcessMemoryInfo`. Both are compile-checked and have not yet run on those hosts.
+The child also stops when its Go memory is more than the threshold.
+The child loads a script engine on the first job of that kind.
+A warm-up request loads the engine, and the job deadline does not include this time.
+
 ## D12. Export complete content
 
 Save Markdown MUST export the selected document scope with original fences and attachment references.
@@ -501,6 +620,13 @@ An export MUST report a failed source page or figure rather than silently omitti
 
 The client MUST never open a network URL merely to complete an export.
 Exported metadata MUST omit local credentials, private worker paths, and unrelated thread content.
+
+Status: `internal/dalgona/gui/document` streams Save Markdown from loaded and paged source.
+`SaveFile` writes, syncs, and closes a temporary sibling file before it replaces the destination, and then it syncs the destination folder outside Windows.
+It keeps the old destination when an export fails or stops before the replacement.
+A failed folder sync after the replacement returns an error that says the destination already holds the new content.
+`WriteSource` writes the exact code, diagram, or formula source.
+Save SVG and Save PNG belong to the figure package, and `internal/dalgona/gui/figure/math` writes both for a laid-out formula.
 
 ## D13. Distinguish terminal state from command logs
 
@@ -537,6 +663,11 @@ An expired final-output lease or truncated drain MUST remain visible and MUST NO
 Operating-system clipboard requests from terminal output MUST require an explicit user action.
 Terminal output MUST not launch programs, open URLs, or change clipboard contents by itself.
 Unknown terminal sequences MUST be ignored by the bounded parser without affecting input ownership.
+
+Status: `internal/dalgona/vtstate` holds the shared VT processor and the `VTStateV1` checkpoint adapter.
+`internal/dalgona/gui/terminal` holds replica replay, selection, search, input encoding, and cell drawing.
+Independent `VTStateV1` continuation fixtures cover every supported parser state with hand-derived resume oracles under `internal/dalgona/vtstate/testdata/fixtures/` and negative malformed-state cases under `testdata/invalid/`.
+The Terminal component, its protocol client, and real PTY evidence remain open.
 
 ## D14. Prove document completeness
 

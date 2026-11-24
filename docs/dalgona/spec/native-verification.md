@@ -49,10 +49,15 @@ Fault injection MUST act at the stream or operation boundary, not bypass product
 |Send the largest permitted native payload|The message fits its negotiated method and queue limits without a redundant whole-payload copy in the display path.|
 |Exceed the wire limit|The connection fails with a bounded diagnostic and no partial mutation.|
 |Reuse an item ID in another turn|Both rows remain distinct, and each delta reaches its own row.|
-|Reuse a thread ID on another endpoint|Drafts, credentials, history, requests, and paths remain separated.|
+|Reuse a thread ID on another endpoint|Each lane keeps a distinct thread. Drafts, credentials, history, requests, and paths remain separated.|
+|Reuse an operation ID on another endpoint|Each receipt remains keyed by its EndpointID. Reconciliation reads only the owning endpoint's receipt.|
+|Stream turns on two endpoints, then lose one|Its projections become read-only. After its retry ladder it is Offline. The other endpoint continues streaming and sending.|
+|Connect a ninth endpoint with an eligible connected session|The least-recently-used session without attachments or calls in flight enters Idle. Live transports never exceed eight.|
+|Connect a ninth endpoint when every session has attachments|Admission reports capacity without closing a session or exceeding eight live transports.|
+|Connect a daemon remote through its relay|TLS 1.3 and the Authorization bearer header authenticate the native client. Without the header, the browser query token works. No token enters a URL or log.|
 |Complete a turn before a delayed start notification|The completed status and its error remain intact.|
 |Deliver an older status sequence|The current thread status does not regress.|
-|Reconnect with a new connection generation|Late responses from the previous connection cannot change the current state.|
+|Reconnect with a new connection generation|Late responses cannot change the current state. Calls on a non-current link fail before dispatch.|
 |Append output during snapshot creation|Every item and byte appears once after snapshot and live-state reconciliation.|
 |Open or replace history while same-item deltas await coalescing|The dispatcher seals the envelope before the cut. No envelope straddles that cut.|
 |Buffer deltas while two thread snapshots are pending|The client preserves envelope boundaries and filters each thread by its own cut after validating global continuity.|
@@ -64,8 +69,8 @@ Fault injection MUST act at the stream or operation boundary, not bypass product
 |Lose the stream after a mutation write|The client displays an uncertain outcome and does not repeat the mutation automatically.|
 |Fill the event queue|Memory stays within its bound, and critical events are preserved or the connection is explicitly resynchronized.|
 |Minimize the window during a burst|The reducer continues bounded state handling without requiring a visible frame.|
-|Switch threads during a slow search|The previous result does not replace the new thread's completion or search list.|
-|Detach the active thread|Only the current connection's subscription ends. Other clients keep receiving updates.|
+|Open another thread during a slow search|The previous result does not replace the new thread's completion or search list. Results from other endpoints remain distinct.|
+|Detach the active thread|Only its owning endpoint connection ends that subscription. Other endpoints and clients keep receiving updates.|
 |Close one of two windows viewing a thread|The other window retains its subscription, pending decisions, and live updates.|
 |Open a ninth actively referenced thread|The application reports its subscription limit without detaching another window's thread.|
 |Refresh history with eight active snapshots|Atomic replacement uses the existing slot. Failure preserves the old snapshot and an export's retained handle.|
@@ -74,7 +79,12 @@ Fault injection MUST act at the stream or operation boundary, not bypass product
 T04. The shared lifecycle tests MUST use a backend executable distinct from the GUI executable.
 They MUST cover missing binaries, replaced binaries, build mismatch, peer rejection, startup timeout, and a daemon that exits during initialization.
 Restart MUST require the declared user decision when it can interrupt another client's work.
-Two simultaneous launches MUST converge on one valid daemon through the existing startup rules.
+Two simultaneous launches of one endpoint MUST converge on one valid daemon through the existing startup rules.
+Simultaneous launches of different endpoints MUST create independent sessions without sharing connections or credentials.
+Daemon remote fixtures MUST accept equivalent `https` and `wss` base URLs and join `/rpc` correctly.
+They MUST reject insecure schemes, malformed URLs, unsafe token files, and exposed tokens.
+Invalid credentials or TLS configuration MUST enter Failed without an automatic retry.
+An `Authorization` header MUST take precedence over the query token, including when the query token differs.
 
 T05. All relevant existing clients MUST pass after lifecycle and RPC package extraction.
 The TUI, web relay, app-server, and command entry points MUST use the selected shared policy.
@@ -131,10 +141,11 @@ Required component scenarios include the following cases.
 - Reject rewind during a running turn and explain that a completed rewind does not undo files.
 - Keep a queued follow-up's text and attachments ordered during edits and removals.
 - Preserve a draft when a send is rejected for size or unsupported image input.
+- Default Run on to the displayed thread's endpoint and create through an explicitly chosen different endpoint.
 - Recall sent text without losing the saved draft.
 - Keep a stale file-completion result from accepting or sending a different token.
 - Report unknown commands locally while preserving literal paths and escaped slash input.
-- Keep the selected endpoint and workspace visible during remote operations.
+- Keep each operation's endpoint and workspace visible during remote operations.
 - Require explicit consent before sending the previewed failure report.
 
 T09. Keyboard tests MUST cover each shortcut at the correct focus owner.
@@ -181,7 +192,8 @@ Copy, save, zoom, and accessible descriptions MUST work for each supported image
 ## Workspace and terminal authority
 
 T13. File operations MUST run against local, thread-box, and daemon-in-box fixtures.
-The same textual path on two hosts MUST never identify the same resource implicitly.
+The same textual path on two endpoints MUST never identify the same resource implicitly.
+An offline remote fixture MUST refuse local-filesystem fallback while another endpoint remains operational.
 Tests MUST cover symlink escape, traversal, stale revisions, concurrent writes, removed roots, cancellation, and disconnected runners.
 A refused or conflicted write MUST leave the previous file intact.
 The UI MUST retain unsaved text and show an explicit recovery action.
@@ -201,6 +213,7 @@ Forced short writes and lost runner acknowledgments MUST preserve each consumed 
 They MUST expose uncertain input and reject further writes across reconnect and writer replacement.
 Terminal output MUST NOT execute application commands or silently write the system clipboard.
 The client MUST distinguish a live terminal from the existing one-shot shell-output component.
+Equal terminal or thread identifiers on two endpoints MUST NOT share attachments, cursors, output, or input.
 
 |Case|Required observation|
 |---|---|
@@ -244,7 +257,8 @@ Rendering precomposed CJK text alone is not an IME test.
 Tests MUST also cover selection replacement, supplementary characters, emoji insertion, rejected commits, and field changes during composition.
 The actual input-method and browser or terminal matrix comes from [Input text](../../dal/spec/input-text.md#i12-prove-cross-client-behavior).
 
-T17. Screen-reader tests MUST read the shell, thread list, transcript, editor, requests, dialogs, and terminal status.
+T17. Screen-reader tests MUST read the shell, endpoint lane labels, phase words, thread list, transcript, editor, requests, dialogs, and terminal status.
+They MUST distinguish equal thread titles and identifiers by their endpoint labels.
 They MUST invoke actions and edit text through the OS accessibility API.
 Text-range tests MUST cover selection and virtualized document navigation.
 The live status channel MUST announce meaningful state changes without reading every streamed token.
@@ -262,6 +276,7 @@ Reflow MUST remain usable at 320 logical pixels without whole-window horizontal 
 Code, diagrams, diffs, and terminal inspection follow their declared local overflow rules.
 
 The matrix MUST verify the single-point priority, state words, focus ring, minimum targets, title truncation, and stable duration width.
+It MUST show merged endpoint lanes, all seven phase words, readable Idle, and no endpoint accent fills.
 The renderer MUST use the declared font fallback and registered icon glyphs.
 The application MUST NOT fetch a font when it first displays Hangul.
 
@@ -313,6 +328,24 @@ They MUST verify the bundled backend's identity and the absence of web-engine ru
 They MUST verify asset and license inclusion, package signatures, and the declared user-data retention behavior.
 The headless release and remote box artifacts MUST pass their existing build checks.
 
+`just desktop-package` assembles the `.deb` on Linux, the universal `.dmg` on macOS, and the x64 or Arm64 `.msi` on matching Windows hardware.
+The macOS recipe requires Xcode, `DALGONA_MACOS_SIGN_IDENTITY` for a Developer ID Application identity, and `DALGONA_MACOS_NOTARY_PROFILE` for an existing `notarytool` keychain profile.
+It checks both Mach-O slices, app and image signatures and notarization tickets, and resources in the mounted image.
+The Windows recipe requires WiX 5 or later and Windows SDK SignTool.
+`DALGONA_WINDOWS_SIGN_SHA1` selects a signing certificate in the current user's `My` store.
+`DALGONA_WINDOWS_TIMESTAMP_URL` supplies an HTTPS RFC 3161 endpoint.
+It checks the executable architectures, MSI platform and schema, extracted payload bytes, and timestamped Authenticode signatures.
+Before signing the MSI, it also checks the built package's Start menu shortcut, toast properties, and registry registration and cleanup.
+Both recipes take `DALGONA_PACKAGE_VERSION` as `major.minor.patch` or derive it from an exact numeric `v` tag.
+Both refuse missing signing inputs. CI checks their sources without signing or publishing.
+
+Assembly checks do not count as installation evidence.
+Use clean systems from the platform matrix for offline launch from system menus, upgrade, rollback, uninstall, and user-data retention.
+On Windows, verify the Start menu shortcut and COM registration on install.
+Verify toast activation before and after GUI exit.
+Verify removal of the shortcut and registration on uninstall.
+The assembly recipes do not run these system tests.
+
 The implementation MUST update existing specifications when it changes their runtime behavior.
 It MUST update the dependency decision and required notices when it introduces a dependency.
 It MUST preserve the existing documentation link and style checks.
@@ -326,7 +359,7 @@ The following work packages are a completion sequence, not separate reduced-scop
 |---|---|---|
 |1|Extract shared lifecycle and separate RPC server implementation.|Existing clients pass. Package boundaries and backend identity are verified.|
 |2|Implement capabilities, bounded history, and subscription lifecycle.|Snapshot and live-event fixtures pass under reconnect and backpressure.|
-|3|Build the Gio shell, design tokens, state owner, and native input.|A real daemon drives a usable thread and composer on each OS.|
+|3|Build the Gio shell, endpoint set, design tokens, state owners, and native input.|Two endpoint sessions drive independent threads and composers on each OS.|
 |4|Implement every mapped web component and panel.|All C01-C43 behaviors have evidence. No action is inert.|
 |5|Complete documents, figures, math, diffs, and recorded images.|Valid content renders. Selection, export, and hostile-input fixtures pass.|
 |6|Complete authentication, remote management, files, and real terminals.|All C44-C51 workflows complete against their declared owner.|

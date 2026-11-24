@@ -1,6 +1,6 @@
 # Native design
 
-Status: Required design. This document does not describe an implemented or certified desktop client.
+Status: Required design. `internal/dalgona/gui/theme` implements the V02 palettes, the V03 hue rule, and the V05 bindings. The shell implements part of V06 and V07. This document certifies no desktop client.
 The source baseline is `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 
 ## V01: Authority and scope
@@ -73,6 +73,7 @@ They MUST NOT become additional filled action controls.
 Each thread hue MUST equal `fnv1a32(threadID) % 4` over UTF-8 bytes.
 The Go implementation MUST use `hash/fnv.New32a`.
 A view without an open thread MUST carry no thread hue.
+Its point fill uses hue 1, the empty-view fill of the browser.
 
 The hue order, fills, and inks MUST match [the thread-hue table](../../../DESIGN.md#the-point-and-the-thread-hue).
 Those values MUST NOT be copied into another normative palette table.
@@ -114,6 +115,7 @@ Every entry in [Scale](../../../DESIGN.md#scale) MUST receive its corresponding 
 The [component token bindings](../../../DESIGN.md#component-token-bindings) remain authoritative for component-specific geometry.
 Native identifiers MUST retain each source token's identity through a documented mechanical name mapping.
 For example, `--space-8` maps to `space8`.
+The Go package `internal/dalgona/gui/theme` exports each identifier with an upper-case first letter, so `space8` is `theme.Space8`.
 
 Existing pixel geometry MUST map one-to-one to dp at the default desktop metric.
 Existing text sizes MUST map one-to-one to sp before user scaling.
@@ -145,6 +147,8 @@ The native client MUST register these additional bindings.
 | `requestScrollStep` | 48 dp | Existing request scrolling increment. |
 | `modalMaxWidth` | 1120 dp | Existing `70rem` modal maximum. |
 | `idleDockClearance` | 96 dp | Existing `6rem` narrow-window clearance. |
+| `titleBasis` | 256 dp | Existing `16rem` header title basis. |
+| `bandMinWidth` | 128 dp | Existing `8rem` status band minimum. |
 
 The rem conversions above use the browser's 16-pixel baseline.
 Text scaling MUST NOT change those logical geometry definitions.
@@ -159,6 +163,12 @@ No existing browser or terminal token changes in this PR.
 
 The main shell MUST follow [App.svelte](../../../web/src/lib/components/App.svelte).
 Above `shellStackWidth`, it MUST contain a sidebar and a workspace.
+The sidebar MUST merge threads from every configured endpoint into endpoint lanes.
+Each lane header MUST show the endpoint display label and its phase word.
+The phase words display sentence case for the canonical phase tokens `idle`, `connecting`, `connected`, `reconnecting`, `offline`, `incompatible`, and `failed`.
+`Idle` MUST NOT carry a warning or failure treatment.
+A lane header MUST use text roles only and MUST NOT add a lane fill.
+It MUST NOT use the point, thread hue, or a per-endpoint accent.
 The sidebar MUST stay between its registered minimum and maximum widths when space permits.
 The workspace MUST contain the header, transcript, and dock in that order.
 The transcript MUST scroll within its workspace column.
@@ -212,8 +222,12 @@ Component colors, typography, and control geometry remain binding.
 | Stopped | Dim text for an interrupted turn. |
 | Offline | Warning text for a lost daemon connection. |
 
+The lane phase words `Idle`, `Connecting`, `Connected`, and `Reconnecting` MUST use `dim` text.
+The `Offline` lane phase word MUST use `warning-text`.
+The `Incompatible` and `Failed` lane phase words MUST use `failed-text`.
+Lane phase text MUST NOT become a fill.
 Unknown item statuses MUST retain their server text.
-Connection state MUST remain distinct from thread outcome.
+Endpoint phase MUST remain distinct from thread outcome and from every other endpoint's phase.
 Offline MUST NOT erase a recorded Done, Failed, or Stopped outcome.
 The window title MUST use `dalgona · <thread title> · <state>`.
 
@@ -366,6 +380,7 @@ Native resource failures MUST produce a readable error without replacing content
 
 The implementation MUST satisfy all V01 through V16 requirements before completion.
 Verification MUST cover every theme, compact layout, large text, high contrast, reduced motion, and keyboard path.
+It MUST inspect merged endpoint lanes, all seven phase words, and the absence of per-endpoint fills.
 It MUST cover the shared Unicode corpus, Korean, Japanese, and Chinese IME transactions, emoji, and mixed-script content.
 It MUST cover long paths, large diffs, pending requests, and disconnected states.
 
