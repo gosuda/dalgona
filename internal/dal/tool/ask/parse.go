@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type invalid string
@@ -171,12 +172,10 @@ func validate(raw []rawQuestion) ([]Question, error) {
 
 func validateQuestion(index int, raw rawQuestion) (Question, error) {
 	prefix := fmt.Sprintf("ask: question %d", index)
-	header := CleanLine(raw.header)
-	text := CleanLine(raw.text)
-	if err := checkLength(prefix, "header", header, MaxHeader); err != nil {
+	if err := checkRequired(prefix, "header", raw.header, MaxHeader); err != nil {
 		return Question{}, err
 	}
-	if err := checkLength(prefix, "question", text, MaxQuestion); err != nil {
+	if err := checkRequired(prefix, "question", raw.text, MaxQuestion); err != nil {
 		return Question{}, err
 	}
 	if raw.hasOptions && (len(raw.options) < MinOptions || len(raw.options) > MaxOptions) {
@@ -189,7 +188,7 @@ func validateQuestion(index int, raw rawQuestion) (Question, error) {
 	if err != nil {
 		return Question{}, err
 	}
-	return Question{Header: header, Text: text, Options: options, MultiSelect: raw.multiSelect}, nil
+	return Question{Header: raw.header, Text: raw.text, Options: options, MultiSelect: raw.multiSelect}, nil
 }
 
 func validateOptions(index int, raw []rawOption) ([]Option, error) {
@@ -221,27 +220,37 @@ func firstRepeat(options []Option, j int) int {
 
 func validateOption(index, j int, raw rawOption) (Option, error) {
 	where := fmt.Sprintf("ask: question %d option %d", index, j)
-	label := CleanLine(raw.label)
-	if err := checkLength(where, "label", label, MaxLabel); err != nil {
+	if err := checkRequired(where, "label", raw.label, MaxLabel); err != nil {
 		return Option{}, err
 	}
-	description := CleanLine(raw.description)
-	if err := checkLength(where, "description", description, MaxDescription); err != nil {
+	if err := checkRequired(where, "description", raw.description, MaxDescription); err != nil {
 		return Option{}, err
 	}
-	preview := CleanBlock(raw.preview)
-	if utf8.RuneCountInString(preview) > MaxPreview || lineCount(preview) > MaxPreviewLines {
+	if err := checkNUL(where, "preview", raw.preview); err != nil {
+		return Option{}, err
+	}
+	if utf8.RuneCountInString(raw.preview) > MaxPreview || lineCount(raw.preview) > MaxPreviewLines {
 		return Option{}, invalid(fmt.Sprintf("%s: preview is longer than %d characters or %d lines", where, MaxPreview, MaxPreviewLines))
 	}
-	return Option{Label: label, Description: description, Preview: preview}, nil
+	return Option{Label: raw.label, Description: raw.description, Preview: raw.preview}, nil
 }
 
-func checkLength(prefix, field, value string, limit int) error {
-	if value == "" {
+func checkRequired(prefix, field, value string, limit int) error {
+	if err := checkNUL(prefix, field, value); err != nil {
+		return err
+	}
+	if !textinput.Eligible(value) {
 		return invalid(prefix + ": " + field + " is empty")
 	}
 	if utf8.RuneCountInString(value) > limit {
 		return invalid(fmt.Sprintf("%s: %s is longer than %d characters", prefix, field, limit))
+	}
+	return nil
+}
+
+func checkNUL(prefix, field, value string) error {
+	if strings.IndexByte(value, 0) >= 0 {
+		return invalid(prefix + ": " + field + " contains NUL")
 	}
 	return nil
 }

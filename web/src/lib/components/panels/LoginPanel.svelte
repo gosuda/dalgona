@@ -1,6 +1,8 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
+import { oneLine } from "#lib/oneLine.ts";
 import type { Session } from "#lib/session.svelte.ts";
+import { isBlank } from "#lib/text/validate.ts";
 import type { LoginMethod } from "#lib/types.ts";
 
 interface Props {
@@ -52,13 +54,12 @@ function submitKey(event: SubmitEvent): void {
 	if (keyBusy) return;
 	const provider = picked;
 	if (provider === null) return;
-	const key = apiKey.trim();
-	if (key === "") {
+	if (isBlank(apiKey)) {
 		formError = "Enter the API key.";
 		return;
 	}
 	formError = null;
-	void session.startLogin(provider, "apiKey", key);
+	void session.startLogin(provider, "apiKey", apiKey);
 }
 
 function startBrowser(provider: string): void {
@@ -125,6 +126,8 @@ function close(): void {
 						bind:value={apiKey}
 						readonly={keyBusy}
 						aria-describedby="{uid}-error"
+						oninput={() => (formError = null)}
+						{@attach oneLine((message) => (formError = message))}
 					/>
 					{#if formError !== null || keyError !== null}
 						<p id="{uid}-error" class="field-error">{formError ?? keyError}</p>

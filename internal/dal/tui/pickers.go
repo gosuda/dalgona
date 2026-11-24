@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -42,7 +43,7 @@ func queueItems(queue []followup) []listItem {
 	items := make([]listItem, 0, len(queue))
 	for i, item := range queue {
 		first, _, _ := strings.Cut(item.text, "\n")
-		items = append(items, listItem{id: fmt.Sprint(i), label: fmt.Sprintf("%d. %s", i+1, sanitizeText(first))})
+		items = append(items, listItem{id: fmt.Sprint(i), label: fmt.Sprintf("%d. %s", i+1, textinput.DisplayLine(first))})
 	}
 	return items
 }
@@ -268,7 +269,7 @@ func (m *model) listEdit(msg tea.KeyPressMsg) {
 		m.input.field.edit(key)
 		return
 	}
-	if m.input.field.edit(key) || (msg.Text != "" && m.input.field.insert(msg.Text)) {
+	if m.input.field.edit(key) || (msg.Text != "" && m.typeIntoField(msg.Text)) {
 		m.list.cursor = 0
 	}
 }
@@ -633,8 +634,13 @@ func historyItems(entries []historyEntry) []listItem {
 }
 
 func historyLabel(text string) string {
-	head := strings.ToValidUTF8(text[:min(len(text), historyLabelBytes)], "")
-	return strings.Join(strings.Fields(head), " ")
+	if cut := historyLabelBytes; len(text) > cut {
+		if !textinput.IsBoundary(text, cut) {
+			cut = textinput.PrevBoundary(text, cut)
+		}
+		text = text[:cut]
+	}
+	return strings.Join(strings.FieldsFunc(textinput.DisplayLine(text), textinput.IsWhiteSpace), " ")
 }
 
 func historyID(item listItem) uint64 {

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -113,8 +114,8 @@ func TestCtrlCSavesDraft(t *testing.T) {
 	}
 }
 
-func hasPrivateUse(text string) bool {
-	return strings.ContainsFunc(text, func(r rune) bool { return r >= chipRuneBase })
+func leaksChipAtom(text string) bool {
+	return strings.ContainsAny(text, chipPlaceholder+string(utf8.RuneError))
 }
 
 func chipDraftModel(t *testing.T, client caller, pasted string) model {
@@ -149,7 +150,7 @@ func TestCtrlCSavesChipDraftExpanded(t *testing.T) {
 	if got := m.input.composer.Expanded(); got != want {
 		t.Fatalf("recalled draft = %q, want %q", got, want)
 	}
-	if hasPrivateUse(m.input.composer.Value()) {
+	if leaksChipAtom(m.input.composer.Value()) {
 		t.Fatalf("recalled draft holds a chip atom: %q", m.input.composer.Value())
 	}
 }
@@ -1042,7 +1043,7 @@ func TestHistoryRecallRestoresChips(t *testing.T) {
 	if got := m.input.composer.Expanded(); got != original {
 		t.Fatalf("down restored %q, want %q", got, original)
 	}
-	if hasPrivateUse(m.input.composer.Expanded()) {
+	if leaksChipAtom(m.input.composer.Expanded()) {
 		t.Fatalf("restored draft holds a chip atom: %q", m.input.composer.Expanded())
 	}
 	if got := len(m.input.composer.chips); got != 2 {

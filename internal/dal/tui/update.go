@@ -1,13 +1,15 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (m model) Init() tea.Cmd {
@@ -320,7 +322,7 @@ func (m *model) exitKey() tea.Cmd {
 		return nil
 	}
 	draft := m.input.composer.Expanded()
-	if strings.TrimSpace(draft) == "" {
+	if textinput.Blank(draft) {
 		return m.setHint("Ctrl+C again to exit", "exit")
 	}
 	m.input.history.saveDraft(m.input.composer, draft)
@@ -375,7 +377,7 @@ func (m *model) loseConnection(cause error) {
 }
 
 func (m *model) idleEscape() tea.Cmd {
-	if strings.TrimSpace(m.input.composer.Value()) != "" {
+	if !textinput.Blank(m.input.composer.Value()) {
 		m.quietNotice("idle, draft kept")
 		return nil
 	}
@@ -463,15 +465,46 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 func (m *model) pasteField(text string) bool {
 	switch m.textMode() {
 	case inputFilter:
-		if m.input.field.pasteLine(text) {
+		if m.typeIntoField(text) {
 			m.list.cursor, m.list.scroll = 0, 0
 		}
 	case inputTarget, inputAnswer, inputAPIKey:
-		m.input.field.pasteLine(text)
+		m.typeIntoField(text)
 	case inputPrompt, inputShell:
+		if err := (textinput.Field{Name: "paste"}).Check(text); err != nil {
+			m.refuseInsert(fieldNames[m.textMode()], err)
+			return true
+		}
 		return false
 	}
 	return true
+}
+
+var fieldNames = map[inputMode]string{
+	inputPrompt: "Prompt", inputShell: "Shell command", inputFilter: "Filter",
+	inputTarget: "Review target", inputAnswer: "Answer", inputAPIKey: "API key",
+}
+
+func (m *model) typeIntoField(text string) bool {
+	if err := m.input.field.insert(text); err != nil {
+		m.refuseInsert(fieldNames[m.textMode()], err)
+		return false
+	}
+	return true
+}
+
+func (m *model) refuseInsert(name string, err error) {
+	textErr, _ := errors.AsType[*textinput.Error](err)
+	switch textErr.Reason {
+	case textinput.LineBreakNotAllowed:
+		m.noticef("%s takes one line; nothing was inserted", name)
+	case textinput.TextTooLarge:
+		m.noticef("%s holds at most %d characters; nothing was inserted", name, m.input.field.limit)
+	case textinput.DisallowedControl:
+		m.noticef("%s cannot hold NUL; nothing was inserted", name)
+	case textinput.InvalidEncoding, textinput.InvalidOffset:
+		m.noticef("%s needs valid UTF-8; nothing was inserted", name)
+	}
 }
 
 func (m model) View() tea.View {

@@ -1,11 +1,19 @@
 <script lang="ts">
+import { untrack } from "svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import { isImeKey } from "#lib/ime.ts";
-import { MAX_ANSWER } from "#lib/question.ts";
+import { oneLine } from "#lib/oneLine.ts";
+import {
+	answerError,
+	correctedQuestion,
+	correctionText,
+} from "#lib/question.ts";
+import { displayBlock, displayLine, distinctLines } from "#lib/text/display.ts";
 import type {
 	QuestionItem,
 	QuestionRequest,
 	QuestionSelection,
+	QuestionSubmission,
 } from "#lib/types.ts";
 
 interface Props {
@@ -13,6 +21,7 @@ interface Props {
 	position: number;
 	total: number;
 	subagent: string | null;
+	submission: QuestionSubmission | null;
 	onSubmit: (
 		request: QuestionRequest,
 		selections: readonly QuestionSelection[],
@@ -20,18 +29,42 @@ interface Props {
 	onDismiss: (request: QuestionRequest) => void;
 }
 
-let { request, position, total, subagent, onSubmit, onDismiss }: Props =
-	$props();
+let {
+	request,
+	position,
+	total,
+	subagent,
+	submission,
+	onSubmit,
+	onDismiss,
+}: Props = $props();
 let card = $state<HTMLElement>();
 let heading = $state<HTMLElement>();
 let details = $state<HTMLElement>();
 let selections = $state<readonly QuestionSelection[]>([]);
+let refusal = $state<{ readonly id: string; readonly message: string } | null>(
+	null,
+);
 
 const empty: QuestionSelection = { picked: [], other: "" };
 const title = $derived(
 	request.questions.length > 1
 		? "Answer these questions"
 		: "Answer this question",
+);
+const awaiting = $derived(submission?.correction === null);
+const correction = $derived(submission?.correction ?? null);
+const corrected = $derived(
+	correction === null ? null : correctedQuestion(correction.field),
+);
+const cardError = $derived(
+	correction !== null &&
+		!request.questions.some((question) => question.id === corrected) &&
+		request.questions.every((_, index) =>
+			sameSelection(selectionAt(index), submission?.selections[index] ?? empty),
+		)
+		? correctionText(correction.reason, correction.message)
+		: null,
 );
 
 const lineStep = 48;
@@ -51,7 +84,7 @@ const scrolls: Readonly<Record<string, (body: HTMLElement) => void>> = {
 
 $effect(() => {
 	void request.id;
-	selections = [];
+	selections = untrack(() => submission?.selections ?? []);
 	heading?.focus();
 });
 
@@ -78,9 +111,33 @@ function choose(index: number, question: QuestionItem, label: string): void {
 }
 
 function typeOther(index: number, question: QuestionItem, value: string): void {
+	refusal = null;
 	const current = selectionAt(index);
 	const picked = question.multiSelect || value === "" ? current.picked : [];
 	update(index, { picked, other: value });
+}
+
+function hasField(question: QuestionItem): boolean {
+	return question.options.length === 0 || question.isOther;
+}
+
+function sameSelection(a: QuestionSelection, b: QuestionSelection): boolean {
+	return (
+		a.other === b.other &&
+		a.picked.length === b.picked.length &&
+		a.picked.every((label, index) => b.picked[index] === label)
+	);
+}
+
+function errorFor(index: number, question: QuestionItem): string | null {
+	const selection = selectionAt(index);
+	const local = hasField(question) ? answerError(selection.other) : null;
+	if (local !== null) return local;
+	if (correction === null || corrected !== question.id) return null;
+	const sent = submission?.selections[index] ?? empty;
+	return sameSelection(selection, sent)
+		? correctionText(correction.reason, correction.message)
+		: null;
 }
 
 function previewOf(
@@ -95,6 +152,9 @@ function previewOf(
 }
 
 function submit(): void {
+	if (awaiting || cardError !== null) return;
+	if (request.questions.some((question, index) => errorFor(index, question)))
+		return;
 	onSubmit(
 		request,
 		request.questions.map((_, index) => selectionAt(index)),
@@ -102,6 +162,7 @@ function submit(): void {
 }
 
 function skip(): void {
+	if (awaiting) return;
 	onSubmit(
 		request,
 		request.questions.map(() => empty),
@@ -109,6 +170,7 @@ function skip(): void {
 }
 
 function dismiss(): void {
+	if (awaiting) return;
 	onDismiss(request);
 }
 
@@ -157,9 +219,11 @@ function onKeydown(event: KeyboardEvent): void {
 		{/if}
 		{#each request.questions as question, index (question.id)}
 			{@const selection = selectionAt(index)}
-			<fieldset class="question" aria-describedby={`question-prompt-${question.id}`}>
-				<legend>{question.header}</legend>
-				<p class="prompt" id={`question-prompt-${question.id}`}>{question.question}</p>
+			{@const error = refusal?.id === question.id ? refusal.message : errorFor(index, question)}
+			{@const labels = distinctLines(question.options.map((option) => option.label))}
+			<fieldset class="question" disabled={awaiting} aria-describedby={`question-prompt-${question.id}`}>
+				<legend>{displayLine(question.header)}</legend>
+				<p class="prompt" id={`question-prompt-${question.id}`}>{displayLine(question.question)}</p>
 				{#each question.options as option, optionIndex (option.label)}
 					<div class="option" class:selected={selection.picked.includes(option.label)}>
 						<label>
@@ -177,35 +241,45 @@ function onKeydown(event: KeyboardEvent): void {
 									onchange={() => choose(index, question, option.label)}
 								/>
 							{/if}
-							<span class="choice">{option.label}</span>
+							<span class="choice">{labels[optionIndex]}</span>
 							{#if optionIndex === 0}
 								<span class="recommended">Recommended</span>
 							{/if}
 						</label>
-						<p class="description">{option.description}</p>
+						<p class="description">{displayLine(option.description)}</p>
 					</div>
 				{/each}
-				{#if question.options.length === 0 || question.isOther}
+				{#if hasField(question)}
 					<input
 						class="other"
 						type="text"
-						maxlength={MAX_ANSWER}
 						placeholder={question.options.length === 0 ? "Answer" : "Other answer"}
 						aria-label={question.options.length === 0 ? question.header : `Other answer for ${question.header}`}
+						aria-invalid={error === null ? undefined : "true"}
+						aria-describedby={error === null ? undefined : `question-error-${question.id}`}
 						value={selection.other}
 						oninput={(event) => typeOther(index, question, event.currentTarget.value)}
+						{@attach oneLine((message) => (refusal = { id: question.id, message }))}
 					/>
 				{/if}
+				{#if error !== null}
+					<p class="field-error" id={`question-error-${question.id}`} role="alert">{error}</p>
+				{/if}
 				{#if previewOf(question, selection) !== null}
-					<pre class="preview">{previewOf(question, selection)}</pre>
+					<pre class="preview">{displayBlock(previewOf(question, selection) ?? "")}</pre>
 				{/if}
 			</fieldset>
 		{/each}
 	</div>
+	{#if awaiting}
+		<p class="sent" role="status">Answer sent. Waiting for the question to close.</p>
+	{:else if cardError !== null}
+		<p class="field-error" role="alert">{cardError}</p>
+	{/if}
 	<div class="request-actions">
-		<button class="point" onclick={submit}>Submit</button>
-		<button class="quiet" onclick={skip}>Skip</button>
-		<button class="quiet" onclick={dismiss}>Dismiss</button>
+		<button class="point" aria-disabled={awaiting ? "true" : undefined} onclick={submit}>Submit</button>
+		<button class="quiet" aria-disabled={awaiting ? "true" : undefined} onclick={skip}>Skip</button>
+		<button class="quiet" aria-disabled={awaiting ? "true" : undefined} onclick={dismiss}>Dismiss</button>
 	</div>
 </section>
 
@@ -323,6 +397,19 @@ function onKeydown(event: KeyboardEvent): void {
 		color: var(--text);
 		font-size: max(1rem, var(--size-body));
 		padding: var(--space-1) 0;
+	}
+
+	.field-error {
+		margin: var(--space-1) 0 0;
+		color: var(--failed-text);
+		font-size: var(--size-caption);
+		overflow-wrap: anywhere;
+	}
+
+	.sent {
+		margin: var(--space-3) 0 0;
+		color: var(--dim);
+		font-size: var(--size-caption);
 	}
 
 	.preview {

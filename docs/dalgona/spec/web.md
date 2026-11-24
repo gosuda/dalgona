@@ -280,10 +280,19 @@ An over-limit candidate MUST remain recoverable, with a field error, and MUST NO
 HTML `maxlength` MUST NOT enforce this quota because it counts UTF-16 code units.
 Skip MUST send every question with an empty list. Dismiss and Escape MUST send `{"answers": {}}`.
 After submitting, the card MUST retain its answers until `serverRequest/resolved` closes the request.
+While it waits, the card MUST show `Answer sent. Waiting for the question to close.` and MUST NOT send another response.
 A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
+Its field error MUST stay until that answer changes, and an unchanged answer MUST NOT submit again.
+A correction whose field names no question of the card MUST show its error for the whole card until an answer changes.
+An unchanged card MUST NOT submit again while that error shows.
+A warning without `threadId`, `requestId`, `reason`, and `field` MUST NOT change a card.
+A warning whose `threadId` differs from the open request's thread MUST NOT change a card.
 The card MUST NOT treat local submission as proof that the daemon accepted an answer.
+The card MUST show each label, header, question, and description through a single-line projection and each preview through a block projection.
+Labels that look alike after projection MUST show each scalar as `<U+XXXX>` unless it is printable ASCII other than space and `<`.
 
 The card MUST move focus to its title when it appears. A `serverRequest/resolved` for a request this window still shows MUST show its notice in the notice stack.
+After this window submitted, an `answered` resolution MUST show `Question answered` and MUST NOT name the window that answered.
 
 A `serverRequest/resolved` with `timedOut` closes the card and shows the notice `Question timed out`. The transcript row of the question item shows `Timed out`.
 
@@ -370,6 +379,9 @@ Authored text MUST retain its accepted scalar sequence. Whitespace-only eligibil
 Derived search keys and display escapes MUST remain separate from canonical text and selected server identities.
 Multiline adapters MUST fold CRLF and lone CR to LF once under [input-text.md](../../dal/spec/input-text.md).
 A multiline paste into a one-line field MUST fail atomically with a field error and preserve the old value and selection.
+A dropped text with a line break MUST fail the same way.
+The one-line fields are the Other answer, the API key, the base branch, the commit id, and the thread filter.
+Their field error MUST read `This field takes one line. Nothing was pasted.`, and the next edit MUST clear it.
 The rejected candidate MUST remain recoverable without inserting a prefix.
 
 The browser owns native editing, selection, composition, and undo within each field.
@@ -412,19 +424,25 @@ Pasted images MUST be PNG, JPEG or GIF files of at most 5 MiB. The composer MUST
 
 Enter MUST send the typed text, then the pasted texts, then the images, as one message. A steer or follow-up MUST keep the chips for the next send.
 An empty typed text MUST NOT add a text item to the message.
+Send, steer, and queue MUST carry the typed text exactly as typed.
+A whitespace-only typed text alone MUST NOT be sent.
+The composer MUST then show `Enter a message before sending.`
+A whitespace-only typed text that goes with chips or images MUST be sent as typed.
+A message with NUL or an unpaired surrogate MUST stay in the composer with an error, and MUST NOT be sent.
 A message whose input array exceeds 15 MiB of JSON MUST stay in the composer with an error, and MUST NOT be sent. The limit is measured on the input array, not on the whole turn/start request.
 The client MUST count UTF-8 bytes of the complete serialized input array, including expanded chips, JSON escapes, and image items.
 It MUST NOT estimate that limit with JavaScript string length. Rejection MUST retain text, selection, chips, and the unsent candidate.
 The client MUST remove one slash from a message that starts with `//` on the send, steer and queue paths.
 
 A message that starts with `!` MUST be a shell command, and Enter MUST run it in the thread's working directory.
+The command MUST be the exact text after `!`, spaces included.
 The field MUST be labelled `Shell command` in shell mode.
 The help line MUST read `Enter runs the command in <cwd>. It is not sent to the agent.`
 The client MUST call `command/exec` with `sh -c`, or with `cmd /C` on Windows.
 The client MUST time out a shell command after 120 seconds and keep at most 64 KiB of output.
 A shell command MUST commit one row to the transcript and MUST NOT be journaled.
 The output MUST become a chip labelled `[Shell #n exit N, L lines]`. The next message MUST send the chip's text as one more text block.
-An empty shell line MUST NOT run. It MUST show `Enter a command after !.`
+A shell line that the shared blank rule accepts MUST NOT run. It MUST show `Enter a command after !.`
 A shell command whose call fails MUST show a failed row and MUST NOT make a chip.
 A shell command with no open thread, or in a thread with no working directory, MUST show `Open a thread before running a shell command` and MUST keep the draft.
 A shell command that finishes after the user opens another thread MUST NOT add its row or its chip to that thread.

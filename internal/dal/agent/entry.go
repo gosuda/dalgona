@@ -9,6 +9,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/dal/keywords"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type preparedInput struct {
@@ -25,6 +26,9 @@ type preparedInput struct {
 }
 
 func (t *Thread) Submit(ctx context.Context, in Input) error {
+	if err := (textinput.Field{Name: "input"}).Check(in.Text); err != nil {
+		return err
+	}
 	if err := t.rejectStaleSteer(ctx, in); err != nil {
 		return err
 	}

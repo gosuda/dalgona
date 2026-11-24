@@ -112,6 +112,10 @@ func TestAPIKeyLoginRejectsMalformedInput(t *testing.T) {
 	c.fails("account/login/start", map[string]any{"type": "apiKey", "provider": "openai", "apiKey": "   "}, -32602, "provider openai needs an apiKey")
 	c.fails("account/login/start", map[string]any{"type": "apiKey", "provider": "openai", "apiKey": "sk a b"}, -32602, "the API key must be one line")
 	c.fails("account/login/start", map[string]any{"type": "apiKey", "provider": "cursor", "apiKey": "sk-x"}, -32602, "provider cursor does not take an API key")
+	c.fails("account/login/start", map[string]any{"type": "apiKey", "provider": "cloudflare", "apiKey": "sk-\x00x"}, -32602, "invalid text: apiKey: disallowed_control")
+	if bytes.Contains(readAuthFile(t, r.home), []byte("sk-")) {
+		t.Fatal("a refused key reached the credential store")
+	}
 }
 
 func TestAPIKeyNeverReachesLogsJournalOrModel(t *testing.T) {

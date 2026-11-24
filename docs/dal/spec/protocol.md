@@ -30,7 +30,13 @@ Every response and notification in the Codex subset MUST validate against the ve
 ## Text inputs
 
 [Input text](input-text.md) defines the shared input contract for GUI, TUI, web, and daemon callers.
-Its new validation and preservation requirements are planned changes, not claims that the inspected runtime already implements them.
+The daemon applies the field checks of `internal/dal/textinput` before any effect of the request.
+`turn/start` and `turn/steer` check every `text` item and the `path` of every `mention`, `skill`, and `localImage` item.
+They finish these checks before they read an image or touch the thread.
+Their field reads `input[<index>].<member>`, where `<index>` counts every input item from zero.
+`review/start` checks `target.title` and `target.instructions`, `thread/name/set` checks `name`, and `account/login/start` checks `apiKey`.
+`dalgona/keywords/match` checks `text` against its byte limit.
+`Thread.Submit` repeats the check on its whole input for callers outside the protocol.
 
 The daemon MUST reject malformed UTF-8 and unpaired JSON surrogate escapes before dispatching a message.
 It MUST NOT enable replacement decoding for user input.
@@ -291,7 +297,11 @@ The server MUST NOT accept invalid answer text to preserve that older behavior.
 
 These rules require typed response validation before the current response dispatcher consumes its waiter.
 Retaining the server waiter alone does not provide the required client correction lifecycle.
-They are planned transport work, not a new request method or a new question id scheme.
+`rpc.Conn.CallIDChecked` runs that validation before it removes the waiter. It adds no request method or question id scheme.
+The warning reaches only the connection whose response failed the check.
+`rpc.ClientResponder` gives a client request handler that retained sender.
+A handler that answers through it returns `rpc.ErrResponded`, and the connection then sends nothing more for that request.
+The handler's context ends when `serverRequest/resolved` names its request.
 
 A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
 
@@ -367,6 +377,8 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
   Stdin has no read deadline and accepts at most 1048576 bytes.
   Use `</dev/null` or `ssh -n` to avoid unintended stdin input.
   The client MUST reject malformed UTF-8 before submission, replacing the previous U+FFFD repair behavior.
+  It MUST also reject NUL before submission.
+  Either refusal prints `invalid text: stdin: <reason>; pipe UTF-8 text without NUL`, exits 1, and dials no daemon.
   This is an explicit compatibility tightening under [Input text](input-text.md).
   The existing headless adapter removes trailing CR and LF characters as a documented CLI convenience.
   That transformation MUST NOT apply to GUI, TUI, web, or direct daemon text inputs.

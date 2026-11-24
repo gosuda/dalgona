@@ -102,12 +102,12 @@ func decodeApproval(method string, params jsontext.Value) (approval, error) {
 	case "item/commandExecution/requestApproval":
 		request, err := decodeParams[rpc.CommandExecutionRequestApprovalParams](params)
 		return approval{
-			method: method, threadID: sanitizeText(request.ThreadID), itemID: request.ItemID,
-			command: sanitizeText(request.Command), cwd: sanitizeText(request.Cwd), reason: sanitizeText(request.Reason),
+			method: method, threadID: request.ThreadID, itemID: request.ItemID,
+			command: request.Command, cwd: request.Cwd, reason: request.Reason,
 		}, err
 	case "item/fileChange/requestApproval":
 		request, err := decodeParams[rpc.FileChangeRequestApprovalParams](params)
-		return approval{method: method, threadID: sanitizeText(request.ThreadID), itemID: request.ItemID, reason: sanitizeText(request.Reason)}, err
+		return approval{method: method, threadID: request.ThreadID, itemID: request.ItemID, reason: request.Reason}, err
 	default:
 		return approval{}, fmt.Errorf("unsupported server request %s", method)
 	}
