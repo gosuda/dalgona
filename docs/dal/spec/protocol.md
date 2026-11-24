@@ -299,6 +299,9 @@ These rules require typed response validation before the current response dispat
 Retaining the server waiter alone does not provide the required client correction lifecycle.
 `rpc.Conn.CallIDChecked` runs that validation before it removes the waiter. It adds no request method or question id scheme.
 The warning reaches only the connection whose response failed the check.
+`rpc.ClientResponder` gives a client request handler that retained sender.
+A handler that answers through it returns `rpc.ErrResponded`, and the connection then sends nothing more for that request.
+The handler's context ends when `serverRequest/resolved` names its request.
 
 A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
 

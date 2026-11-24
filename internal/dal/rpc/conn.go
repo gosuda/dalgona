@@ -362,6 +362,7 @@ type clientReq struct {
 func (c *Conn) dispatchClientRequest(e envelope) {
 	ctx, cancel := context.WithCancel(c.ctx)
 	ctx = context.WithValue(ctx, requestIDKey{}, e.ID)
+	ctx = context.WithValue(ctx, responderKey{}, func(result any) error { return c.respond(e.ID, result) })
 	key := string(e.ID)
 	entry := &clientReq{cancel: cancel}
 	c.clientReqMu.Lock()
@@ -424,6 +425,9 @@ func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 		return
 	}
 	result, handlerErr := c.clientHandler.Request(ctx, e.Method, e.Params)
+	if errors.Is(handlerErr, ErrResponded) {
+		return
+	}
 	if handlerErr != nil {
 		code, message := -32603, handlerErr.Error()
 		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {
@@ -432,14 +436,21 @@ func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 		c.replyError(e.ID, code, message)
 		return
 	}
+	if err := c.respond(e.ID, result); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		c.replyError(e.ID, -32603, err.Error())
+	}
+}
+
+func (c *Conn) respond(id jsontext.Value, result any) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
-		c.replyError(e.ID, -32603, err.Error())
-		return
+		return err
 	}
-	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: e.ID, Result: raw}, false); enqueueErr != nil {
+	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: id, Result: raw}, false); enqueueErr != nil {
 		c.abort(enqueueErr)
+		return io.ErrClosedPipe
 	}
+	return nil
 }
 
 func (c *Conn) replyError(id jsontext.Value, code int, msg string) {
@@ -811,6 +822,17 @@ func writeJSONToken(encoder *jsontext.Encoder, token jsontext.Token) error {
 }
 
 type requestIDKey struct{}
+
+type responderKey struct{}
+
+var ErrResponded = errors.New("rpc: the request handler sent its own responses")
+
+func ClientResponder(ctx context.Context) func(result any) error {
+	if respond, ok := ctx.Value(responderKey{}).(func(any) error); ok {
+		return respond
+	}
+	return func(any) error { return errors.New("rpc: no server request to answer") }
+}
 
 func ClientRequestID(ctx context.Context) (string, error) {
 	raw, _ := ctx.Value(requestIDKey{}).(jsontext.Value)
