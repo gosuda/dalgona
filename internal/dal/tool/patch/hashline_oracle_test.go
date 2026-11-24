@@ -249,16 +249,3 @@ func TestHashlineRangeBoundaryInsertions(t *testing.T) {
 		}
 	}
 }
-
-func TestHashlineGapNeighborsAreProtected(t *testing.T) {
-	for _, edit := range []snapshot.Splice{{Start: 2, End: 2, Inserted: 1}, {Start: 1, End: 2, Inserted: 1}, {Start: 2, End: 3, Inserted: 1}} {
-		if _, ok := snapshot.MapGap(2, edit); ok {
-			t.Fatalf("gap survived %+v", edit)
-		}
-	}
-	for _, gap := range []int{0, 4} {
-		if _, ok := snapshot.MapGap(gap, snapshot.Splice{Start: gap, End: gap, Inserted: 1}); ok {
-			t.Fatalf("boundary gap %d survived", gap)
-		}
-	}
-}

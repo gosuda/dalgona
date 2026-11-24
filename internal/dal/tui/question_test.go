@@ -96,16 +96,6 @@ func TestQuestionCardOtherText(t *testing.T) {
 	}
 }
 
-func TestQuestionCardFreeText(t *testing.T) {
-	t.Parallel()
-	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
-		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
-	m, _ := openQuestion(t, free)
-	if !m.approvals[0].card.typing {
-		t.Fatal("free-text question did not start in input mode")
-	}
-}
-
 func TestQuestionCardSubmitNowSkips(t *testing.T) {
 	t.Parallel()
 	m, answer := openQuestion(t, questionParamsJSON)

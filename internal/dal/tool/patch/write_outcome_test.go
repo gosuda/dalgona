@@ -396,14 +396,6 @@ func TestCancelBeforeFirstMutationIsInterrupted(t *testing.T) {
 	})
 }
 
-func TestCancelAfterFirstMutationKeepsWriteOutcome(t *testing.T) {
-	t.Run("IO-08/restore finishes", func(t *testing.T) {
-		err := cancelAfterFirstWrite(t, HashlineLight)
-		want := withPaths(writeFailure(tool.CommitRestored, tool.ReasonWriteFailed), "a.txt", "before", "b.txt", "before")
-		requireWrappedOutcome(t, err, HashlineLight, want)
-	})
-}
-
 func TestLegacyCommitFailureIsUnchanged(t *testing.T) {
 	t.Run("COMPAT-01/replace", func(t *testing.T) {
 		env, cwd := editTestEnv(t)

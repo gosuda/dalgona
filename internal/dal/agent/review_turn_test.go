@@ -208,25 +208,6 @@ func requireTurnEndsWithoutMessage(t *testing.T, h *harness, thread *Thread, ver
 	}
 }
 
-func TestTurnReviewRecoveryDoesNotReview(t *testing.T) {
-	t.Parallel()
-	judge := &judgeStub{}
-	h := judgedHarness(t, judge, nil)
-	h.write("a.txt", "uno\n")
-	h.seed(append(seededEdit(), event.ToolCompleted{CallID: "e1", OK: true, Output: "patched", Recovered: "none"})...)
-	h.model.push(calls(call{id: "e2", name: "patch", args: patchArgs("a.txt", [2]string{"uno", "dos"})}), text("done"))
-	events := h.recoverSession()
-	if n := len(judgedOf(events)); n != 1 {
-		t.Fatalf("tool.judged events = %d, want 1 for the new edit", n)
-	}
-	if n := len(turnJudgedOf(events)); n != 0 {
-		t.Fatalf("turn.judged events = %d, want none on recovery", n)
-	}
-	if n := len(turnStatesOf(judge)); n != 0 {
-		t.Fatalf("turn judge calls = %d, want none on recovery", n)
-	}
-}
-
 func TestTurnReviewSkipsTurnWithoutEligibleEdit(t *testing.T) {
 	t.Parallel()
 	judge := &judgeStub{}

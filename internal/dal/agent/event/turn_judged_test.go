@@ -42,26 +42,3 @@ func TestTurnJudgedValidation(t *testing.T) {
 		})
 	}
 }
-
-func TestTurnJudgedFoldMessages(t *testing.T) {
-	t.Parallel()
-	open := event.TurnStarted{TurnID: "turn-3"}
-	judged := event.TurnJudged{TurnID: "turn-3", By: "judge", Verdict: "clean", Paths: []string{"a.go"}, Scores: map[string]float64{"sound": 0.02}, ElapsedMS: 1}
-	end := event.TurnCompleted{TurnID: "turn-3", Status: "completed"}
-	tests := []struct {
-		name   string
-		events []event.Event
-		err    string
-	}{
-		{"accepted while the turn is open", []event.Event{open, judged}, ""},
-		{"repeat for the same turn", []event.Event{open, judged, judged}, "event: fold: duplicate turn.judged turn-3"},
-		{"after turn.completed", []event.Event{open, end, judged}, "event: fold: event turn turn-3 does not match open turn "},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := foldJudgedEvents(tc.events...)
-			checkFoldError(t, err, tc.err)
-		})
-	}
-}

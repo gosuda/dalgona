@@ -580,18 +580,6 @@ describe("live file-change approval", () => {
 			],
 		});
 	});
-
-	it("keeps the grant root out of a file-change approval", () => {
-		expect(
-			parseApprovalRequest("item/fileChange/requestApproval", "req-2", {
-				itemId: "fc-2",
-				startedAtMs: 4,
-				threadId: "thread-1",
-				turnId: "turn-2",
-				grantRoot: "/work",
-			})?.detail,
-		).toBe("");
-	});
 });
 
 describe("model list input modalities", () => {

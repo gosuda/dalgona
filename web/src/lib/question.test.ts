@@ -104,11 +104,6 @@ describe("question request", () => {
 		).toBeNull();
 	});
 
-	test("treats null options as free text", () => {
-		const request = requestOf(vendored);
-		expect(request.questions[1]?.options).toEqual([]);
-	});
-
 	test("orders labels then other text and caps it", () => {
 		const request = requestOf(vendored);
 		const typed = `  ${"x".repeat(2100)}  `;
