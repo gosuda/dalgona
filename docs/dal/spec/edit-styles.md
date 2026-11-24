@@ -118,6 +118,7 @@ For the local runner, every platform MUST write through a directory handle held 
 Unix MUST use `openat`-family calls. Other platforms MUST use `os.Root`, so no write resolves outside the workspace.
 A symbolic link MUST be refused when the pin is taken.
 On Windows, a read-only target MUST stay read-only after replacement.
+On Windows, a replacement that fails with a sharing violation or access denied MUST wait and retry for up to one second. After that second, it MUST fail.
 
 ## Errors
 

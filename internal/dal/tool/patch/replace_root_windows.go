@@ -48,7 +48,7 @@ func retryRootRename(root *os.Root, oldName, newName string) error {
 	}
 	deadline := time.Now().Add(replaceRetryDeadline)
 	for {
-		time.Sleep(replaceRetryInterval)
+		time.Sleep(min(replaceRetryInterval, time.Until(deadline)))
 		if !time.Now().Before(deadline) {
 			return firstErr
 		}
