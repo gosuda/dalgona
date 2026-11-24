@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (m *model) imageRefusal() string {
@@ -22,7 +24,7 @@ func (m *model) imageRefusal() string {
 }
 
 func (m *model) imagePasteCmd(content string, at int) tea.Cmd {
-	text := sanitizeText(pasteLineBreaks.Replace(content))
+	text := textinput.NewlinesToLF(content)
 	path, ok := imagePath(strings.TrimSuffix(text, "\n"))
 	if !ok {
 		return nil

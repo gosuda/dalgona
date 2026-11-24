@@ -60,7 +60,7 @@ func TestKeywordsMatchRefusesTextOver64KiB(t *testing.T) {
 			c := newRig(t, config.ApprovalYolo).connect()
 			params := map[string]any{"text": tc.text}
 			if tc.refused {
-				c.fails("dalgona/keywords/match", params, -32602, "text exceeds 64 KiB")
+				c.fails("dalgona/keywords/match", params, -32602, "invalid text: text: text_too_large")
 				return
 			}
 			c.ok("dalgona/keywords/match", params, nil)

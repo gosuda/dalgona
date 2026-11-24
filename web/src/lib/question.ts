@@ -1,3 +1,4 @@
+import { answerScalars, checkText, type TextReason } from "./text/validate";
 import type {
 	JsonValue,
 	QuestionItem,
@@ -9,11 +10,17 @@ import type {
 } from "./types";
 import { QUESTION_METHOD } from "./types";
 
-export const MAX_ANSWER = 2000;
-
 interface Members {
 	readonly [key: string]: unknown;
 }
+
+const textErrors: Readonly<Record<TextReason, string>> = {
+	text_too_large: `Shorten this answer to ${answerScalars} characters or fewer.`,
+	disallowed_control: "Remove the NUL character from this answer.",
+	invalid_encoding: "Retype this answer: it holds an incomplete character.",
+	line_break_not_allowed: "Remove the line break from this answer.",
+	invalid_offset: "Retype this answer.",
+};
 
 const resolutionNotices: Readonly<Record<string, string>> = {
 	answered: "Question answered in another window",
@@ -135,10 +142,22 @@ function answerTexts(
 	const picked = question.options
 		.map((option) => option.label)
 		.filter((label) => selection?.picked.includes(label) === true);
-	const other = Array.from((selection?.other ?? "").trim())
-		.slice(0, MAX_ANSWER)
-		.join("");
-	return [...picked, other].filter((text) => text !== "");
+	return [...picked, selection?.other ?? ""].filter((text) => text !== "");
+}
+
+export function answerError(text: string): string | null {
+	const reason = checkText(text, { maxScalars: answerScalars });
+	return reason === undefined ? null : textErrors[reason];
+}
+
+export function correctionText(reason: string, message: string): string {
+	return Object.hasOwn(textErrors, reason)
+		? textErrors[reason as TextReason]
+		: message;
+}
+
+export function correctedQuestion(field: string): string | null {
+	return /^answers\.(.+)\.answers\[\d+\]$/s.exec(field)?.[1] ?? null;
 }
 
 export function questionResponse(
@@ -154,9 +173,13 @@ export function questionResponse(
 	return { answers };
 }
 
-export function resolutionNotice(resolution: string | null): string | null {
+export function resolutionNotice(
+	resolution: string | null,
+	submitted: boolean,
+): string | null {
 	if (resolution === null || !Object.hasOwn(resolutionNotices, resolution)) {
 		return null;
 	}
+	if (submitted && resolution === "answered") return "Question answered";
 	return resolutionNotices[resolution] ?? null;
 }

@@ -102,6 +102,8 @@ Committed editing MUST use Unicode 18.0.0 default extended grapheme clusters fro
 This is the selected conformance target. A runtime's advertised Unicode version alone MUST NOT prove conformance.
 Implementation changes MUST pin the segmentation data, algorithm revision, and conformance artifact hashes.
 The [shared corpus](input-text-cases.json) supplements the upstream [GraphemeBreakTest](https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakTest.txt).
+Go adapters MUST segment with `internal/dal/textinput`, and web adapters MUST segment with `web/src/lib/text`.
+[Text input package](../decisions/text-input.md) records the pinned data, generator, and conformance hashes.
 
 Forward and backward movement MUST cross complete clusters in logical text order.
 Backspace and Delete MUST remove a whole adjacent cluster when there is no selection.
@@ -183,6 +185,8 @@ Font fallback, shaping, and display escaping MUST share that mapping.
 
 Terminals MUST NOT execute escape sequences from user, model, server, or pasted text outside a declared raw-terminal surface.
 Accepted non-layout controls MUST have visible escapes in editable fields and decision details.
+A visible escape MUST read `<U+`, four to six uppercase hexadecimal digits, and `>`.
+An exposed projection escapes every scalar except printable ASCII, and it escapes `<` so distinct sources keep distinct projections.
 LF and TAB MAY use their declared line and tab layout.
 Model-authored question projections retain the explicit display transformations in [Ask tool](ask.md).
 Bidirectional controls MUST be inspectable and isolated from surrounding labels, paths, endpoints, and action names.
@@ -297,24 +301,10 @@ Synthetic composition events and rendered CJK strings MUST NOT substitute for ac
 TUI evidence MUST name supported terminal/IME pairs and test bracketed paste alongside committed text delivery.
 Headless passing tests MUST NOT be reported as visual, terminal-width, or IME acceptance.
 
-## I13. Required implementation changes
-
-The source baseline contains the following migration work.
-These observations identify required changes, not a claim that this documentation changes runtime behavior.
-
-|Source|Observed behavior|Required change|
-|---|---|---|
-|[TUI input](../../../internal/dal/tui/input.go)|Single-line paste keeps its first line. Private-use scalars encode chips.|Reject multiline edits whole and keep chip metadata outside text.|
-|[TUI sanitization](../../../internal/dal/tui/sanitize.go)|Cleanup removes formatting, noncharacters, and supplementary private-use text.|Separate canonical input from safe display projection.|
-|[Web answers](../../../web/src/lib/question.ts), [question card](../../../web/src/lib/components/QuestionCard.svelte)|Answer processing trims and truncates. HTML length uses UTF-16.|Use the shared scalar quota and atomic rejection.|
-|[Web composer](../../../web/src/lib/components/Composer.svelte)|Submission trims typed text.|Separate send eligibility from preserved payload.|
-|[Answer cleanup](../../../internal/dal/tool/ask/clean.go), [results](../../../internal/dal/tool/ask/result.go)|User answers are cleaned and truncated.|Validate exact text before claiming a question outcome.|
-|[RPC connection](../../../internal/dal/rpc/conn.go)|The response dispatcher consumes its waiter before typed answer validation.|Retain pending questions through correction and migrate first-party response ownership.|
-|[Agent submission](../../../internal/dal/agent/entry.go)|Tool preparation precedes complete shared text validation.|Validate before discovery, masking storage, and journal effects.|
-|[CLI input](../../../internal/dal/app/cli.go)|Invalid stdin UTF-8 receives replacement characters.|Reject malformed input and retain the explicitly named newline exception.|
+## I13. Implementation proof
 
 An implementation MUST migrate every affected caller together for each changed boundary.
-Tests MUST detect the listed defects through behavior and independent expected text.
+Tests MUST detect text defects through behavior and independent expected text.
 Source assertions, snapshot updates, and a passing style check MUST NOT count as Unicode behavior proof.
 
 ## I14. Standards and API references

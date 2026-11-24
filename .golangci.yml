@@ -133,6 +133,7 @@ linters:
             - "**/internal/dal/syntax/**"
             - "**/internal/dal/shellargs/**"
             - "**/internal/dal/secrets/**"
+            - "**/internal/dal/textinput/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/dalgona"
               desc: core must not import interfaces or batteries
@@ -190,6 +191,13 @@ linters:
               desc: tui reaches the core only through internal/dal/rpc
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
+            - "github.com/gosuda/dalgona/internal/dal/textinput$"
+        text-input-leaf:
+          files:
+            - "**/internal/dal/textinput/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: the text input package holds Unicode tables, segmentation, and field checks only
         rpc-wire:
           files:
             - "**/internal/dal/rpc/**"

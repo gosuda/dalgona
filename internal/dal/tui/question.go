@@ -1,22 +1,22 @@
 package tui
 
 import (
+	"cmp"
 	"encoding/json/jsontext"
 	"fmt"
 	"math/bits"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
-const (
-	stateAwaitingInput  = "awaiting input"
-	questionAnswerLimit = 2000
-)
+const stateAwaitingInput = "awaiting input"
 
 type cardAction int
 
@@ -28,37 +28,49 @@ const (
 
 type questionCard struct {
 	threadID  string
+	requestID string
 	params    rpc.ToolRequestUserInputParams
+	text      []questionText
 	answer    chan requestAnswer
 	index     int
 	cursor    []int
 	picked    [][]bool
 	typed     []string
 	typing    bool
+	sent      bool
+	attempts  int
 	reviewTop int
 }
 
-func newQuestionCard(params rpc.ToolRequestUserInputParams, answer chan requestAnswer) *questionCard {
-	for i := range params.Questions {
-		q := &params.Questions[i]
-		q.Header = sanitizeText(q.Header)
-		q.Question = sanitizeText(q.Question)
-		for j := range q.Options {
-			o := &q.Options[j]
-			o.Label = sanitizeText(o.Label)
-			o.Description = sanitizeText(o.Description)
-			o.Preview = sanitizeText(o.Preview)
-		}
-	}
-	card := &questionCard{threadID: params.ThreadID, params: params, answer: answer}
+type questionText struct {
+	header, question               string
+	labels, descriptions, previews []string
+}
+
+func newQuestionCard(params rpc.ToolRequestUserInputParams, requestID string, answer chan requestAnswer) *questionCard {
+	card := &questionCard{threadID: params.ThreadID, requestID: requestID, params: params, answer: answer}
+	card.text = make([]questionText, len(params.Questions))
 	card.cursor = make([]int, len(params.Questions))
 	card.typed = make([]string, len(params.Questions))
 	card.picked = make([][]bool, len(params.Questions))
 	for i, q := range params.Questions {
 		card.picked[i] = make([]bool, len(q.Options))
+		card.text[i] = projectQuestion(q)
 	}
 	card.typing = card.freeText()
 	return card
+}
+
+func projectQuestion(q rpc.ToolRequestUserInputQuestion) questionText {
+	shown := questionText{header: textinput.DisplayLine(q.Header), question: textinput.DisplayLine(q.Question)}
+	labels := make([]string, len(q.Options))
+	for j, o := range q.Options {
+		labels[j] = o.Label
+		shown.descriptions = append(shown.descriptions, textinput.DisplayLine(o.Description))
+		shown.previews = append(shown.previews, textinput.DisplayBlock(o.Preview))
+	}
+	shown.labels = textinput.DistinctLines(labels)
+	return shown
 }
 
 func (c *questionCard) isReview() bool {
@@ -222,11 +234,7 @@ func (c *questionCard) advance() cardAction {
 
 func (c *questionCard) commitText(text string) cardAction {
 	q := c.index
-	runes := []rune(sanitizeText(text))
-	if len(runes) > questionAnswerLimit {
-		runes = runes[:questionAnswerLimit]
-	}
-	c.typed[q] = string(runes)
+	c.typed[q] = text
 	if !c.multi() {
 		clear(c.picked[q])
 	}
@@ -251,6 +259,31 @@ func (c *questionCard) answersOf(q int) []string {
 	return answers
 }
 
+func (c *questionCard) shownAnswers(q int) []string {
+	var shown []string
+	for j := range c.params.Questions[q].Options {
+		if c.picked[q][j] {
+			shown = append(shown, c.text[q].labels[j])
+		}
+	}
+	if typed := c.typed[q]; typed != "" {
+		shown = append(shown, cmp.Or(textinput.DisplayLine(typed), textinput.Exposed(typed)))
+	}
+	return shown
+}
+
+func (c *questionCard) checkAnswers() error {
+	field := textinput.Field{Name: "answer", MaxScalars: textinput.AnswerScalars}
+	for i := range c.params.Questions {
+		for _, answer := range c.answersOf(i) {
+			if err := field.Check(answer); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (c *questionCard) response() rpc.ToolRequestUserInputResponse {
 	answers := make(map[string]rpc.ToolRequestUserInputAnswer, len(c.params.Questions))
 	for i, q := range c.params.Questions {
@@ -263,21 +296,52 @@ func cancelledResponse() rpc.ToolRequestUserInputResponse {
 	return rpc.ToolRequestUserInputResponse{Answers: map[string]rpc.ToolRequestUserInputAnswer{}}
 }
 
-func (c *questionCard) closedLines(closedAs string) []string {
+func (c *questionCard) entryKey(kind string) string {
+	fields := []string{kind, c.threadID, c.params.TurnID, c.params.ItemID, c.requestID}
+	for i := 1; i < len(fields); i++ {
+		fields[i] = strconv.Quote(fields[i])
+	}
+	return strings.Join(fields, ":")
+}
+
+func (c *questionCard) submissionLines(dismissed bool) []string {
 	lines := make([]string, 0, len(c.params.Questions))
-	for i, q := range c.params.Questions {
-		if closedAs != "" {
-			lines = append(lines, q.Header+": "+closedAs)
-			continue
+	for i := range c.params.Questions {
+		entry := "dismiss requested"
+		if !dismissed {
+			entry = cmp.Or(strings.Join(c.shownAnswers(i), "; "), "skip requested")
 		}
-		switch answers := c.answersOf(i); {
-		case len(answers) == 0:
-			lines = append(lines, q.Header+": skipped")
-		default:
-			lines = append(lines, q.Header+": "+strings.Join(answers, "; "))
-		}
+		lines = append(lines, fmt.Sprintf("%s: Local submission #%d: %s", c.text[i].header, c.attempts, entry))
 	}
 	return lines
+}
+
+func (c *questionCard) statusLines(status string) []string {
+	lines := make([]string, 0, len(c.params.Questions))
+	for i := range c.params.Questions {
+		lines = append(lines, c.text[i].header+": "+status)
+	}
+	return lines
+}
+
+func (c *questionCard) reopen(field string) {
+	c.sent = false
+	path, ok := strings.CutPrefix(field, "answers.")
+	cut := strings.LastIndex(path, ".answers[")
+	if !ok || cut < 0 {
+		return
+	}
+	q := slices.IndexFunc(c.params.Questions, func(q rpc.ToolRequestUserInputQuestion) bool { return q.ID == path[:cut] })
+	if q < 0 {
+		return
+	}
+	c.index, c.reviewTop = q, 0
+	if c.typed[q] == "" {
+		c.typing = c.freeText()
+		return
+	}
+	c.cursor[q] = len(c.params.Questions[q].Options)
+	c.typing = true
 }
 
 func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
@@ -288,8 +352,7 @@ func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
 		return c.reviewView(s, hue, rows, width)
 	}
 	q := c.index
-	question := c.params.Questions[q]
-	title := s.fit("┌ "+fmt.Sprintf("Question %d of %d · %s", q+1, len(c.params.Questions), question.Header), width)
+	title := s.fit("┌ "+fmt.Sprintf("Question %d of %d · %s", q+1, len(c.params.Questions), c.text[q].header), width)
 	if rows == 1 {
 		return []string{title}
 	}
@@ -298,7 +361,7 @@ func (c *questionCard) view(s *screenState, hue, rows, width int) []string {
 		return []string{title, footer[0]}
 	}
 	avail := rows - 1 - len(footer)
-	questionLines := rail(s.wrap(question.Question, max(width-2, 1)), "│ ", width, s)
+	questionLines := rail(s.wrap(c.text[q].question, max(width-2, 1)), "│ ", width, s)
 	options := c.optionLines(s, width)
 	preview := c.previewLines(s, width)
 	var body []string
@@ -322,8 +385,6 @@ func (s *screenState) padCard(lines, footer []string, rows, width int) []string 
 	return append(lines, footer...)
 }
 
-var reviewFlatten = strings.NewReplacer("\n", " ", "\t", " ")
-
 func (c *questionCard) reviewTitle() string {
 	if len(c.params.Questions) == 1 {
 		return "Review · 1 question"
@@ -334,11 +395,11 @@ func (c *questionCard) reviewTitle() string {
 func (c *questionCard) reviewBody(s *screenState, width int) []string {
 	t := s.dockTheme()
 	lines := make([]string, 0, 2*len(c.params.Questions))
-	for i, q := range c.params.Questions {
-		lines = append(lines, s.fit("│ "+t.paintBold(roleText, reviewFlatten.Replace(q.Header)), width))
+	for i := range c.params.Questions {
+		lines = append(lines, s.fit("│ "+t.paintBold(roleText, c.text[i].header), width))
 		answer := t.paint(roleDim, "(no answer)")
-		if answers := c.answersOf(i); len(answers) > 0 {
-			answer = t.paint(roleText, reviewFlatten.Replace(strings.Join(answers, "; ")))
+		if answers := c.shownAnswers(i); len(answers) > 0 {
+			answer = t.paint(roleText, strings.Join(answers, "; "))
 		}
 		lines = append(lines, s.fit("│   "+answer, width))
 	}
@@ -348,9 +409,14 @@ func (c *questionCard) reviewBody(s *screenState, width int) []string {
 func (c *questionCard) reviewFrame(s *screenState, hue, rows, width int) (body, footer []string) {
 	body = c.reviewBody(s, width)
 	maxLines := max(rows-2, 1)
-	footer = reviewHints(s, hue).lines(s, width, maxLines)
-	if len(body) > rows-1-len(footer) {
-		footer = reviewScrollHints(s, hue).lines(s, width, maxLines)
+	switch {
+	case c.sent:
+		footer = c.sentFooter(s, width)
+	default:
+		footer = reviewHints(s, hue).lines(s, width, maxLines)
+		if len(body) > rows-1-len(footer) {
+			footer = reviewScrollHints(s, hue).lines(s, width, maxLines)
+		}
 	}
 	return body, footer
 }
@@ -447,7 +513,14 @@ func (h hintSet) lines(s *screenState, width, maxLines int) []string {
 	return renderHints(s, h.texts, shown, starts, width)
 }
 
+func (c *questionCard) sentFooter(s *screenState, width int) []string {
+	return []string{s.dockTheme().paint(roleDim, s.fit(questionHintRail+"Answer sent; waiting for the agent", width))}
+}
+
 func (c *questionCard) hintLines(s *screenState, hue, width, maxLines int) []string {
+	if c.sent {
+		return c.sentFooter(s, width)
+	}
 	priority := c.hintPriority()
 	set := hintSet{priority: priority[:], texts: [questionSegments]string{
 		hintMove:          "↑/↓ move",
@@ -521,7 +594,7 @@ func (c *questionCard) optionLine(s *screenState, width, j int) string {
 			mark = "[x]"
 		}
 	}
-	text := fmt.Sprintf("%d. %s", j+1, question.Options[j].Label)
+	text := fmt.Sprintf("%d. %s", j+1, c.text[q].labels[j])
 	if j == 0 {
 		text += "  Recommended"
 	}
@@ -545,8 +618,8 @@ func (c *questionCard) optionLines(s *screenState, width int) []string {
 			prefix = "┃ › "
 		}
 		text := fmt.Sprintf("%d. Other", len(question.Options)+1)
-		if c.typed[q] != "" {
-			text += ": " + c.typed[q]
+		if typed := c.typed[q]; typed != "" {
+			text += ": " + cmp.Or(textinput.DisplayLine(typed), textinput.Exposed(typed))
 		}
 		lines = append(lines, s.fit(prefix+text, width))
 	}
@@ -555,11 +628,10 @@ func (c *questionCard) optionLines(s *screenState, width int) []string {
 
 func (c *questionCard) previewLines(s *screenState, width int) []string {
 	q := c.index
-	options := c.params.Questions[q].Options
 	description, preview := "", ""
-	if row := c.cursor[q]; row < len(options) {
-		description = options[row].Description
-		preview = options[row].Preview
+	if row := c.cursor[q]; row < len(c.text[q].labels) {
+		description = c.text[q].descriptions[row]
+		preview = c.text[q].previews[row]
 	}
 	first, _, _ := strings.Cut(preview, "\n")
 	suffix := ""
@@ -573,15 +645,16 @@ func (c *questionCard) previewLines(s *screenState, width int) []string {
 func (c *questionCard) reviewLines() []string {
 	var lines []string
 	for i, q := range c.params.Questions {
-		lines = append(lines, fmt.Sprintf("Question %d of %d · %s", i+1, len(c.params.Questions), q.Header))
-		lines = append(lines, strings.Split(q.Question, "\n")...)
+		shown := c.text[i]
+		lines = append(lines, fmt.Sprintf("Question %d of %d · %s", i+1, len(c.params.Questions), shown.header))
+		lines = append(lines, strings.Split(textinput.DisplayBlock(q.Question), "\n")...)
 		for j, o := range q.Options {
-			lines = append(lines, fmt.Sprintf("%d. %s", j+1, o.Label))
-			if o.Description != "" {
-				lines = append(lines, strings.Split(o.Description, "\n")...)
+			lines = append(lines, fmt.Sprintf("%d. %s", j+1, shown.labels[j]))
+			if block := textinput.DisplayBlock(o.Description); block != "" {
+				lines = append(lines, strings.Split(block, "\n")...)
 			}
-			if o.Preview != "" {
-				lines = append(lines, strings.Split(o.Preview, "\n")...)
+			if shown.previews[j] != "" {
+				lines = append(lines, strings.Split(shown.previews[j], "\n")...)
 			}
 		}
 		if q.IsOther {
@@ -638,7 +711,11 @@ func (m *model) applyQuestion(msg serverRequestMsg) tea.Cmd {
 		msg.answer <- requestAnswer{value: cancelledResponse()}
 		return nil
 	}
-	card := newQuestionCard(params, msg.answer)
+	if open := m.openQuestion(params.ThreadID, msg.requestID); open != nil {
+		open.answer, open.sent = msg.answer, false
+		return nil
+	}
+	card := newQuestionCard(params, msg.requestID, msg.answer)
 	if len(m.approvals) == 0 && (card.typing || !m.loginTyping()) {
 		m.input.field = textField{}
 	}
@@ -650,7 +727,36 @@ func (m *model) applyQuestion(msg serverRequestMsg) tea.Cmd {
 	return m.notify(m.notifyLine("Waiting for your answer"))
 }
 
-func questionResolvedNotice(resolution string) string {
+func (m *model) openQuestion(threadID, requestID string) *questionCard {
+	for _, open := range m.approvals {
+		if open.card != nil && open.threadID == threadID && open.requestID == requestID {
+			return open.card
+		}
+	}
+	return nil
+}
+
+func (m *model) applyAnswerWarning(params jsontext.Value) error {
+	event, err := decodeParams[rpc.WarningNotification](params)
+	if err != nil || event.RequestID == "" {
+		return err
+	}
+	card := m.openQuestion(event.ThreadID, event.RequestID)
+	if card == nil || !card.sent {
+		return nil
+	}
+	card.reopen(event.Field)
+	if m.approvals[0].card == card && card.typing {
+		m.input.field = typedField(card.typed[card.index])
+	}
+	m.errorf("Answer not accepted: %s; edit it and submit again", event.Message)
+	return nil
+}
+
+func questionResolvedNotice(resolution string, sent bool) string {
+	if sent && resolution == "answered" {
+		return "Question answered"
+	}
 	switch resolution {
 	case "answered":
 		return "Question answered in another window"
@@ -674,6 +780,9 @@ func (m *model) typingAnswer() bool {
 
 func (m *model) answerQuestionKey(msg tea.KeyPressMsg) tea.Cmd {
 	card := m.approvals[0].card
+	if card.sent {
+		return nil
+	}
 	if card.typing {
 		return m.typeQuestionKey(card, msg)
 	}
@@ -725,7 +834,7 @@ func (m *model) typeQuestionKey(card *questionCard, msg tea.KeyPressMsg) tea.Cmd
 		m.input.field = textField{}
 	default:
 		if !m.input.field.edit(msg.String()) && msg.Text != "" {
-			m.input.field.insert(msg.Text)
+			m.typeIntoField(msg.Text)
 		}
 	}
 	return nil
@@ -744,7 +853,7 @@ func (m *model) handOverField(dropped approval) {
 
 func typedField(text string) textField {
 	runes := []rune(text)
-	return textField{text: runes, cursor: len(runes)}
+	return textField{text: runes, cursor: len(runes), limit: textinput.AnswerScalars}
 }
 
 func (m *model) applyCardAction(action cardAction) {
@@ -759,13 +868,29 @@ func (m *model) applyCardAction(action cardAction) {
 
 func (m *model) finishQuestion(dismissed bool) {
 	card := m.approvals[0].card
-	value := card.response()
-	status := ""
-	if dismissed {
-		value = cancelledResponse()
-		status = "dismissed"
+	value := cancelledResponse()
+	if !dismissed {
+		if err := card.checkAnswers(); err != nil {
+			m.errorf("Answer not sent: %v", err)
+			return
+		}
+		value = card.response()
 	}
-	card.answer <- requestAnswer{value: value}
-	m.commit(fmt.Sprintf("question:%s:%s:%s", card.threadID, card.params.TurnID, card.params.ItemID), card.closedLines(status))
-	m.dropApproval(0)
+	select {
+	case card.answer <- requestAnswer{value: value}:
+	default:
+		m.errorf("Answer not sent: the previous answer is still being sent")
+		return
+	}
+	card.attempts++
+	m.commit(card.entryKey("question-submission")+":"+strconv.Itoa(card.attempts), card.submissionLines(dismissed))
+	if dismissed {
+		m.dropApproval(0)
+		return
+	}
+	if card.typing {
+		m.input.field = textField{}
+	}
+	card.sent, card.typing = true, false
+	m.noticef("Answer sent; waiting for the agent")
 }

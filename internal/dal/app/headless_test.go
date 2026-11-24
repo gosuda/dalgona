@@ -301,7 +301,8 @@ func TestPipedStdinPrecedesPrompt(t *testing.T) {
 		{"regular file", stdinFile(t, "from file\n"), "from file\n\nreview"},
 		{"carriage returns", strings.NewReader("a\r\n\r\n"), "a\n\nreview"},
 		{"inner newlines", strings.NewReader("l1\nl2\n"), "l1\nl2\n\nreview"},
-		{"invalid utf-8", strings.NewReader("bad\xff\n"), "bad\uFFFD\n\nreview"},
+		{"literal replacement character", strings.NewReader("ok\uFFFD\r\n"), "ok\uFFFD\n\nreview"},
+		{"inner carriage return and spaces", strings.NewReader("  a\rb  \n"), "  a\rb  \n\nreview"},
 		{"empty stdin", strings.NewReader(""), "review"},
 		{"newlines only", strings.NewReader("\n\n"), "review"},
 	}
@@ -381,6 +382,27 @@ func TestPipedStdinWaitsForEOF(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the run did not finish after stdin closed")
+	}
+}
+
+func TestPipedStdinRefusesInvalidText(t *testing.T) {
+	cases := map[string]string{
+		"malformed UTF-8": "bad\xff\n",
+		"truncated UTF-8": "end\xe2\x82",
+		"UTF-8 surrogate": "\xed\xa0\x80",
+		"NUL":             "a\x00b",
+	}
+	for name, stdin := range cases {
+		reason := "invalid_encoding"
+		if name == "NUL" {
+			reason = "disallowed_control"
+		}
+		daemon := newScriptedDaemon(t, completedTurn())
+		code, stdout, stderr := runHeadless(t, daemon, strings.NewReader(stdin), "-p", "review")
+		want := "dal: invalid text: stdin: " + reason + "; pipe UTF-8 text without NUL\n"
+		if code != 1 || stdout != "" || stderr != want || daemon.dialCount() != 0 || len(daemon.submitted()) != 0 {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q, %d dials; want exit 1, stderr %q and no request", name, code, stdout, stderr, daemon.dialCount(), want)
+		}
 	}
 }
 

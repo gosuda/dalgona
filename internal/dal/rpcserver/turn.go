@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json/jsontext"
+	"strconv"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
@@ -11,6 +12,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type turnParams struct {
@@ -22,6 +24,9 @@ type turnParams struct {
 	approvalPolicy string
 	sandboxPolicy  string
 	text           []string
+	items          int
+	textErr        error
+	loads          []imageLoad
 	images         []agent.Image
 	imageErr       error
 	imageBytes     int64
@@ -122,25 +127,46 @@ func (p *turnParams) readInput(d *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
+	index := p.items
+	p.items++
 	switch kind {
 	case "text":
+		p.checkText(index, "text", text)
 		p.text = append(p.text, text)
 	case "mention", "skill":
+		p.checkText(index, "path", path)
 		p.text = append(p.text, "@"+path)
 	case "image":
-		p.takeImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, admit) })
+		p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, admit) })
 	case "localImage":
-		p.takeImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, admit) })
+		p.checkText(index, "path", path)
+		p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, admit) })
 	default:
 		return invalidParams("unsupported input type " + kind)
 	}
 	return nil
 }
 
+func (p *turnParams) checkText(index int, member, value string) {
+	if p.textErr != nil {
+		return
+	}
+	field := textinput.Field{Name: "input[" + strconv.Itoa(index) + "]." + member}
+	if err := field.Check(value); err != nil {
+		p.textErr = invalidParams(err.Error())
+	}
+}
+
 func decodeTurn(params jsontext.Value) (turnParams, error) {
 	var p turnParams
-	err := decodeParams(params, p.member)
-	return p, err
+	if err := decodeParams(params, p.member); err != nil {
+		return p, err
+	}
+	if p.textErr != nil {
+		return p, p.textErr
+	}
+	p.loadImages()
+	return p, nil
 }
 
 func (s *server) turnStart(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {

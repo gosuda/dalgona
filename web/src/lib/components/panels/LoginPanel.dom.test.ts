@@ -140,6 +140,60 @@ describe("login panel", () => {
 		);
 	});
 
+	test("an API key login sends the key exactly as typed and refuses a blank one", async () => {
+		const { session, rpc } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+			"account/login/start": () => ({ type: "apiKey" }),
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/openai/));
+		const field = screen.getByLabelText("API key for openai");
+		await fireEvent.input(field, { target: { value: " \u3000 " } });
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		expect(screen.getByText("Enter the API key.")).toBeTruthy();
+		expect(
+			rpc.calls.filter((call) => call.method === "account/login/start"),
+		).toEqual([]);
+		await fireEvent.input(field, { target: { value: "  sk-test  " } });
+		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
+		await vi.waitFor(() =>
+			expect(rpc.calls).toContainEqual({
+				method: "account/login/start",
+				params: { type: "apiKey", provider: "openai", apiKey: "  sk-test  " },
+			}),
+		);
+	});
+
+	test("an API key paste with a line break inserts nothing and says why", async () => {
+		const { session } = await connected({
+			"dalgona/account/providers/list": providers([
+				{ id: "openai", login: "apiKey", signedIn: false },
+			]),
+		});
+		session.openPanel("login");
+		render(LoginPanel, {
+			props: { session, open: true, onClose: vi.fn() },
+		});
+		await fireEvent.click(await screen.findByLabelText(/openai/));
+		const field = screen.getByLabelText(
+			"API key for openai",
+		) as HTMLInputElement;
+		await fireEvent.input(field, { target: { value: "sk-" } });
+		const clipboardData = {
+			getData: (type: string) => (type === "text/plain" ? "sk-test\n" : ""),
+		};
+		expect(await fireEvent.paste(field, { clipboardData })).toBe(false);
+		expect(field.value).toBe("sk-");
+		expect(
+			screen.getByText("This field takes one line. Nothing was pasted."),
+		).toBeTruthy();
+	});
+
 	test("a browser login waits for account/login/completed and reloads models", async () => {
 		const { session, rpc } = await connected({
 			"dalgona/account/providers/list": providers([

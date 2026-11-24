@@ -342,6 +342,11 @@ func (n WarningNotification) Encode(o *Writer) {
 	o.Open()
 	o.Str("threadId", n.ThreadID)
 	o.Str("message", n.Message)
+	if n.RequestID != "" {
+		o.Str("requestId", n.RequestID)
+		o.Str("reason", n.Reason)
+		o.Str("field", n.Field)
+	}
 	o.Close()
 }
 
