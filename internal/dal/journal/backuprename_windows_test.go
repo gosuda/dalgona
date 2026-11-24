@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -84,25 +85,27 @@ func TestInstallBackupRetriesHeldStagedDir(t *testing.T) {
 }
 
 func TestRenameBackupDirStartsNoRetryPastDeadline(t *testing.T) {
-	held := &os.LinkError{Op: "rename", Old: "staged", New: "tmp", Err: windows.ERROR_SHARING_VIOLATION}
-	attempts := 0
-	var firstDone time.Time
-	useBackupRename(t, func(string, string) error {
-		attempts++
-		switch attempts {
-		case 1:
-			firstDone = time.Now()
-		case 2:
-			time.Sleep(time.Until(firstDone.Add(backupRenameRetryDeadline - backupRenameRetryInterval/2)))
+	synctest.Test(t, func(t *testing.T) {
+		held := &os.LinkError{Op: "rename", Old: "staged", New: "tmp", Err: windows.ERROR_SHARING_VIOLATION}
+		attempts := 0
+		var firstDone time.Time
+		useBackupRename(t, func(string, string) error {
+			attempts++
+			switch attempts {
+			case 1:
+				firstDone = time.Now()
+			case 2:
+				time.Sleep(time.Until(firstDone.Add(backupRenameRetryDeadline - backupRenameRetryInterval/2)))
+			}
+			return held
+		})
+		if err := renameBackupDir("staged", "tmp"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			t.Fatalf("rename held past the deadline: %v, want sharing violation", err)
 		}
-		return held
+		if attempts != 2 {
+			t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
+		}
 	})
-	if err := renameBackupDir("staged", "tmp"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
-		t.Fatalf("rename held past the deadline: %v, want sharing violation", err)
-	}
-	if attempts != 2 {
-		t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
-	}
 }
 
 func TestInstallBackupHeldPastDeadlineKeepsBackup(t *testing.T) {
