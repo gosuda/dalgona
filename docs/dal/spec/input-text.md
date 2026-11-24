@@ -308,8 +308,6 @@ These observations identify required changes, not a claim that this documentatio
 
 |Source|Observed behavior|Required change|
 |---|---|---|
-|[TUI input](../../../internal/dal/tui/input.go)|Single-line paste keeps its first line. Private-use scalars encode chips.|Reject multiline edits whole and keep chip metadata outside text.|
-|[TUI sanitization](../../../internal/dal/tui/sanitize.go)|Cleanup removes formatting, noncharacters, and supplementary private-use text.|Separate canonical input from safe display projection.|
 |[Web answers](../../../web/src/lib/question.ts), [question card](../../../web/src/lib/components/QuestionCard.svelte)|Answer processing trims and truncates. HTML length uses UTF-16.|Use the shared scalar quota and atomic rejection.|
 |[Web composer](../../../web/src/lib/components/Composer.svelte)|Submission trims typed text.|Separate send eligibility from preserved payload.|
 |[RPC connection](../../../internal/dal/rpc/conn.go)|The response dispatcher consumes its waiter before typed answer validation.|Retain pending questions through correction and migrate first-party response ownership.|

@@ -129,3 +129,35 @@ func TestQuoteEscapesLineBreaksAndControlsWithoutChangingText(t *testing.T) {
 		t.Fatalf("Quote(%q) = %q, which decodes to %q, %v", text, quoted, decoded, err)
 	}
 }
+
+func TestEscapedShowsEveryControlButKeepsLayout(t *testing.T) {
+	cases := map[string]string{
+		"a\tb\nc":            "a\tb\nc",
+		"\x1b[31mred":        "<U+001B>[31mred",
+		"a\rb\u0085c\u2028d": "a<U+000D>b<U+0085>c<U+2028>d",
+		"A\u202eB\u2066C":    "A<U+202E>B<U+2066>C",
+		"\x00\x7f":           "<U+0000><U+007F>",
+		"\ue000\U000F0001\ufeff\ufffd e\u0301 \u1100\u1161": "\ue000\U000F0001\ufeff\ufffd e\u0301 \u1100\u1161",
+	}
+	for text, want := range cases {
+		if got := Escaped(text); got != want {
+			t.Errorf("Escaped(%q) = %q, want %q", text, got, want)
+		}
+	}
+}
+
+func TestDistinctLinesExposeOnlyCollidingLabels(t *testing.T) {
+	got := DistinctLines([]string{"Yes", "Yes\u200b", "No", " No ", "Maybe", "\x1b[1mMaybe\x1b[0m"})
+	want := []string{"Yes", "Yes<U+200B>", "No", "<U+0020>No<U+0020>", "Maybe", "<U+001B>[1mMaybe<U+001B>[0m"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("DistinctLines[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if apart := DistinctLines([]string{"One", "Two words"}); apart[1] != "Two words" {
+		t.Errorf("DistinctLines of distinct labels = %q, want plain projections", apart)
+	}
+	if same := DistinctLines([]string{"Same", "Same"}); same[0] != "Same" || same[1] != "Same" {
+		t.Errorf("DistinctLines of equal sources = %q, want plain projections", same)
+	}
+}

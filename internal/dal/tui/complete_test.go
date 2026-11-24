@@ -136,7 +136,7 @@ func TestPaletteCompletionKeepsChips(t *testing.T) {
 		if got, want := m.input.composer.Expanded(), "/model "+pasted; got != want {
 			t.Fatalf("%s gave %q, want %q", key.String(), got, want)
 		}
-		if hasPrivateUse(m.input.composer.Expanded()) {
+		if leaksChipAtom(m.input.composer.Expanded()) {
 			t.Fatalf("%s left a chip atom in the sent text: %q", key.String(), m.input.composer.Expanded())
 		}
 		if got, want := m.input.composer.cursor, len([]rune("/model ")); got != want {

@@ -363,6 +363,11 @@ The caret MUST stay within the window width minus one cell, also after a chip th
 A multiline text adapter MUST fold CRLF and lone CR to LF once, as [input-text.md](input-text.md) requires.
 A paste containing a line break into a one-line field MUST fail atomically with a visible error.
 The field MUST retain its previous text and selection. The rejected candidate MUST remain recoverable without inserting a prefix.
+The notice MUST read `<field> takes one line; nothing was inserted`, where `<field>` is `Filter`, `Review target`, `Answer`, or `API key`.
+Text with NUL MUST fail the same way with `<field> cannot hold NUL; nothing was inserted`.
+Malformed UTF-8 MUST fail with `<field> needs valid UTF-8; nothing was inserted`.
+A prompt paste and a shell line paste name the field `Prompt` and `Shell command`.
+An answer edit past the 2000-scalar limit MUST fail with `Answer holds at most 2000 characters; nothing was inserted`.
 The one-line fields are the list filter, the review target, the answer line, and the API key field.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
@@ -796,8 +801,14 @@ The client MUST keep ordinary recorded tool results separate from local submissi
 This behavior MUST NOT add question or answer events to the journal.
 
 After submitting, the card MUST retain its answers until `serverRequest/resolved` closes the request.
+Its hint row MUST read `Answer sent; waiting for the agent`, and its keys MUST send nothing.
 A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
+The warning MUST open the question its `field` names, with the typed answer on the input line.
+The notice MUST read `Answer not accepted: <message>; edit it and submit again`.
+A warning for another thread or request MUST change no card.
+After this window sent an answer, an `answered` resolution MUST show `Question answered`.
 The card MUST NOT treat local submission as proof that the daemon accepted an answer.
+A replay of the same request MUST keep the card, its answers, and its attempt count, and MUST permit a new response.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
 

@@ -196,3 +196,48 @@ func Quote(s string) string {
 	b.WriteByte('"')
 	return b.String()
 }
+
+func EditableRune(r rune) string {
+	if r == '\t' || r == '\n' || !isControl(r) && !isBidiControl(r) && !IsLineBreak(r) {
+		return string(r)
+	}
+	return Visible(r)
+}
+
+func Escaped(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		b.WriteString(EditableRune(r))
+	}
+	return b.String()
+}
+
+func DistinctLines(sources []string) []string {
+	lines := make([]string, len(sources))
+	firstSource := make(map[string]string, len(sources))
+	collides := make(map[string]bool, len(sources))
+	for i, source := range sources {
+		lines[i] = DisplayLine(source)
+		key := visibleKey(lines[i])
+		if first, seen := firstSource[key]; !seen {
+			firstSource[key] = source
+		} else if first != source {
+			collides[key] = true
+		}
+	}
+	for i, source := range sources {
+		if collides[visibleKey(lines[i])] {
+			lines[i] = Exposed(source)
+		}
+	}
+	return lines
+}
+
+func visibleKey(line string) string {
+	return strings.Map(func(r rune) rune {
+		if lookup(r).ignorable {
+			return -1
+		}
+		return r
+	}, line)
+}

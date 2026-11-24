@@ -54,6 +54,12 @@ func TestUnknownSlashStaysInEditor(t *testing.T) {
 	assertContains(t, m.notice, "start with //")
 }
 
+func slashOf(input string) (name, arg string, kind slashKind) {
+	e := newEditor()
+	e.SetValue(input)
+	return e.slashParts()
+}
+
 func TestParseSlashKinds(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -67,11 +73,17 @@ func TestParseSlashKinds(t *testing.T) {
 		{input: "/modle", name: "modle", kind: slashUnknown},
 		{input: "/etc/hosts", arg: "/etc/hosts", kind: slashPrompt},
 		{input: "//etc is odd", arg: "/etc is odd", kind: slashPrompt},
+		{input: "  //keep  both ends  ", arg: "  /keep  both ends  ", kind: slashPrompt},
+		{input: "/etc/hosts\t", arg: "/etc/hosts\t", kind: slashPrompt},
+		{input: "/model  gpt-test\u3000", name: "model", arg: " gpt-test\u3000", kind: slashCommand},
+		{input: "/model \u3000 ", name: "model", kind: slashCommand},
+		{input: "/model\u3000gpt-test", name: "model", kind: slashUnknown},
+		{input: "\uff0fmodel gpt-test", arg: "\uff0fmodel gpt-test", kind: slashPrompt},
 	}
 	for _, test := range tests {
-		name, arg, kind := parseSlash(test.input)
+		name, arg, kind := slashOf(test.input)
 		if name != test.name || arg != test.arg || kind != test.kind {
-			t.Fatalf("parseSlash(%q) = %q, %q, %v; want %q, %q, %v", test.input, name, arg, kind, test.name, test.arg, test.kind)
+			t.Fatalf("slashParts(%q) = %q, %q, %v; want %q, %q, %v", test.input, name, arg, kind, test.name, test.arg, test.kind)
 		}
 	}
 }
