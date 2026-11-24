@@ -54,6 +54,15 @@ type pendingCall struct {
 	ch        chan response
 	abandoned <-chan struct{}
 	done      chan struct{}
+	check     ResponseCheck
+}
+
+type ResponseCheck func(jsontext.Value) error
+
+type CheckedCall struct {
+	Method string
+	Params any
+	Check  ResponseCheck
 }
 
 type (
@@ -115,29 +124,33 @@ func Dial(ctx context.Context, rwc io.ReadWriteCloser, h ClientHandler) *Conn {
 
 func (c *Conn) Call(ctx context.Context, method string, params any, result any) error {
 	idv := jsontext.Value(strconv.AppendUint(nil, c.nextID(), 10))
-	return c.call(ctx, idv, method, params, result)
+	return c.call(ctx, idv, CheckedCall{Method: method, Params: params}, result)
 }
 
 func (c *Conn) CallID(ctx context.Context, id string, method string, params any, result any) error {
+	return c.CallIDChecked(ctx, id, CheckedCall{Method: method, Params: params}, result)
+}
+
+func (c *Conn) CallIDChecked(ctx context.Context, id string, req CheckedCall, result any) error {
 	idv, err := json.Marshal(id)
 	if err != nil {
 		return fmt.Errorf("encode request id: %w", err)
 	}
-	return c.call(ctx, idv, method, params, result)
+	return c.call(ctx, idv, req, result)
 }
 
-func (c *Conn) call(ctx context.Context, idv jsontext.Value, method string, params any, result any) error {
-	pc := &pendingCall{ch: make(chan response, 1), abandoned: ctx.Done(), done: make(chan struct{})}
+func (c *Conn) call(ctx context.Context, idv jsontext.Value, req CheckedCall, result any) error {
+	pc := &pendingCall{ch: make(chan response, 1), abandoned: ctx.Done(), done: make(chan struct{}), check: req.Check}
 	key := string(idv)
 	c.mu.Lock()
 	c.pending[key] = pc
 	c.mu.Unlock()
-	pv, err := marshalParams(params)
+	pv, err := marshalParams(req.Params)
 	if err != nil {
 		c.removePending(key)
 		return err
 	}
-	if err := c.enqueue(envelope{JSONRPC: "2.0", ID: idv, Method: method, Params: pv}, false); err != nil {
+	if err := c.enqueue(envelope{JSONRPC: "2.0", ID: idv, Method: req.Method, Params: pv}, false); err != nil {
 		c.removePending(key)
 		return err
 	}
@@ -270,10 +283,7 @@ func (c *Conn) dispatchResponse(e envelope) {
 	if len(e.ID) == 0 {
 		return
 	}
-	c.mu.Lock()
-	pc := c.pending[string(e.ID)]
-	delete(c.pending, string(e.ID))
-	c.mu.Unlock()
+	pc := c.claim(string(e.ID), e)
 	if pc == nil {
 		return
 	}
@@ -283,6 +293,22 @@ func (c *Conn) dispatchResponse(e envelope) {
 	case <-pc.abandoned:
 	case <-c.closed:
 	}
+}
+
+func (c *Conn) claim(key string, e envelope) *pendingCall {
+	c.mu.Lock()
+	pc := c.pending[key]
+	c.mu.Unlock()
+	if pc == nil || pc.check != nil && e.Error == nil && pc.check(e.Result) != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending[key] != pc {
+		return nil
+	}
+	delete(c.pending, key)
+	return pc
 }
 
 func (c *Conn) dispatchRequest(e envelope) {

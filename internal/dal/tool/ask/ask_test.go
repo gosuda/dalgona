@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
@@ -62,6 +63,15 @@ func TestParseRejectsEachLimit(t *testing.T) {
 		{"no questions", `{"questions":[]}`, "ask: questions needs 1 to 4 items, got 0"},
 		{"five questions", `{"questions":[` + strings.Repeat(`{"header":"H","question":"Q?"},`, 4) + `{"header":"H","question":"Q?"}]}`, "ask: questions needs 1 to 4 items, got 5"},
 		{"empty header", `{"questions":[{"header":"","question":"Q?"}]}`, "ask: question 1: header is empty"},
+		{"white space header", `{"questions":[{"header":" \u00a0\u3000\t\n","question":"Q?"}]}`, "ask: question 1: header is empty"},
+		{"invisible question", `{"questions":[{"header":"H","question":"\u001b[1m\u001b]0;t\u0007\u202e\u200d\ufe0f"}]}`, "ask: question 1: question is empty"},
+		{"invisible label", `{"questions":[{"header":"H","question":"Q?","options":[{"label":"A","description":"a"},{"label":"\u2066\u200b","description":"b"}]}]}`, "ask: question 1 option 2: label is empty"},
+		{"NUL header", `{"questions":[{"header":"H\u0000","question":"Q?"}]}`, "ask: question 1: header contains NUL"},
+		{"NUL description", `{"questions":[{"header":"H","question":"Q?","options":[{"label":"A","description":"a\u0000"},{"label":"B","description":"b"}]}]}`, "ask: question 1 option 1: description contains NUL"},
+		{"NUL preview", `{"questions":[{"header":"H","question":"Q?","options":[{"label":"A","description":"a","preview":"\u0000"},{"label":"B","description":"b"}]}]}`, "ask: question 1 option 1: preview contains NUL"},
+		{"unpaired surrogate", `{"questions":[{"header":"\ud800","question":"Q?"}]}`, "ask: arguments do not match the schema:"},
+		{"preview counted with its spaces", `{"questions":[{"header":"H","question":"Q?","options":[{"label":"A","description":"a","preview":" ` + repeatRune('p', 1999) + ` "},{"label":"B","description":"b"}]}]}`, "ask: question 1 option 1: preview is longer than 2000 characters or 40 lines"},
+		{"header counted with its spaces", `{"questions":[{"header":"  ` + repeatRune('h', 29) + `","question":"Q?"}]}`, "ask: question 1: header is longer than 30 characters"},
 		{"long header", `{"questions":[{"header":"` + repeatRune('h', 31) + `","question":"Q?"}]}`, "ask: question 1: header is longer than 30 characters"},
 		{"empty question", `{"questions":[{"header":"H","question":""}]}`, "ask: question 1: question is empty"},
 		{"long question", `{"questions":[{"header":"H","question":"` + repeatRune('q', 501) + `"}]}`, "ask: question 1: question is longer than 500 characters"},
@@ -109,40 +119,7 @@ func TestParseRejectsEachLimit(t *testing.T) {
 	}
 }
 
-func TestCleanStripsTerminalControls(t *testing.T) {
-	cases := []struct {
-		name      string
-		in        string
-		multiline bool
-		want      string
-	}{
-		{"csi color", "\x1b[31mDB\x1b[0m", false, "DB"},
-		{"osc title", "\x1b]0;title\x07x", false, "x"},
-		{"bidi override", "a\u202Eb", false, "ab"},
-		{"c1 control", "\u009bq", false, "q"},
-		{"invalid utf8 replaced", "bad\xffbyte", false, "bad\uFFFDbyte"},
-		{"apc with st terminator", "\x1b_app\x1b\\y", false, "y"},
-		{"escape before multibyte rune", "a\x1b\u00e9b", false, "ab"},
-		{"newline folds to space", "a\nb", false, "a b"},
-		{"newline kept when multiline", "a\nb", true, "a\nb"},
-		{"tab becomes four spaces", "\tx", true, "    x"},
-		{"single line trimmed", "  x  ", false, "x"},
-		{"multiline drops blank edges", "\n\n  a\n  \n", true, "  a"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := CleanLine(tc.in)
-			if tc.multiline {
-				got = CleanBlock(tc.in)
-			}
-			if got != tc.want {
-				t.Fatalf("clean(%q, multiline=%v) = %q, want %q", tc.in, tc.multiline, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestAnswersNormalizes(t *testing.T) {
+func TestAnswersKeepExactText(t *testing.T) {
 	questions := []Question{
 		{Header: "Database", Text: "Which?", Options: []Option{{Label: "SQLite"}, {Label: "Postgres"}}},
 		{Header: "Features", Text: "Which features?", MultiSelect: true, Options: []Option{{Label: "Search"}, {Label: "Export"}, {Label: "Sync"}}},
@@ -151,7 +128,7 @@ func TestAnswersNormalizes(t *testing.T) {
 	}
 	byID := map[string][]string{
 		"q1": {"sqlite", "Postgres"},
-		"q2": {"Export", "Search", "Search", "", "  Mongo  "},
+		"q2": {"Export", "Search", "Search", "", "  Mongo  ", "  Mongo  "},
 		"q3": {"first", "second"},
 		"q4": {"x1", "x2", "x3", "x4", "x5"},
 		"q9": {"ignored"},
@@ -159,24 +136,12 @@ func TestAnswersNormalizes(t *testing.T) {
 	got := Answers(questions, byID)
 	want := [][]string{
 		{"Postgres"},
-		{"Search", "Export", "Mongo"},
+		{"Search", "Export", "  Mongo  "},
 		{"first"},
 		{"x1", "x2", "x3"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Answers = %#v, want %#v", got, want)
-	}
-}
-
-func TestAnswersCapsLengthAndAllowsNoAnswer(t *testing.T) {
-	questions := []Question{{Header: "Name", Text: "Name?"}, {Header: "Other", Text: "Other?"}}
-	byID := map[string][]string{"q1": {repeatRune('a', 2500)}}
-	got := Answers(questions, byID)
-	if n := len([]rune(got[0][0])); n != MaxAnswer {
-		t.Fatalf("answer length = %d runes, want %d", n, MaxAnswer)
-	}
-	if len(got[1]) != 0 {
-		t.Fatalf("question without an answer = %#v, want none", got[1])
 	}
 }
 
@@ -226,11 +191,59 @@ func TestFormatTexts(t *testing.T) {
 	}
 }
 
-func TestFormatCleansInvalidUTF8Answer(t *testing.T) {
-	questions := []Question{{Header: "H", Text: "Q"}}
-	reply := Reply{Outcome: OutcomeAnswered, Answers: [][]string{{"bad\xff"}}}
+func TestParseKeepsExactSource(t *testing.T) {
+	raw := []byte(`{"questions":[{"header":"  Data\u200dbase ","question":"Which\r\none?\t","options":[` +
+		`{"label":"  Keep\r\nthis","description":" a\u202e"},{"label":"\u001b[1mB","description":"b","preview":"\n\tcode\r\n"}]}]}`)
+	got, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Question{{
+		Header: "  Data\u200dbase ", Text: "Which\r\none?\t",
+		Options: []Option{
+			{Label: "  Keep\r\nthis", Description: " a\u202e"},
+			{Label: "\x1b[1mB", Description: "b", Preview: "\n\tcode\r\n"},
+		},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse = %#v, want %#v", got, want)
+	}
+}
+
+func TestCheckAnswersRejectsWholeAndNamesTheField(t *testing.T) {
+	cases := []struct {
+		name   string
+		byID   map[string][]string
+		field  string
+		reason textinput.Reason
+	}{
+		{"2000 scalars", map[string][]string{"q1": {repeatRune('a', MaxAnswer)}}, "", ""},
+		{"2000 supplementary scalars", map[string][]string{"q1": {repeatRune('\U0001F600', MaxAnswer)}}, "", ""},
+		{"white space only", map[string][]string{"q1": {" \u3000\t\n"}}, "", ""},
+		{"2001 scalars", map[string][]string{"q1": {repeatRune('a', MaxAnswer+1)}}, "answers.q1.answers[0]", textinput.TextTooLarge},
+		{"one cluster of 2001 scalars", map[string][]string{"q1": {"a" + repeatRune('\u0301', MaxAnswer)}}, "answers.q1.answers[0]", textinput.TextTooLarge},
+		{"NUL in a later answer", map[string][]string{"q1": {"ok"}, "q2": {"fine", "a\x00b"}}, "answers.q2.answers[1]", textinput.DisallowedControl},
+		{"malformed UTF-8", map[string][]string{"q3": {"bad\xff"}}, "answers.q3.answers[0]", textinput.InvalidEncoding},
+	}
+	for _, c := range cases {
+		err := CheckAnswers(c.byID)
+		switch {
+		case c.reason == "" && err != nil:
+			t.Errorf("%s: CheckAnswers = %v, want nil", c.name, err)
+		case c.reason != "" && (err == nil || err.Field != c.field || err.Reason != c.reason):
+			t.Errorf("%s: CheckAnswers = %v, want %s at %s", c.name, err, c.reason, c.field)
+		}
+	}
+}
+
+func TestFormatQuotesTypedTextAndProjectsLabels(t *testing.T) {
+	questions := []Question{
+		{Header: "Data\nbase", Text: "Which\x1b[31m one?", Options: []Option{{Label: "\x1b[1mSQLite\u202e"}, {Label: "Postgres"}}},
+		{Header: "Name", Text: "Name?"},
+	}
+	reply := Reply{Outcome: OutcomeAnswered, Answers: [][]string{{"\x1b[1mSQLite\u202e"}, {"  two\r\nlines \u2028\"x\"  "}}}
 	got := Format(questions, reply)
-	want := "User answers:\n- H (Q): \"bad\uFFFD\""
+	want := "User answers:\n- Data base (Which one?): SQLite<U+202E>\n- Name (Name?): \"  two\\u000d\\u000alines \\u2028\\\"x\\\"  \""
 	if string(got.Output) != want || !got.OK {
 		t.Fatalf("Format = %q ok=%v, want %q ok=true", got.Output, got.OK, want)
 	}
@@ -243,16 +256,6 @@ func TestFormatOneAnswerForSingleSelect(t *testing.T) {
 	want := "User answers:\n- Database (Which database should the service use?): SQLite"
 	if string(got.Output) != want {
 		t.Fatalf("Format = %q, want %q", got.Output, want)
-	}
-}
-
-func TestFormatCapsTypedAnswerAtMaxAnswer(t *testing.T) {
-	questions := []Question{{Header: "Name", Text: "Name?"}}
-	reply := Reply{Outcome: OutcomeAnswered, Answers: [][]string{{repeatRune('a', 2500)}}}
-	got := Format(questions, reply)
-	want := "User answers:\n- Name (Name?): \"" + repeatRune('a', MaxAnswer) + "\""
-	if string(got.Output) != want {
-		t.Fatalf("Format output is %d bytes, want %d bytes capped at %d runes", len(got.Output), len(want), MaxAnswer)
 	}
 }
 

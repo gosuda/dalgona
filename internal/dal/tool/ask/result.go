@@ -1,11 +1,14 @@
 package ask
 
 import (
-	"encoding/json/jsontext"
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
@@ -33,8 +36,7 @@ func answerFor(question Question, raw []string) []string {
 	picked := map[string]bool{}
 	seen := map[string]bool{}
 	var typed []string
-	for _, text := range raw {
-		value := cutRunes(CleanLine(text), MaxAnswer)
+	for _, value := range raw {
 		if value == "" || seen[value] {
 			continue
 		}
@@ -59,12 +61,16 @@ func answerFor(question Question, raw []string) []string {
 	return answer[:min(len(answer), limit)]
 }
 
-func cutRunes(text string, limit int) string {
-	runes := []rune(text)
-	if len(runes) <= limit {
-		return text
+func CheckAnswers(byID map[string][]string) *textinput.Error {
+	for _, id := range slices.Sorted(maps.Keys(byID)) {
+		for i, text := range byID[id] {
+			field := textinput.Field{Name: "answers." + id + ".answers[" + strconv.Itoa(i) + "]", MaxScalars: MaxAnswer}
+			if textErr, ok := errors.AsType[*textinput.Error](field.Check(text)); ok {
+				return textErr
+			}
+		}
 	}
-	return string(runes[:limit])
+	return nil
 }
 
 func Format(questions []Question, reply Reply) tool.Result {
@@ -105,7 +111,7 @@ func declined(detail string) tool.Result {
 func answeredText(questions []Question, answers [][]string) string {
 	lines := []string{answersHead}
 	for i, question := range questions {
-		lines = append(lines, fmt.Sprintf("- %s (%s): %s", question.Header, question.Text, describe(question, answers[i])))
+		lines = append(lines, questionLine(question, answers[i]))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -121,11 +127,15 @@ func describe(question Question, picks []string) string {
 	return strings.Join(parts, "; ")
 }
 
+func questionLine(question Question, picks []string) string {
+	return fmt.Sprintf("- %s (%s): %s", textinput.DisplayLine(question.Header), textinput.DisplayLine(question.Text), describe(question, picks))
+}
+
 func formatPick(question Question, pick string) string {
 	if question.hasLabel(pick) {
-		return pick
+		return textinput.DisplayLine(pick)
 	}
-	quoted := quote(pick)
+	quoted := textinput.Quote(pick)
 	if len(question.Options) == 0 {
 		return quoted
 	}
@@ -140,7 +150,7 @@ func timedOut(questions []Question) tool.Result {
 	lines := make([]string, 0, len(questions)+1)
 	lines = append(lines, TextTimedOut)
 	for i, question := range questions {
-		lines = append(lines, fmt.Sprintf("- %s (%s): %s", question.Header, question.Text, describe(question, defaults[i])))
+		lines = append(lines, questionLine(question, defaults[i]))
 	}
 	return tool.Result{Output: []byte(strings.Join(lines, "\n")), OK: true}
 }
@@ -153,9 +163,4 @@ func recommended(questions []Question) [][]string {
 		}
 	}
 	return defaults
-}
-
-func quote(text string) string {
-	quoted, _ := jsontext.AppendQuote(nil, text)
-	return string(quoted)
 }

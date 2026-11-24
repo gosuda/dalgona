@@ -291,7 +291,8 @@ The server MUST NOT accept invalid answer text to preserve that older behavior.
 
 These rules require typed response validation before the current response dispatcher consumes its waiter.
 Retaining the server waiter alone does not provide the required client correction lifecycle.
-They are planned transport work, not a new request method or a new question id scheme.
+`rpc.Conn.CallIDChecked` runs that validation before it removes the waiter. It adds no request method or question id scheme.
+The warning reaches only the connection whose response failed the check.
 
 A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
 

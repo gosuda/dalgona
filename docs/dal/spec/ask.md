@@ -82,6 +82,8 @@ The tool MUST fail the call with the messages below when a limit is broken. The 
 | Empty or ineligible blank description | `ask: question <i> option <j>: description is empty` |
 | Description over 300 characters | `ask: question <i> option <j>: description is longer than 300 characters` |
 | Preview over 2000 characters or 40 lines | `ask: question <i> option <j>: preview is longer than 2000 characters or 40 lines` |
+| NUL in a header or question | `ask: question <i>: <field> contains NUL` |
+| NUL in a label, description, or preview | `ask: question <i> option <j>: <field> contains NUL` |
 | Repeated label | `ask: question <i> option <j>: label "<label>" repeats option <k>` |
 | Label `Other` | `ask: question <i> option <j>: the user always gets an Other row; remove this option` |
 | Repeated question | `ask: question <i> repeats question <k>` |
@@ -125,7 +127,7 @@ When a projection hides their difference, the display MUST expose the differing 
 Selecting either row MUST submit its exact offered label, never its display projection.
 
 Counting limits before projection and preserving offered values tighten the previous cleaning behavior.
-These are required implementation changes under [Input text](input-text.md), not claims about the inspected runtime.
+The host keeps each accepted source. Results and terminal displays project it with `DisplayLine` and `DisplayBlock` from `internal/dal/textinput`.
 
 ### Escape recognition profile
 
@@ -176,6 +178,7 @@ An answer that equals an option label MUST appear as the label.
 An answer that is typed text MUST appear in double quotes. On a question with options, the quoted text MUST follow `Other: `.
 
 Quoted answers MUST escape line breaks and control characters without changing their decoded scalar sequence.
+The quote MUST decode as a JSON string to the exact answer. It escapes controls, line breaks, and directional controls as `\uXXXX`.
 Option labels with unsafe display characters MUST use their safe escaped projection in the result.
 The host MUST match the original offered label before projecting it.
 
