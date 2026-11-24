@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -58,6 +59,12 @@ func releaseReplaceAfter(held *os.File, delay time.Duration) <-chan struct{} {
 		_ = held.Close()
 	}()
 	return done
+}
+
+func useReplaceRename(t *testing.T, rename func(oldpath, newpath string) error) {
+	t.Helper()
+	replaceRename = rename
+	t.Cleanup(func() { replaceRename = os.Rename })
 }
 
 func readReplaceTarget(t *testing.T, path string) []byte {
@@ -122,6 +129,30 @@ func TestPublishReplaceHeldPastDeadlineKeepsOriginalError(t *testing.T) {
 	if actual := readReplaceTarget(t, dst); !bytes.Equal(actual, before) {
 		t.Fatalf("held file content %q, want %q", actual, before)
 	}
+}
+
+func TestRetryReplaceRenameStartsNoRetryPastDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		held := &os.LinkError{Op: "rename", Old: "staged", New: "pid", Err: windows.ERROR_SHARING_VIOLATION}
+		attempts := 0
+		var firstDone time.Time
+		useReplaceRename(t, func(string, string) error {
+			attempts++
+			switch attempts {
+			case 1:
+				firstDone = time.Now()
+			case 2:
+				time.Sleep(time.Until(firstDone.Add(replaceRetryDeadline - replaceRetryInterval/2)))
+			}
+			return held
+		})
+		if err := retryReplaceRename("staged", "pid"); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			t.Fatalf("replace held past the deadline: %v, want sharing violation", err)
+		}
+		if attempts != 2 {
+			t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
+		}
+	})
 }
 
 func TestPublishReplaceDirectoryFailsFast(t *testing.T) {
