@@ -59,7 +59,10 @@ const corrected = $derived(
 );
 const cardError = $derived(
 	correction !== null &&
-		!request.questions.some((question) => question.id === corrected)
+		!request.questions.some((question) => question.id === corrected) &&
+		request.questions.every((_, index) =>
+			sameSelection(selectionAt(index), submission?.selections[index] ?? empty),
+		)
 		? correctionText(correction.reason, correction.message)
 		: null,
 );
@@ -149,7 +152,7 @@ function previewOf(
 }
 
 function submit(): void {
-	if (awaiting) return;
+	if (awaiting || cardError !== null) return;
 	if (request.questions.some((question, index) => errorFor(index, question)))
 		return;
 	onSubmit(

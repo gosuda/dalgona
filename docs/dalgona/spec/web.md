@@ -283,7 +283,8 @@ After submitting, the card MUST retain its answers until `serverRequest/resolved
 While it waits, the card MUST show `Answer sent. Waiting for the question to close.` and MUST NOT send another response.
 A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
 Its field error MUST stay until that answer changes, and an unchanged answer MUST NOT submit again.
-A correction whose field names no question of the card MUST show its error for the whole card.
+A correction whose field names no question of the card MUST show its error for the whole card until an answer changes.
+An unchanged card MUST NOT submit again while that error shows.
 A warning without `threadId`, `requestId`, `reason`, and `field` MUST NOT change a card.
 A warning whose `threadId` differs from the open request's thread MUST NOT change a card.
 The card MUST NOT treat local submission as proof that the daemon accepted an answer.

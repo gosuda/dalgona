@@ -453,10 +453,11 @@ describe("question answer text", () => {
 		);
 	});
 
-	test("restores submitted answers and shows a correction it cannot place", () => {
+	test("restores submitted answers and holds a correction it cannot place until an answer changes", async () => {
+		const onSubmit = vi.fn();
 		render(QuestionCard, {
 			props: {
-				...props(databaseRequest, vi.fn(), vi.fn()),
+				...props(databaseRequest, onSubmit, vi.fn()),
 				submission: {
 					selections: [{ picked: ["Postgres"], other: "" }],
 					correction: {
@@ -474,6 +475,14 @@ describe("question answer text", () => {
 		expect(screen.getByRole("alert").textContent).toBe(
 			"Shorten this answer to 2000 characters or fewer.",
 		);
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole("radio", { name: /SQLite/ }));
+		expect(screen.queryByRole("alert")).toBeNull();
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).toHaveBeenCalledWith(databaseRequest, [
+			{ picked: ["SQLite"], other: "" },
+		]);
 	});
 
 	test("keeps the card after Submit until the request resolves and resubmits after a warning", async () => {
