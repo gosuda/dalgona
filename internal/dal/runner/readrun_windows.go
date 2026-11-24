@@ -23,7 +23,7 @@ func readRunFile(path string) ([]byte, error) {
 		if !runFileSharingViolation(err) {
 			return nil, err
 		}
-		time.Sleep(replaceRetryInterval)
+		time.Sleep(min(replaceRetryInterval, time.Until(deadline)))
 		if !time.Now().Before(deadline) {
 			return nil, err
 		}
