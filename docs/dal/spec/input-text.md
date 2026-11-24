@@ -102,6 +102,8 @@ Committed editing MUST use Unicode 18.0.0 default extended grapheme clusters fro
 This is the selected conformance target. A runtime's advertised Unicode version alone MUST NOT prove conformance.
 Implementation changes MUST pin the segmentation data, algorithm revision, and conformance artifact hashes.
 The [shared corpus](input-text-cases.json) supplements the upstream [GraphemeBreakTest](https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakTest.txt).
+Go adapters MUST segment with `internal/dal/textinput`, and web adapters MUST segment with `web/src/lib/text`.
+[Text input package](../decisions/text-input.md) records the pinned data, generator, and conformance hashes.
 
 Forward and backward movement MUST cross complete clusters in logical text order.
 Backspace and Delete MUST remove a whole adjacent cluster when there is no selection.
@@ -183,6 +185,8 @@ Font fallback, shaping, and display escaping MUST share that mapping.
 
 Terminals MUST NOT execute escape sequences from user, model, server, or pasted text outside a declared raw-terminal surface.
 Accepted non-layout controls MUST have visible escapes in editable fields and decision details.
+A visible escape MUST read `<U+`, four to six uppercase hexadecimal digits, and `>`.
+An exposed projection escapes every scalar except printable ASCII, and it escapes `<` so distinct sources keep distinct projections.
 LF and TAB MAY use their declared line and tab layout.
 Model-authored question projections retain the explicit display transformations in [Ask tool](ask.md).
 Bidirectional controls MUST be inspectable and isolated from surrounding labels, paths, endpoints, and action names.
