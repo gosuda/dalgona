@@ -20,13 +20,14 @@ func useRunFileRead(t *testing.T, read func(name string) ([]byte, error)) {
 }
 
 func TestReadRunFileStopsAtDeadline(t *testing.T) {
+	const specRetryWindow = time.Second
 	cases := []struct {
 		name      string
 		secondEnd time.Duration
 		wantFail  time.Duration
 	}{
-		{"second read ends before the deadline", replaceRetryDeadline - replaceRetryInterval/2, replaceRetryDeadline},
-		{"second read ends after the deadline", replaceRetryDeadline + replaceRetryInterval/2, replaceRetryDeadline + replaceRetryInterval/2},
+		{"second read ends before the deadline", specRetryWindow - replaceRetryInterval/2, specRetryWindow},
+		{"second read ends after the deadline", specRetryWindow + replaceRetryInterval/2, specRetryWindow + replaceRetryInterval/2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
