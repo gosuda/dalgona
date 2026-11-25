@@ -189,7 +189,7 @@ func TestFrameBacklogHeartbeatFloodEndsWithinBound(t *testing.T) {
 	tick, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
 	var sent atomic.Int64
-	_, server := newServer(t, floodAfterBacklog(tick, release, &sent, func(*fakeConn) {}))
+	_, server := newServer(t, floodAfterBacklog(tick, release, &sent))
 	go pumpTicks(tick, release)
 	start := time.Now()
 	stream, err := newProvider(server, time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blocking})
@@ -243,11 +243,7 @@ func TestFrameBacklogEndsDrainAtTurnEnd(t *testing.T) {
 
 func backlogThenTurnEnd(beat chan struct{}, turnEnd, release <-chan struct{}) func(*fakeConn) {
 	return func(c *fakeConn) {
-		c.sendExec(shellExec(9))
-		for range 64 {
-			c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{Text: &wire.TextDelta{TextView: []byte("x")}}})
-		}
-		c.expectStreamClose(9)
+		backlogThenClose(c)
 		c.sendHeartbeat()
 		close(beat)
 		select {
@@ -284,14 +280,17 @@ func checkDrainEndedAtTurn(t *testing.T, out result, cancelled bool, sinceUpdate
 	}
 }
 
-func floodAfterBacklog(tick, release <-chan struct{}, sent *atomic.Int64, afterClose func(*fakeConn)) func(*fakeConn) {
+func backlogThenClose(c *fakeConn) {
+	c.sendExec(shellExec(9))
+	for range 64 {
+		c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{Text: &wire.TextDelta{TextView: []byte("x")}}})
+	}
+	c.expectStreamClose(9)
+}
+
+func floodAfterBacklog(tick, release <-chan struct{}, sent *atomic.Int64) func(*fakeConn) {
 	return func(c *fakeConn) {
-		c.sendExec(shellExec(9))
-		for range 64 {
-			c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{Text: &wire.TextDelta{TextView: []byte("x")}}})
-		}
-		c.expectStreamClose(9)
-		afterClose(c)
+		backlogThenClose(c)
 		heartbeat := connectwire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, &wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{VariantNumber: wire.InteractionHeartbeatNumber}}))
 		for sendFloodHeartbeat(c, tick, release, heartbeat) {
 			sent.Add(1)
