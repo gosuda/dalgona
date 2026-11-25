@@ -19,6 +19,7 @@ const (
 
 func residentBytes(pid int) (int64, bool) {
 	var info [taskInfoBytes]byte
+	//nolint:gosec,staticcheck // proc_pidinfo writes taskInfoBytes into the resident stack array; x/sys/unix ships no libSystem wrapper for it
 	written, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoCallPIDInfo, uintptr(pid), procPIDTaskInfo, 0, uintptr(unsafe.Pointer(&info[0])), taskInfoBytes)
 	if errno != 0 || written != taskInfoBytes {
 		return 0, false
