@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/model/connectwire"
@@ -18,8 +19,9 @@ import (
 )
 
 const (
-	inBandUnavailable = "in-band tool execution is unavailable"
-	queryRefused      = "Cursor interaction queries are not supported by this client."
+	inBandUnavailable   = "in-band tool execution is unavailable"
+	queryRefused        = "Cursor interaction queries are not supported by this client."
+	backlogDrainTimeout = execBeatPeriod
 )
 
 var (
@@ -65,9 +67,12 @@ func (s *session) deliverStreamCloses(ctx context.Context, body *model.IdleBody)
 		defer close(drained)
 		_, _ = io.Copy(io.Discard, body)
 	}()
+	timer := time.NewTimer(backlogDrainTimeout)
+	defer timer.Stop()
 	select {
 	case <-drained:
 	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 
