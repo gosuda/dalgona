@@ -192,6 +192,7 @@ func (s *server) shutdown() {
 	s.watchers.Wait()
 	s.releaseNative(watches)
 	s.stopFsWatches()
+	s.workspace.closeAll()
 }
 
 func (s *server) handle(ctx context.Context, name string, params jsontext.Value) (jsontext.Value, error) {
