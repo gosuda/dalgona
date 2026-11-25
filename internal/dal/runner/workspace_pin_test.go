@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -16,6 +17,29 @@ func writePinnedFile(t *testing.T, dir, name, data string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func swapPinnedWithSymlink(t *testing.T, approved, target string) bool {
+	t.Helper()
+	kept := approved + ".kept"
+	if err := os.Rename(approved, kept); err != nil {
+		if runtime.GOOS == "windows" {
+			if _, statErr := os.Stat(approved); statErr != nil {
+				t.Fatalf("pinned rename refused but directory missing: %v", statErr)
+			}
+			if _, statErr := os.Lstat(kept); !os.IsNotExist(statErr) {
+				t.Fatalf("pinned rename left %s behind: %v", kept, statErr)
+			}
+			t.Skipf("pinned directory could not be swapped on Windows (rename refused, pin enforced): %v", err)
+			return false
+		}
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, approved); err != nil {
+		_ = os.Rename(kept, approved)
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	return true
 }
 
 func TestLocalPinnedSurvivesSymlinkSwap(t *testing.T) {
@@ -36,12 +60,8 @@ func TestLocalPinnedSurvivesSymlinkSwap(t *testing.T) {
 	if got := session.DisplayRoot(); got == "" {
 		t.Fatal("empty display root")
 	}
-	kept := approved + ".kept"
-	if renameErr := os.Rename(approved, kept); renameErr != nil {
-		t.Fatal(renameErr)
-	}
-	if linkErr := os.Symlink(target, approved); linkErr != nil {
-		t.Skipf("symlink unavailable: %v", linkErr)
+	if !swapPinnedWithSymlink(t, approved, target) {
+		return
 	}
 	result, err := session.Workspace(t.Context(), WorkspaceRequest{Op: WorkspaceRead, Path: "data.txt", Limit: WorkspaceChunkLimit})
 	if err != nil {
@@ -77,12 +97,8 @@ func TestRemotePinnedSurvivesSymlinkSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close() }()
-	kept := approved + ".kept"
-	if renameErr := os.Rename(approved, kept); renameErr != nil {
-		t.Fatal(renameErr)
-	}
-	if linkErr := os.Symlink(target, approved); linkErr != nil {
-		t.Skipf("symlink unavailable: %v", linkErr)
+	if !swapPinnedWithSymlink(t, approved, target) {
+		return
 	}
 	result, err := session.Workspace(t.Context(), WorkspaceRequest{Op: WorkspaceRead, Path: "data.txt", Limit: WorkspaceChunkLimit})
 	if err != nil {
