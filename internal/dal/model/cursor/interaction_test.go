@@ -163,15 +163,7 @@ func TestExecAbortCancelsInBandCall(t *testing.T) {
 
 func TestFrameBacklogDuringCallFailsTurn(t *testing.T) {
 	var cancelled atomic.Bool
-	blocking := func(ctx context.Context, call model.ToolCall) (model.ToolResult, error) {
-		select {
-		case <-ctx.Done():
-			cancelled.Store(true)
-			return model.ToolResult{}, ctx.Err()
-		case <-time.After(waitLimit):
-			return model.ToolResult{ID: call.ID, Name: call.Name, Output: []byte(`"done"`)}, nil
-		}
-	}
+	blocking := blockingUntilCancelled(&cancelled)
 	_, server := newServer(t, func(c *fakeConn) {
 		c.sendExec(shellExec(9))
 		for range 64 {
@@ -193,19 +185,11 @@ func TestFrameBacklogDuringCallFailsTurn(t *testing.T) {
 
 func TestFrameBacklogHeartbeatFloodEndsWithinBound(t *testing.T) {
 	var cancelled atomic.Bool
-	blocking := func(ctx context.Context, call model.ToolCall) (model.ToolResult, error) {
-		select {
-		case <-ctx.Done():
-			cancelled.Store(true)
-			return model.ToolResult{}, ctx.Err()
-		case <-time.After(waitLimit):
-			return model.ToolResult{ID: call.ID, Name: call.Name, Output: []byte(`"done"`)}, nil
-		}
-	}
+	blocking := blockingUntilCancelled(&cancelled)
 	tick, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
 	var sent atomic.Int64
-	_, server := newServer(t, floodAfterBacklog(tick, release, &sent))
+	_, server := newServer(t, floodAfterBacklog(tick, release, &sent, func(*fakeConn) {}))
 	go pumpTicks(tick, release)
 	start := time.Now()
 	stream, err := newProvider(server, time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blocking})
@@ -222,13 +206,58 @@ func TestFrameBacklogHeartbeatFloodEndsWithinBound(t *testing.T) {
 	}
 }
 
-func floodAfterBacklog(tick, release <-chan struct{}, sent *atomic.Int64) func(*fakeConn) {
+func blockingUntilCancelled(cancelled *atomic.Bool) func(context.Context, model.ToolCall) (model.ToolResult, error) {
+	return func(ctx context.Context, call model.ToolCall) (model.ToolResult, error) {
+		select {
+		case <-ctx.Done():
+			cancelled.Store(true)
+			return model.ToolResult{}, ctx.Err()
+		case <-time.After(waitLimit):
+			return model.ToolResult{ID: call.ID, Name: call.Name, Output: []byte(`"done"`)}, nil
+		}
+	}
+}
+
+func TestFrameBacklogEndsDrainAtTurnEnd(t *testing.T) {
+	var cancelled atomic.Bool
+	tick, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	var sent atomic.Int64
+	_, server := newServer(t, floodAfterBacklog(tick, release, &sent, (*fakeConn).endTurn))
+	go pumpTicks(tick, release)
+	start := time.Now()
+	stream, err := newProvider(server, time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blockingUntilCancelled(&cancelled)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan result, 1)
+	go func() { finished <- drain(t, stream) }()
+	select {
+	case out := <-finished:
+		checkDrainEndedAtTurn(t, out, cancelled.Load(), sent.Load(), time.Since(start))
+	case <-time.After(waitLimit):
+		t.Fatal("client did not return after the turn-ended frame")
+	}
+}
+
+func checkDrainEndedAtTurn(t *testing.T, out result, cancelled bool, heartbeats int64, elapsed time.Duration) {
+	t.Helper()
+	if out.failure == nil || !strings.Contains(out.failure.Err.Error(), "64 server frames") || !cancelled {
+		t.Fatalf("result = %+v, cancelled = %v", out, cancelled)
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("client returned %v after the backlog with %d heartbeats; the turn-ended frame did not end the drain", elapsed, heartbeats)
+	}
+}
+
+func floodAfterBacklog(tick, release <-chan struct{}, sent *atomic.Int64, afterClose func(*fakeConn)) func(*fakeConn) {
 	return func(c *fakeConn) {
 		c.sendExec(shellExec(9))
 		for range 64 {
 			c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{Text: &wire.TextDelta{TextView: []byte("x")}}})
 		}
 		c.expectStreamClose(9)
+		afterClose(c)
 		heartbeat := connectwire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, &wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{VariantNumber: wire.InteractionHeartbeatNumber}}))
 		for sendFloodHeartbeat(c, tick, release, heartbeat) {
 			sent.Add(1)
