@@ -36,7 +36,7 @@ func Run(ctx context.Context, home string, newHost HostFactory, serve ServeFunc,
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, closeHost()) }()
+	defer func() { err = errors.Join(err, closeHost(), removeSocket(home)) }()
 	listener, err := listenFunc(home)
 	if err != nil {
 		return err
@@ -68,12 +68,23 @@ func listen(home string) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", socket, err)
 	}
+	if unixListener, ok := listener.(*net.UnixListener); ok {
+		unixListener.SetUnlinkOnClose(false)
+	}
 	chmodErr := os.Chmod(socket, 0o600)
 	if chmodErr != nil {
 		_ = listener.Close()
+		_ = os.Remove(socket)
 		return nil, fmt.Errorf("chmod %s: %w", socket, chmodErr)
 	}
 	return listener, nil
+}
+
+func removeSocket(home string) error {
+	if err := os.Remove(client.SocketPath(home)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func accept(ctx context.Context, listener net.Listener, tasks *sync.WaitGroup, marked bool, handle func(net.Conn)) error {

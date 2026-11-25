@@ -56,11 +56,9 @@ func (b *boundedBuffer) String() string {
 }
 
 func childEnvironment() []string {
-	env := make([]string, 0, 2)
-	for _, name := range [...]string{"SYSTEMROOT", "SystemRoot"} {
-		if v, ok := os.LookupEnv(name); ok {
-			env = append(env, name+"="+v)
-		}
+	env := make([]string, 0, 1)
+	if v, ok := os.LookupEnv("SystemRoot"); ok {
+		env = append(env, "SystemRoot="+v)
 	}
 	return env
 }

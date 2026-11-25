@@ -182,14 +182,33 @@ func (t *workspaceTable) close(id string) (string, error) {
 	return "closed", nil
 }
 
+func closeWorkspaceFiles(files runner.Workspace) {
+	if closer, ok := files.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+}
+
 func (t *workspaceTable) releaseLocked(h *workspaceHandle) {
 	h.closed = true
 	t.cancelDependents(h)
 	if h.effects == 0 && t.handles[h.id] == h {
 		delete(t.handles, h.id)
-		if closer, ok := h.files.(interface{ Close() error }); ok {
-			go func() { _ = closer.Close() }()
-		}
+		closeWorkspaceFiles(h.files)
+	}
+}
+
+func (t *workspaceTable) closeAll() {
+	t.mu.Lock()
+	handles := make([]*workspaceHandle, 0, len(t.handles))
+	for id, h := range t.handles {
+		h.closed = true
+		t.cancelDependents(h)
+		delete(t.handles, id)
+		handles = append(handles, h)
+	}
+	t.mu.Unlock()
+	for _, h := range handles {
+		closeWorkspaceFiles(h.files)
 	}
 }
 
@@ -412,9 +431,7 @@ func (s *server) workspaceOpen(ctx context.Context, params jsontext.Value) (json
 }
 
 func (s *server) closeCandidate(h *workspaceHandle) {
-	if closer, ok := h.files.(interface{ Close() error }); ok {
-		_ = closer.Close()
-	}
+	closeWorkspaceFiles(h.files)
 }
 
 func (s *server) workspaceCandidate(ctx context.Context, threadID string, rights workspaceRight) (*workspaceHandle, error) {

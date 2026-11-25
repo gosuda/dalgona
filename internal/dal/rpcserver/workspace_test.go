@@ -11,7 +11,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -484,17 +486,57 @@ func TestWorkspaceWatchReportsSameSizeEdit(t *testing.T) {
 	})
 }
 
+func execOnRemoteRunner(t *testing.T) bool {
+	t.Helper()
+	return strings.HasSuffix(t.Name(), "/remote")
+}
+
+func workspaceExecProbeText(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" && !execOnRemoteRunner(t) {
+		return "cd & exit 3"
+	}
+	return "pwd; exit 3"
+}
+
+func workspaceExecProbeWant(t *testing.T, r *rig) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if execOnRemoteRunner(t) {
+			return msysSpelling(r.cwd) + "\n"
+		}
+		return r.cwd + "\r\n"
+	}
+	return r.cwd + "\n"
+}
+
+func workspaceExecFloodText(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" && !execOnRemoteRunner(t) {
+		return "for /L %i in (1,1,9000) do @echo 12345678"
+	}
+	return "head -c 70000 /dev/zero"
+}
+
+func msysSpelling(cwd string) string {
+	if len(cwd) >= 2 && cwd[1] == ':' {
+		return "/" + strings.ToLower(cwd[:1]) + strings.ReplaceAll(cwd[2:], "\\", "/")
+	}
+	return filepath.ToSlash(cwd)
+}
+
 func TestWorkspaceExecRunsOnTheThreadRunner(t *testing.T) {
 	eachWorkspaceRunner(t, func(t *testing.T, r *rig) {
 		threadID := startWorkspaceThread(t, r, r.cwd)
 		w := openWorkspaceWindow(t, r)
 		opened := w.open(threadID, "terminal")
 		var result workspaceExecResult
-		w.must("dalgona/workspace/exec", map[string]any{"workspaceId": opened.WorkspaceID, "text": "pwd; exit 3", "operationId": rpc.NewOperationID()}, &result)
-		if result.ExitCode == nil || *result.ExitCode != 3 || result.Termination != "exited" || string(result.OutputBase64) != r.cwd+"\n" {
-			t.Fatalf("exec result %+v output %q, want exit 3 in %s", result, result.OutputBase64, r.cwd)
+		w.must("dalgona/workspace/exec", map[string]any{"workspaceId": opened.WorkspaceID, "text": workspaceExecProbeText(t), "operationId": rpc.NewOperationID()}, &result)
+		want := workspaceExecProbeWant(t, r)
+		if result.ExitCode == nil || *result.ExitCode != 3 || result.Termination != "exited" || string(result.OutputBase64) != want {
+			t.Fatalf("exec result %+v output %q, want exit 3 in %s", result, result.OutputBase64, want)
 		}
-		w.must("dalgona/workspace/exec", map[string]any{"workspaceId": opened.WorkspaceID, "text": "head -c 70000 /dev/zero", "operationId": rpc.NewOperationID()}, &result)
+		w.must("dalgona/workspace/exec", map[string]any{"workspaceId": opened.WorkspaceID, "text": workspaceExecFloodText(t), "operationId": rpc.NewOperationID()}, &result)
 		if !result.OutputTruncated || len(result.OutputBase64) != workspaceExecOutput {
 			t.Fatalf("large output kept %d bytes, truncated %v; want %d and true", len(result.OutputBase64), result.OutputTruncated, workspaceExecOutput)
 		}

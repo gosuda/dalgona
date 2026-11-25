@@ -330,7 +330,7 @@ func (c *Conn) replyInvalidRequest(raw []byte) {
 }
 
 func (c *Conn) dispatch(e envelope) {
-	if c.admit != nil && !c.admit() {
+	if !c.admitted() {
 		return
 	}
 	if e.Method == "" {
@@ -411,26 +411,44 @@ func (c *Conn) dispatchRequest(e envelope) {
 	})
 }
 
+func (c *Conn) admitted() bool {
+	return c.admit == nil || c.admit()
+}
+
 func (c *Conn) handleRequest(ctx context.Context, e envelope) {
-	if c.admit != nil && !c.admit() {
+	if !c.admitted() {
 		return
 	}
 	result, handlerErr := c.handler(ctx, e.Method, e.Params)
-	if len(e.ID) == 0 {
-		return
+	if len(e.ID) > 0 && c.mayReply() {
+		c.reply(e.ID, result, handlerErr)
 	}
+}
+
+func (c *Conn) mayReply() bool {
+	if !c.admitted() {
+		_ = c.Close()
+		return false
+	}
+	select {
+	case <-c.closed:
+		return false
+	default:
+		return true
+	}
+}
+
+func (c *Conn) reply(id, result jsontext.Value, handlerErr error) {
+	response := envelope{JSONRPC: "2.0", ID: id, Result: result}
 	if handlerErr != nil {
 		failure := &wireError{Code: CodeInternal, Message: handlerErr.Error()}
 		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {
 			failure = &wireError{Code: coded.Code, Message: coded.Message, Data: coded.Data}
 		}
-		if err := c.enqueue(envelope{JSONRPC: "2.0", ID: e.ID, Error: failure}, false); err != nil {
-			c.abort(err)
-		}
-		return
+		response = envelope{JSONRPC: "2.0", ID: id, Error: failure}
 	}
-	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: e.ID, Result: result}, false); enqueueErr != nil {
-		c.abort(enqueueErr)
+	if err := c.enqueue(response, false); err != nil {
+		c.abort(err)
 	}
 }
 

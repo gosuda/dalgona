@@ -721,12 +721,14 @@ func TestLocal_startAcceptsNormalID(t *testing.T) {
 	dir := t.TempDir()
 	local := newTestLocal(t, filepath.Join(dir, "runs"))
 	spec := ProcessSpec{ID: "same", Argv: []string{"sh", "-c", "exit 0"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}
-	if err := local.Start(t.Context(), spec); err != nil {
-		t.Fatal(err)
-	}
+	startTestProcess(t, local, spec)
 	entries := readDirNames(t, filepath.Join(dir, "runs"))
 	if !equalDirNames(entries, []string{"same"}) {
 		t.Fatalf("runs directory = %q, want [same]", entries)
+	}
+	state := waitForBoundedExit(t, local, "same", descendantExitBound)
+	if state.Exit == nil || state.Exit.Code != 0 {
+		t.Fatalf("exit = %+v, want code 0", state.Exit)
 	}
 }
 

@@ -3,6 +3,7 @@ package rpcserver
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -19,16 +20,27 @@ func writePinFile(t *testing.T, dir, name, data string) {
 	}
 }
 
-func swapApprovedWithSymlink(t *testing.T, approved, target string) {
+func swapApprovedWithSymlink(t *testing.T, approved, target string) bool {
 	t.Helper()
 	kept := approved + ".kept"
 	if err := os.Rename(approved, kept); err != nil {
+		if runtime.GOOS == "windows" {
+			if _, statErr := os.Stat(approved); statErr != nil {
+				t.Fatalf("pinned rename refused but directory missing: %v", statErr)
+			}
+			if _, statErr := os.Lstat(kept); !os.IsNotExist(statErr) {
+				t.Fatalf("pinned rename left %s behind: %v", kept, statErr)
+			}
+			t.Skipf("pinned directory could not be swapped on Windows (rename refused, pin enforced): %v", err)
+			return false
+		}
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, approved); err != nil {
 		_ = os.Rename(kept, approved)
 		t.Skipf("symlink unavailable: %v", err)
 	}
+	return true
 }
 
 func readPinnedText(t *testing.T, w *workspaceWindow, id string) string {
@@ -48,7 +60,9 @@ func TestWorkspacePinnedAfterOpenIgnoresSymlinkSwap(t *testing.T) {
 		threadID := startWorkspaceThread(t, r, approved)
 		w := openWorkspaceWindow(t, r)
 		opened := w.open(threadID, "read")
-		swapApprovedWithSymlink(t, approved, target)
+		if !swapApprovedWithSymlink(t, approved, target) {
+			return
+		}
 		got := readPinnedText(t, w, opened.WorkspaceID)
 		if got == "evil" {
 			t.Fatal("pinned read followed symlink to evil target")
@@ -68,7 +82,10 @@ func TestWorkspacePinnedDuringPromptIgnoresSymlinkSwap(t *testing.T) {
 		writePinFile(t, target, "data.txt", "evil")
 		threadID := startWorkspaceThread(t, r, approved)
 		w := openWorkspaceWindow(t, r)
-		opened := openWithSwapDuringPrompt(t, w, threadID, approved, target)
+		opened, swapped := openWithSwapDuringPrompt(t, w, threadID, approved, target)
+		if !swapped {
+			return
+		}
 		got := readPinnedText(t, w, opened.WorkspaceID)
 		if got == "evil" {
 			t.Fatal("prompt-pinned read followed symlink to evil target")
@@ -79,13 +96,15 @@ func TestWorkspacePinnedDuringPromptIgnoresSymlinkSwap(t *testing.T) {
 	})
 }
 
-func openWithSwapDuringPrompt(t *testing.T, w *workspaceWindow, threadID, approved, target string) workspaceOpened {
+func openWithSwapDuringPrompt(t *testing.T, w *workspaceWindow, threadID, approved, target string) (workspaceOpened, bool) {
 	t.Helper()
 	openedCh, errCh := startPromptedOpen(t, w, threadID)
 	awaitPrompt(t, w, errCh)
-	swapApprovedWithSymlink(t, approved, target)
+	if !swapApprovedWithSymlink(t, approved, target) {
+		return workspaceOpened{}, false
+	}
 	w.decisions <- workspaceAllowOnce
-	return awaitOpened(t, openedCh, errCh)
+	return awaitOpened(t, openedCh, errCh), true
 }
 
 func startPromptedOpen(t *testing.T, w *workspaceWindow, threadID string) (chan workspaceOpened, chan error) {
@@ -138,7 +157,9 @@ func TestWorkspacePinnedExecFailsClosedAfterSwap(t *testing.T) {
 		threadID := startWorkspaceThread(t, r, approved)
 		w := openWorkspaceWindow(t, r)
 		opened := w.open(threadID, "read", "terminal")
-		swapApprovedWithSymlink(t, approved, target)
+		if !swapApprovedWithSymlink(t, approved, target) {
+			return
+		}
 		err := w.call("dalgona/workspace/exec", map[string]any{"workspaceId": opened.WorkspaceID, "text": "cat data.txt", "operationId": rpc.NewOperationID()}, nil)
 		if err == nil {
 			t.Fatal("exec after symlink swap succeeded, want fail closed")

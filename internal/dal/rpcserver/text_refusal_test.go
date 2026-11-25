@@ -36,6 +36,7 @@ func treeState(t *testing.T, root string) map[string]string {
 		}
 		t.Fatal(err)
 	}
+	defer func() { _ = rot.Close() }()
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if errors.Is(walkErr, fs.ErrNotExist) {
 			return nil

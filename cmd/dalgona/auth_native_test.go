@@ -534,21 +534,14 @@ func requireAuthReplayPrivacy(t *testing.T, first, replay, other wireAuthStatus)
 
 func requireNoStoredOAuthState(t *testing.T, home, authorizationURL string) {
 	t.Helper()
-	advertised, err := url.Parse(authorizationURL)
-	if err != nil {
-		t.Fatal("invalid authorization challenge")
-	}
-	state := []byte(advertised.Query().Get("state"))
-	if len(state) == 0 {
-		t.Fatal("authorization challenge has no state")
-	}
+	state := oauthStateParameter(t, authorizationURL)
 	root, err := os.OpenRoot(home)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = root.Close() }()
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || !entry.Type().IsRegular() {
+		if walkErr != nil || !entry.Type().IsRegular() || isHomeLockFile(entry.Name()) {
 			return walkErr
 		}
 		raw, readErr := root.ReadFile(path)
@@ -563,4 +556,21 @@ func requireNoStoredOAuthState(t *testing.T, home, authorizationURL string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func isHomeLockFile(name string) bool {
+	return name == "LOCK" || name == "lock" || filepath.Ext(name) == ".lock"
+}
+
+func oauthStateParameter(t *testing.T, authorizationURL string) []byte {
+	t.Helper()
+	advertised, err := url.Parse(authorizationURL)
+	if err != nil {
+		t.Fatal("invalid authorization challenge")
+	}
+	state := []byte(advertised.Query().Get("state"))
+	if len(state) == 0 {
+		t.Fatal("authorization challenge has no state")
+	}
+	return state
 }
