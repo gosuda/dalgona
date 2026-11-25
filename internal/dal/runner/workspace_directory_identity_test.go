@@ -12,11 +12,15 @@ import (
 
 func replaceDirectoryKeepingTimes(t *testing.T, target string, before os.FileInfo) {
 	t.Helper()
+	replacement := target + ".replacement"
+	if mkdirErr := os.Mkdir(replacement, 0o755); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
 	if removeErr := os.Remove(target); removeErr != nil {
 		t.Fatal(removeErr)
 	}
-	if mkdirErr := os.Mkdir(target, 0o755); mkdirErr != nil {
-		t.Fatal(mkdirErr)
+	if renameErr := os.Rename(replacement, target); renameErr != nil {
+		t.Fatal(renameErr)
 	}
 	if chtimesErr := os.Chtimes(target, before.ModTime(), before.ModTime()); chtimesErr != nil {
 		t.Fatal(chtimesErr)
@@ -58,7 +62,7 @@ func TestDirectoryReplacementChangesRevision(t *testing.T) {
 	replaceDirectoryKeepingTimes(t, target, before)
 	replaced := workspaceRevision(t, local, root, "target")
 	if replaced == revision {
-		t.Fatal("recreated directory kept the old revision")
+		t.Fatal("replaced directory kept the old revision")
 	}
 	requireStaleRemoveConflict(t, local, root, revision, replaced)
 	requireDirectoryPresent(t, target)
