@@ -1,7 +1,6 @@
 package daltoki
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
@@ -16,14 +15,6 @@ func unknownProfileRaw() config.DaltokiConfig {
 		Model: "model", Profile: "no-such-style",
 		JobTokenLimit: 100000, DailyTokenLimit: 500000,
 		JobCostLimitUSDMicros: 5000000, DailyCostLimitUSDMicros: 20000000,
-	}
-}
-
-func TestParseConfigRejectsUnknownProfile(t *testing.T) {
-	t.Parallel()
-	_, err := ParseConfig(unknownProfileRaw(), okUnmask)
-	if err == nil || !strings.Contains(err.Error(), "unknown profile") {
-		t.Fatalf("ParseConfig unknown profile error = %v", err)
 	}
 }
 

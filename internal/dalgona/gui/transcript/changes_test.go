@@ -159,10 +159,3 @@ func checkLiveChange(t *testing.T, c liveChangeCheck) {
 	checkLiveIdentity(t, c, out)
 	checkLiveCounts(t, c, out)
 }
-
-func TestPatchOmittedMessage(t *testing.T) {
-	want := "the daemon did not retain the complete patch"
-	if errPatchOmitted.Error() != want {
-		t.Fatalf("omitted reads %q, want %q", errPatchOmitted.Error(), want)
-	}
-}

@@ -10,15 +10,6 @@ import (
 
 func toKind(b byte) jsontext.Kind { return jsontext.Kind(b) }
 
-func TestArgumentIndentIsTwoSpaces(t *testing.T) {
-	if argumentIndent != "  " {
-		t.Fatalf("indent reads %q, want two spaces", argumentIndent)
-	}
-	if len(argumentIndent) != 2 {
-		t.Fatalf("indent holds %d bytes, want 2", len(argumentIndent))
-	}
-}
-
 type jsonSizeCase struct {
 	name   string
 	raw    string

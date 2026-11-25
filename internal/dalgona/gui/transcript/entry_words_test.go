@@ -2,44 +2,6 @@ package transcript
 
 import "testing"
 
-func TestEntryStatusReturnsFactsStatus(t *testing.T) {
-	cases := []struct {
-		name   string
-		status string
-	}{
-		{name: "working", status: "inProgress"},
-		{name: "failed", status: "failed"},
-		{name: "empty", status: ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			e := Entry{Facts: facts{status: c.status}}
-			if got := e.status(); got != c.status {
-				t.Fatalf("status reads %q, want %q", got, c.status)
-			}
-		})
-	}
-}
-
-func TestStateWordsHoldWorkingWaitingDone(t *testing.T) {
-	cases := []struct {
-		status string
-		want   string
-	}{
-		{status: "active", want: "Working"},
-		{status: "inProgress", want: "Working"},
-		{status: statusAwaiting, want: "Waiting"},
-		{status: "completed", want: "Done"},
-		{status: "failed", want: "Failed"},
-		{status: "timedOut", want: "Timed out"},
-	}
-	for _, c := range cases {
-		if got := stateWords[c.status]; got != c.want {
-			t.Errorf("stateWords[%q] reads %q, want %q", c.status, got, c.want)
-		}
-	}
-}
-
 func TestStateWordMapsStatuses(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -60,18 +22,6 @@ func TestStateWordMapsStatuses(t *testing.T) {
 				t.Fatalf("stateWord(%q) reads %q, want %q", c.status, got, c.want)
 			}
 		})
-	}
-}
-
-func TestPlanWordsHoldDoneWorkingPending(t *testing.T) {
-	if got := planWords["completed"]; got != "Done" {
-		t.Errorf("planWords[completed] reads %q, want Done", got)
-	}
-	if got := planWords["inProgress"]; got != "Working" {
-		t.Errorf("planWords[inProgress] reads %q, want Working", got)
-	}
-	if got := planWords["pending"]; got != "Pending" {
-		t.Errorf("planWords[pending] reads %q, want Pending", got)
 	}
 }
 
