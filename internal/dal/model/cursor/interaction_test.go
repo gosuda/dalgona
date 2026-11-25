@@ -275,7 +275,7 @@ func checkDrainEndedAtTurn(t *testing.T, out result, cancelled bool, sinceUpdate
 	if out.failure == nil || !strings.Contains(out.failure.Err.Error(), "64 server frames") || !cancelled {
 		t.Fatalf("result = %+v, cancelled = %v", out, cancelled)
 	}
-	if sinceUpdate >= time.Second {
+	if sinceUpdate >= 250*time.Millisecond {
 		t.Fatalf("client returned %v after the turn-ended update; the idle timeout or a timer ended the drain, not the update", sinceUpdate)
 	}
 }
