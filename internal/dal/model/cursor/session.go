@@ -46,12 +46,29 @@ func (s *session) consume(ctx context.Context, gate *model.StartGate, body *mode
 	s.frames = newFrameReader(body)
 	err := s.readFrames(ctx, gate)
 	s.frames.stop()
+	if errors.Is(err, errFrameBacklog) {
+		s.deliverStreamCloses(ctx, body)
+	}
 	body.Pause()
 	err = gate.Error(ctx, err)
 	if err != nil {
 		return model.AttemptResult{Status: failureStatus(err), SawTool: s.sawTool, SawContent: s.sawContent, Body: s.failed, Err: err}
 	}
 	return model.AttemptResult{Status: http.StatusOK, SawTool: s.sawTool, SawContent: s.sawContent}
+}
+
+func (s *session) deliverStreamCloses(ctx context.Context, body *model.IdleBody) {
+	s.writer.close()
+	body.Resume()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(io.Discard, body)
+	}()
+	select {
+	case <-drained:
+	case <-ctx.Done():
+	}
 }
 
 func (s *session) readFrames(ctx context.Context, gate *model.StartGate) error {
