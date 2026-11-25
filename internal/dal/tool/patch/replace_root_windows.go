@@ -17,6 +17,8 @@ const (
 	replaceReadOnlyMode  = 0o400
 )
 
+var rootRename = (*os.Root).Rename
+
 func replaceInRoot(root *os.Root, oldName, newName string) error {
 	cleared := clearReadOnlyInRoot(root, newName)
 	if err := retryRootRename(root, oldName, newName); err != nil {
@@ -37,7 +39,7 @@ func clearReadOnlyInRoot(root *os.Root, name string) bool {
 }
 
 func retryRootRename(root *os.Root, oldName, newName string) error {
-	firstErr := root.Rename(oldName, newName)
+	firstErr := rootRename(root, oldName, newName)
 	if firstErr == nil || !rootReplaceDenied(firstErr) {
 		return firstErr
 	}
@@ -45,17 +47,16 @@ func retryRootRename(root *os.Root, oldName, newName string) error {
 		return firstErr
 	}
 	deadline := time.Now().Add(replaceRetryDeadline)
-	for time.Now().Before(deadline) {
-		time.Sleep(replaceRetryInterval)
-		renameErr := root.Rename(oldName, newName)
-		if renameErr == nil {
-			return nil
+	for {
+		time.Sleep(min(replaceRetryInterval, time.Until(deadline)))
+		if !time.Now().Before(deadline) {
+			return firstErr
 		}
-		if !rootReplaceDenied(renameErr) {
+		renameErr := rootRename(root, oldName, newName)
+		if renameErr == nil || !rootReplaceDenied(renameErr) {
 			return renameErr
 		}
 	}
-	return firstErr
 }
 
 func rootReplaceDenied(err error) bool {
