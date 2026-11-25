@@ -5,7 +5,6 @@ package platform
 import (
 	"errors"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,10 +78,22 @@ func awaitActivation(t *testing.T, n *Notifier) (string, bool) {
 	}
 }
 
+func awaitSingleWake(t *testing.T, woken <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-woken:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the click reached the thread but did not wake the window")
+	}
+	if extra := len(woken); extra != 0 {
+		t.Fatalf("woke the window %d more times", extra)
+	}
+}
+
 func TestNotifierReportsTheClickedNotificationTag(t *testing.T) {
 	server := serveNotifications(t)
-	var woken atomic.Int32
-	n := NewNotifier(func() { woken.Add(1) })
+	woken := make(chan struct{}, notificationActivationQueue)
+	n := NewNotifier(func() { woken <- struct{}{} })
 	t.Cleanup(func() { _ = n.Close() })
 	if p, err := n.Refresh(t.Context()); err != nil || p != PermissionGranted {
 		t.Fatalf("refresh: %d, %v", p, err)
@@ -104,9 +115,7 @@ func TestNotifierReportsTheClickedNotificationTag(t *testing.T) {
 	if !ok || tag != waiting.Tag {
 		t.Fatalf("activation %q %v, want the first tag", tag, ok)
 	}
-	if n := woken.Load(); n != 1 {
-		t.Fatalf("woken %d, want one wake", n)
-	}
+	awaitSingleWake(t, woken)
 }
 
 func checkNotificationPayload(t *testing.T, first notifyCall, title string) {
