@@ -541,7 +541,7 @@ func requireNoStoredOAuthState(t *testing.T, home, authorizationURL string) {
 	}
 	defer func() { _ = root.Close() }()
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || !entry.Type().IsRegular() || entry.Name() == "daemon.lock" {
+		if walkErr != nil || !entry.Type().IsRegular() || isHomeLockFile(entry.Name()) {
 			return walkErr
 		}
 		raw, readErr := root.ReadFile(path)
@@ -556,6 +556,10 @@ func requireNoStoredOAuthState(t *testing.T, home, authorizationURL string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func isHomeLockFile(name string) bool {
+	return name == "LOCK" || name == "lock" || filepath.Ext(name) == ".lock"
 }
 
 func oauthStateParameter(t *testing.T, authorizationURL string) []byte {
