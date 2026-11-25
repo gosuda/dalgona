@@ -278,9 +278,10 @@ func (m *model) renderDiagramBlock(key string, b block) tea.Cmd {
 	if draw == nil {
 		draw = drawDiagram
 	}
-	return func() tea.Msg {
-		return diagramMsg{key: key, lines: diagramLines(gatedDraw(m.out.renders, m.out.layouts, draw), b)}
-	}
+	slots, layouts := m.out.renders, m.out.layouts
+	return m.conn.link.scope(func() tea.Msg {
+		return diagramMsg{key: key, lines: diagramLines(gatedDraw(slots, layouts, draw), b)}
+	})
 }
 
 func gatedDraw(slots chan struct{}, d2 *d2Gate, draw drawFunc) drawFunc {

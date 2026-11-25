@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -694,4 +695,99 @@ func TestLocal_readDrainsMultiPageTerminal(t *testing.T) {
 	if state.Next != int64(len(want)) {
 		t.Fatalf("terminal cursor = %d, want %d", state.Next, len(want))
 	}
+}
+
+func TestLocal_startRejectsUnsafeIDs(t *testing.T) {
+	for _, id := range []string{"..", "/", ".", "a/b", "a\\b"} {
+		dir := t.TempDir()
+		runs := filepath.Join(dir, "runs")
+		local := newTestLocal(t, runs)
+		beforeParent := readDirNames(t, dir)
+		beforeRuns := readDirNames(t, runs)
+		spec := ProcessSpec{ID: id, Argv: []string{"sh", "-c", "exit 0"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}
+		if err := local.Start(t.Context(), spec); err == nil {
+			t.Errorf("Start(%q) = nil, want error", id)
+		}
+		if after := readDirNames(t, dir); !equalDirNames(beforeParent, after) {
+			t.Errorf("Start(%q) changed parent of runs: %q vs %q", id, beforeParent, after)
+		}
+		if after := readDirNames(t, runs); !equalDirNames(beforeRuns, after) {
+			t.Errorf("Start(%q) changed runs directory: %q vs %q", id, beforeRuns, after)
+		}
+	}
+}
+
+func TestLocal_startAcceptsNormalID(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	spec := ProcessSpec{ID: "same", Argv: []string{"sh", "-c", "exit 0"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}}
+	startTestProcess(t, local, spec)
+	entries := readDirNames(t, filepath.Join(dir, "runs"))
+	if !equalDirNames(entries, []string{"same"}) {
+		t.Fatalf("runs directory = %q, want [same]", entries)
+	}
+	state := waitForBoundedExit(t, local, "same", descendantExitBound)
+	if state.Exit == nil || state.Exit.Code != 0 {
+		t.Fatalf("exit = %+v, want code 0", state.Exit)
+	}
+}
+
+func TestLocal_readPageRejectsUnsafeIDs(t *testing.T) {
+	for _, id := range []string{"..", "/", "a/b"} {
+		dir := t.TempDir()
+		local := newTestLocal(t, filepath.Join(dir, "runs"))
+		if _, err := local.ReadPage(t.Context(), id, 0, 100); err == nil {
+			t.Errorf("ReadPage(%q) = nil, want error", id)
+		}
+	}
+}
+
+func TestLocal_readPageReadsNormalID(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	startTestProcess(t, local, ProcessSpec{ID: "same", Argv: []string{"sh", "-c", "echo hi"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
+	state, err := local.ReadPage(t.Context(), "same", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Path != filepath.Join(dir, "runs", "same", "out") {
+		t.Fatalf("ReadPage path = %q, want runs/same/out", state.Path)
+	}
+}
+
+func TestLocal_signalRejectsUnsafeIDs(t *testing.T) {
+	for _, id := range []string{"..", "/", "a/b"} {
+		dir := t.TempDir()
+		local := newTestLocal(t, filepath.Join(dir, "runs"))
+		if err := local.Signal(t.Context(), id, SignalTerm); err == nil {
+			t.Errorf("Signal(%q) = nil, want error", id)
+		}
+	}
+}
+
+func TestLocal_signalDeliversNormalID(t *testing.T) {
+	dir := t.TempDir()
+	local := newTestLocal(t, filepath.Join(dir, "runs"))
+	startTestProcess(t, local, ProcessSpec{ID: "signal", Argv: []string{"sh", "-c", "exit 0"}, Dir: dir, Sandbox: Sandbox{Mode: SandboxOff}})
+	waitForExit(t, local, "signal")
+	if err := local.Signal(t.Context(), "signal", SignalTerm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readDirNames(t *testing.T, path string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+func equalDirNames(a, b []string) bool {
+	return slices.Equal(a, b)
 }

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="dalgona" Manufacturer="Gosuda" Language="1033" Version="$(var.PackageVersion)"
+           UpgradeCode="{368AB4A1-4AF0-4A6A-9CD9-6A8D592E8DEA}" InstallerVersion="500" Scope="perMachine">
+    <MajorUpgrade Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of dalgona is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Dalgona">
+        <Component Id="Gui" Guid="*" Bitness="always64">
+          <File Id="DalgonaGui" Source="dalgona-gui.exe" KeyPath="yes">
+            <Shortcut Id="DalgonaStartMenu" Name="dalgona" Directory="ProgramMenuFolder"
+                      Advertise="no" WorkingDirectory="INSTALLFOLDER">
+              <ShortcutProperty Key="System.AppUserModel.ID" Value="Gosuda.Dalgona" />
+              <ShortcutProperty Key="System.AppUserModel.ToastActivatorCLSID" Value="{4C824C81-04CD-4609-A755-D11526E6CDFE}" />
+            </Shortcut>
+          </File>
+          <RegistryKey Root="HKLM" Key="Software\Classes\CLSID\{4C824C81-04CD-4609-A755-D11526E6CDFE}\LocalServer32"
+                       ForceDeleteOnUninstall="yes">
+            <RegistryValue Type="string" Value="&quot;[#DalgonaGui]&quot;" />
+          </RegistryKey>
+        </Component>
+        <Component Id="Daemon" Guid="*" Bitness="always64">
+          <File Id="DalgonaDaemon" Source="dalgona.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="License" Guid="*" Bitness="always64">
+          <File Id="ProjectLicense" Source="LICENSE.md" KeyPath="yes" />
+        </Component>
+        <Component Id="Notices" Guid="*" Bitness="always64">
+          <File Id="ThirdPartyNotices" Source="THIRD_PARTY_NOTICES.md" KeyPath="yes" />
+        </Component>
+        <Component Id="Mark" Guid="*" Bitness="always64">
+          <File Id="DalgonaMark" Source="dalgona.svg" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Desktop" Title="dalgona" Level="1">
+      <ComponentRef Id="Gui" />
+      <ComponentRef Id="Daemon" />
+      <ComponentRef Id="License" />
+      <ComponentRef Id="Notices" />
+      <ComponentRef Id="Mark" />
+    </Feature>
+  </Package>
+</Wix>

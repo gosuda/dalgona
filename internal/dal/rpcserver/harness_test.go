@@ -60,6 +60,7 @@ func TestMain(m *testing.M) {
 
 type llmReply struct {
 	body       string
+	prefix     string
 	gate       <-chan struct{}
 	status     int
 	retryAfter string
@@ -118,12 +119,8 @@ func (f *fakeLLM) respond(w http.ResponseWriter, r *http.Request) {
 	f.bodies = append(f.bodies, string(raw))
 	f.mu.Unlock()
 	reply := f.next()
-	if reply.gate != nil {
-		select {
-		case <-reply.gate:
-		case <-r.Context().Done():
-			return
-		}
+	if reply.prefix == "" && !waitReplyGate(r, reply.gate) {
+		return
 	}
 	if reply.retryAfter != "" {
 		w.Header().Set("Retry-After", reply.retryAfter)
@@ -133,7 +130,29 @@ func (f *fakeLLM) respond(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Content-Type", "text/event-stream")
 	}
+	if reply.prefix != "" && !writeReplyPrefix(w, r, reply) {
+		return
+	}
 	_, _ = io.WriteString(w, reply.body)
+}
+
+func waitReplyGate(r *http.Request, gate <-chan struct{}) bool {
+	if gate == nil {
+		return true
+	}
+	select {
+	case <-gate:
+		return true
+	case <-r.Context().Done():
+		return false
+	}
+}
+
+func writeReplyPrefix(w http.ResponseWriter, r *http.Request, reply llmReply) bool {
+	if _, err := io.WriteString(w, reply.prefix); err != nil {
+		return false
+	}
+	return http.NewResponseController(w).Flush() == nil && waitReplyGate(r, reply.gate)
 }
 
 func sseEvent(kind, data string) string { return "event: " + kind + "\ndata: " + data + "\n\n" }
@@ -386,6 +405,7 @@ var responseSchemas = map[string]string{
 	"thread/unarchive":       "v2/ThreadUnarchiveResponse.json",
 	"thread/compact/start":   "v2/ThreadCompactStartResponse.json",
 	"thread/revert":          "v2/ThreadRevertResponse.json",
+	"thread/unsubscribe":     "v2/ThreadUnsubscribeResponse.json",
 	"turn/start":             "v2/TurnStartResponse.json",
 	"turn/steer":             "v2/TurnSteerResponse.json",
 	"turn/interrupt":         "v2/TurnInterruptResponse.json",

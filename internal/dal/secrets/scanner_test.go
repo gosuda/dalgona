@@ -1,6 +1,7 @@
 package secrets_test
 
 import (
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -181,4 +182,96 @@ func TestScanIgnoresOrdinaryText(t *testing.T) {
 			t.Errorf("false positive on %q: %+v", text, hits)
 		}
 	}
+}
+
+func overlapPair() string {
+	return "xoxb-0123456789-ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+}
+
+func separatedPair() string {
+	return "xoxb-" + strings.Repeat("2", 10) + " ghp_" + strings.Repeat("B", 36)
+}
+
+func requireHitsCover(t *testing.T, hits []secrets.Hit, start, end int) {
+	t.Helper()
+	for offset := start; offset < end; offset++ {
+		covered := false
+		for _, hit := range hits {
+			if hit.Start <= offset && offset < hit.End {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Fatalf("byte %d of %d..%d is outside every hit: %+v", offset, start, end, hits)
+		}
+	}
+}
+
+func requireReaderHitsCover(t *testing.T, hits []secrets.ReaderHit, start, end int64) {
+	t.Helper()
+	for offset := start; offset < end; offset++ {
+		covered := false
+		for _, hit := range hits {
+			if hit.Start <= offset && offset < hit.End {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			t.Fatalf("byte %d of %d..%d is outside every hit: %+v", offset, start, end, hits)
+		}
+	}
+}
+
+func collectReaderHits(t *testing.T, text string) []secrets.ReaderHit {
+	t.Helper()
+	input := io.NewSectionReader(strings.NewReader(text), 0, int64(len(text)))
+	var hits []secrets.ReaderHit
+	if err := secrets.ScanReader(t.Context(), input, func(hit secrets.ReaderHit) error {
+		hits = append(hits, hit)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return hits
+}
+
+func TestScanCoversOverlappingSlackAndGitHubHits(t *testing.T) {
+	text := overlapPair()
+	hits := secrets.Scan(text)
+	requireHitsCover(t, hits, 0, 19)
+	requireHitsCover(t, hits, 16, len(text))
+}
+
+func TestScanCoversSeparatedSlackAndGitHubHits(t *testing.T) {
+	text := separatedPair()
+	slackEnd := strings.Index(text, " ")
+	hits := secrets.Scan(text)
+	requireHitsCover(t, hits, 0, slackEnd)
+	requireHitsCover(t, hits, slackEnd+1, len(text))
+}
+
+func TestScanReaderCoversOverlappingHitsAcrossBlocks(t *testing.T) {
+	text := overlapPair()
+	tokenStart := int64((32 << 10) - len(text[:19]) - 1)
+	padded := strings.Repeat("x", int(tokenStart)-1) + "\n" + text
+	hits := collectReaderHits(t, padded)
+	requireReaderHitsCover(t, hits, tokenStart, tokenStart+19)
+	requireReaderHitsCover(t, hits, tokenStart+16, tokenStart+int64(len(text)))
+}
+
+func TestScanReaderCoversOverlappingHitsInOneBlock(t *testing.T) {
+	text := overlapPair()
+	hits := collectReaderHits(t, text)
+	requireReaderHitsCover(t, hits, 0, 19)
+	requireReaderHitsCover(t, hits, 16, int64(len(text)))
+}
+
+func TestScanReaderCoversSeparatedHits(t *testing.T) {
+	text := separatedPair()
+	slackEnd := int64(strings.Index(text, " "))
+	hits := collectReaderHits(t, text)
+	requireReaderHitsCover(t, hits, 0, slackEnd)
+	requireReaderHitsCover(t, hits, slackEnd+1, int64(len(text)))
 }

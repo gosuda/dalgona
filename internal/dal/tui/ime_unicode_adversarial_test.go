@@ -217,7 +217,7 @@ func TestEditorUpMeasuresClusterWidthInUnicodeCore(t *testing.T) {
 	}
 }
 
-func TestPasteAtByteLimitKeepsUTF8(t *testing.T) {
+func TestPasteAtByteLimitRefusesMalformedUTF8Whole(t *testing.T) {
 	t.Parallel()
 	cjk := strings.Repeat("中", pasteLimit/3)
 	emoji := strings.Repeat("😀", pasteLimit/4)
@@ -226,12 +226,13 @@ func TestPasteAtByteLimitKeepsUTF8(t *testing.T) {
 		name    string
 		content string
 		want    string
+		notice  string
 	}{
-		{"limit minus one CJK", cjk, cjk},
-		{"limit exact CJK plus ascii", cjk + "a", cjk + "a"},
-		{"limit exact emoji", emoji, emoji},
-		{"limit plus one refused", cjk + "ab", ""},
-		{"truncated sequence at limit", truncated, strings.Repeat("a", pasteLimit-2) + "\uFFFD\uFFFD"},
+		{"limit minus one CJK", cjk, cjk, ""},
+		{"limit exact CJK plus ascii", cjk + "a", cjk + "a", ""},
+		{"limit exact emoji", emoji, emoji, ""},
+		{"limit plus one refused", cjk + "ab", "", "1 MiB"},
+		{"truncated sequence at limit", truncated, "", "Paste holds invalid UTF-8. Nothing was pasted."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -246,8 +247,8 @@ func TestPasteAtByteLimitKeepsUTF8(t *testing.T) {
 			if !utf8.ValidString(got) {
 				t.Fatal("composer holds invalid UTF-8")
 			}
-			if tc.want == "" && !strings.Contains(m.notice, "1 MiB") {
-				t.Fatalf("oversize paste notice = %q, want the 1 MiB refusal", m.notice)
+			if tc.want == "" && !strings.Contains(m.notice, tc.notice) {
+				t.Fatalf("refused paste notice = %q, want %q", m.notice, tc.notice)
 			}
 		})
 	}

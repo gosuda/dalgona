@@ -63,7 +63,7 @@ func (m *model) matchKeywords() tea.Cmd {
 		return nil
 	}
 	seq := m.matchSeq
-	return tea.Tick(keywordDebounce, func(time.Time) tea.Msg { return keywordTickMsg{seq: seq} })
+	return m.conn.link.scope(tea.Tick(keywordDebounce, func(time.Time) tea.Msg { return keywordTickMsg{seq: seq} }))
 }
 
 func (m *model) sendKeywordMatch(msg keywordTickMsg) tea.Cmd {
@@ -76,7 +76,7 @@ func (m *model) sendKeywordMatch(msg keywordTickMsg) tea.Cmd {
 	}
 	params := keywordMatchParams{ThreadID: m.thread.id, Text: draft, Kind: m.matchKind()}
 	client, done := m.conn.client, m.conn.done
-	return func() tea.Msg {
+	return m.conn.link.scope(func() tea.Msg {
 		if client == nil {
 			return resultMsg{op: "keywordMatch", seq: msg.seq, text: draft, err: errors.New("rpc client is not connected")}
 		}
@@ -85,7 +85,7 @@ func (m *model) sendKeywordMatch(msg keywordTickMsg) tea.Cmd {
 		var reply keywordReply
 		err := client.Call(ctx, "dalgona/keywords/match", params, &reply)
 		return resultMsg{op: "keywordMatch", value: &reply, seq: msg.seq, text: draft, err: err}
-	}
+	})
 }
 
 func (m *model) applyKeywordMatch(msg resultMsg) {

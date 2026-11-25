@@ -17,6 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const defaultListLimit = 50
@@ -238,11 +239,16 @@ func (s *server) threadStart(ctx context.Context, params jsontext.Value) (jsonte
 	if err = s.refuseUnsupportedEffort(ctx, spec.Model, string(spec.Effort)); err != nil {
 		return nil, err
 	}
+	slot, err := s.reserveSubscription()
+	if err != nil {
+		return nil, err
+	}
+	defer s.releaseSubscription(slot)
 	thread, err := s.host.Start(ctx, spec)
 	if err != nil {
 		return nil, invalidRequest(err.Error())
 	}
-	return s.announce(ctx, thread)
+	return s.announce(ctx, thread, slot)
 }
 
 func (s *server) spec(p rpc.ThreadStartParams) (agent.ThreadSpec, error) {
@@ -288,8 +294,8 @@ func qualifiedModel(model, modelProvider, current string) string {
 	return name + "/" + model
 }
 
-func (s *server) announce(ctx context.Context, thread *agent.Thread) (jsontext.Value, error) {
-	snap, err := s.attach(ctx, thread, (*tracker).replayAll)
+func (s *server) announce(ctx context.Context, thread *agent.Thread, slot *subscriptionReservation) (jsontext.Value, error) {
+	snap, err := s.attach(ctx, thread, s.announceReplay(), slot)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +357,7 @@ func (s *server) threadResume(ctx context.Context, params jsontext.Value) (jsont
 	if err != nil {
 		return nil, err
 	}
-	snap, err := s.attach(ctx, thread, resumeReplay(p))
+	snap, err := s.attach(ctx, thread, resumeReplay(p), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -485,6 +491,9 @@ func (s *server) threadNameSet(ctx context.Context, params jsontext.Value) (json
 	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "name": &p.Name})); err != nil {
 		return nil, err
 	}
+	if err := (textinput.Field{Name: "name"}).Check(p.Name); err != nil {
+		return nil, invalidParams(err.Error())
+	}
 	thread, err := s.watched(ctx, p.ThreadID)
 	if err != nil {
 		return nil, err
@@ -570,7 +579,7 @@ func (s *server) threadRevert(ctx context.Context, params jsontext.Value) (jsont
 	if err != nil {
 		return nil, err
 	}
-	if err := thread.Revert(p.BeforeTurnID); err != nil {
+	if err := thread.Revert(ctx, p.BeforeTurnID); err != nil {
 		return nil, hostError(err, p.ThreadID, p.BeforeTurnID)
 	}
 	info, _ := s.info(p.ThreadID)
@@ -586,11 +595,16 @@ func (s *server) threadFork(ctx context.Context, params jsontext.Value) (jsontex
 	if err != nil {
 		return nil, err
 	}
+	slot, err := s.reserveSubscription()
+	if err != nil {
+		return nil, err
+	}
+	defer s.releaseSubscription(slot)
 	fork, err := thread.Fork(ctx, p.LastTurnID)
 	if err != nil {
 		return nil, hostError(err, p.ThreadID, p.LastTurnID)
 	}
-	return s.announce(ctx, fork)
+	return s.announce(ctx, fork, slot)
 }
 
 func (s *server) threadTree(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
@@ -622,7 +636,7 @@ func (s *server) leafSet(ctx context.Context, params jsontext.Value) (jsontext.V
 	if err != nil {
 		return nil, err
 	}
-	if err := thread.SetLeaf(p.TurnID); err != nil {
+	if err := thread.SetLeaf(ctx, p.TurnID); err != nil {
 		return nil, hostError(err, p.ThreadID, p.TurnID)
 	}
 	return emptyObject(), nil

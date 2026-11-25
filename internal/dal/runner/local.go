@@ -84,14 +84,18 @@ func checkKeptRun(runDir string, id string) error {
 	return nil
 }
 
+func validateProcessID(id string) error {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/\\\x00") {
+		return errors.New("runner: process id must be one path component")
+	}
+	return nil
+}
+
 func validateProcessSpec(spec ProcessSpec) error {
 	if spec.ID == "" || len(spec.Argv) == 0 {
 		return errors.New("runner: process id and argv are required")
 	}
-	if spec.ID == "." || filepath.Base(spec.ID) != spec.ID {
-		return errors.New("runner: process id must be one path component")
-	}
-	return nil
+	return validateProcessID(spec.ID)
 }
 
 func (l *Local) spawn(runDir string, spec ProcessSpec) error {
@@ -287,7 +291,7 @@ func isRunnerEnvironment(key string) bool {
 }
 
 func (l *Local) Read(ctx context.Context, id string, offset int64) (Output, error) {
-	first, err := l.readPage(ctx, id, offset, readPageSize)
+	first, err := l.ReadPage(ctx, id, offset, readPageSize)
 	if err != nil {
 		return Output{}, err
 	}
@@ -298,7 +302,7 @@ func (l *Local) Read(ctx context.Context, id string, offset int64) (Output, erro
 	next := first.Next
 	var last Output
 	for {
-		page, err := l.readPage(ctx, id, next, readPageSize)
+		page, err := l.ReadPage(ctx, id, next, readPageSize)
 		if err != nil {
 			return Output{}, err
 		}
@@ -314,9 +318,12 @@ func (l *Local) Read(ctx context.Context, id string, offset int64) (Output, erro
 	return last, nil
 }
 
-func (l *Local) readPage(ctx context.Context, id string, offset, limit int64) (Output, error) {
+func (l *Local) ReadPage(ctx context.Context, id string, offset, limit int64) (Output, error) {
 	if err := ctx.Err(); err != nil {
 		return Output{}, fmt.Errorf("runner: read: %w", err)
+	}
+	if err := validateProcessID(id); err != nil {
+		return Output{}, err
 	}
 	if offset < 0 {
 		return Output{}, errors.New("runner: negative output offset")
@@ -328,6 +335,7 @@ func (l *Local) readPage(ctx context.Context, id string, offset, limit int64) (O
 		}
 		return Output{}, fmt.Errorf("runner: stat process: %w", err)
 	}
+	limit = clampPage(limit)
 	exit, data, err := l.snapshot(runDir, offset, limit)
 	if err != nil {
 		return Output{}, err
@@ -369,6 +377,9 @@ func backfillTail(runDir string, offset, limit int64, data []byte) ([]byte, *Exi
 func (l *Local) Signal(ctx context.Context, id string, signal Signal) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("runner: signal: %w", err)
+	}
+	if err := validateProcessID(id); err != nil {
+		return err
 	}
 	runDir := filepath.Join(l.dir, id)
 	if exited, err := exitRecorded(runDir); exited || err != nil {
@@ -492,7 +503,7 @@ func (l *Local) WriteFile(ctx context.Context, path string, data []byte, perm fs
 	return nil
 }
 
-func (l *Local) readFileAt(ctx context.Context, path string, offset, limit int64) ([]byte, int64, error) {
+func (l *Local) ReadFilePage(ctx context.Context, path string, offset, limit int64) ([]byte, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, fmt.Errorf("runner: read file: %w", err)
 	}
@@ -507,7 +518,7 @@ func (l *Local) readFileAt(ctx context.Context, path string, offset, limit int64
 	if _, seekErr := file.Seek(offset, io.SeekStart); seekErr != nil {
 		return nil, 0, fmt.Errorf("runner: seek file %s: %w", path, seekErr)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
+	data, err := io.ReadAll(io.LimitReader(file, clampPage(limit)))
 	if err != nil {
 		return nil, 0, fmt.Errorf("runner: read file %s: %w", path, err)
 	}

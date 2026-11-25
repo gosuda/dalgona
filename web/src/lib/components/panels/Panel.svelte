@@ -16,7 +16,7 @@ const titleId = $props.id();
 let dialog = $state<HTMLDialogElement>();
 let opener: HTMLElement | null = null;
 let composing = $state(false);
-
+let heldEscape = false;
 $effect(() => {
 	const node = dialog;
 	if (node === undefined) return;
@@ -49,14 +49,20 @@ $effect(() => {
 });
 
 function onKey(event: KeyboardEvent): void {
-	if (event.key !== "Escape" || composing || isImeKey(event)) return;
+	if (event.key !== "Escape") return;
 	event.preventDefault();
+	if (isImeKey(event)) heldEscape = true;
+	if (composing || isImeKey(event)) return;
 	onClose();
+}
+
+function onRelease(event: KeyboardEvent): void {
+	if (event.key === "Escape") heldEscape = false;
 }
 
 function onCancel(event: Event): void {
 	event.preventDefault();
-	if (composing) return;
+	if (composing || heldEscape) return;
 	onClose();
 }
 </script>
@@ -66,6 +72,7 @@ function onCancel(event: Event): void {
 	class="panel"
 	aria-labelledby={titleId}
 	onkeydown={onKey}
+	onkeyup={onRelease}
 	oncancel={onCancel}
 	oncompositionstart={() => (composing = true)}
 	oncompositionend={() => (composing = false)}

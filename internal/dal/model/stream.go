@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gosuda/dalgona/internal/dal/failure"
 )
 
 type SSEHandler func(event, data []byte) error
@@ -338,16 +341,40 @@ func (g *StartGate) ConsumeSSE(ctx context.Context, body io.ReadCloser, timers *
 func LaunchStream(ctx context.Context, retry RetryOptions, attempt func(context.Context, *EventStream) AttemptResult) (*EventStream, error) {
 	stream := NewEventStream(ctx, 64)
 	go func() {
-		streamCtx := stream.Context(ctx)
-		result := RunRetries(streamCtx, retry, func(attemptCtx context.Context) AttemptResult {
-			return attempt(attemptCtx, stream)
-		})
+		result := runStream(ctx, stream, retry, attempt)
 		if result.Err != nil {
 			stream.Emit(Error{Err: result.Err, Message: result.Err.Error(), Status: result.Status, Body: result.Body})
 		}
 		stream.Finish(nil)
 	}()
 	return stream, nil
+}
+
+type ProviderPanic struct {
+	Value  string
+	Frames []failure.Frame
+}
+
+func (*ProviderPanic) Error() string { return "model: provider panicked" }
+
+func runStream(ctx context.Context, stream *EventStream, retry RetryOptions, attempt func(context.Context, *EventStream) AttemptResult) (result AttemptResult) {
+	defer func() {
+		if value := recover(); value != nil {
+			result = AttemptResult{Err: &ProviderPanic{Value: panicText(value), Frames: failure.CaptureFrames(2)}}
+		}
+	}()
+	return RunRetries(stream.Context(ctx), retry, func(attemptCtx context.Context) AttemptResult {
+		return attempt(attemptCtx, stream)
+	})
+}
+
+func panicText(value any) (text string) {
+	defer func() {
+		if recover() != nil {
+			text = "panic value could not be formatted"
+		}
+	}()
+	return fmt.Sprint(value)
 }
 
 type IdleBody struct {

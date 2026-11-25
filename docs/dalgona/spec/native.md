@@ -3,8 +3,8 @@
 ## Status and scope
 
 This suite defines the complete Go and Gio desktop client for dalgona.
-It is a required implementation contract, not evidence that the desktop client already exists.
-The specification change adds no executable and certifies no desktop acceptance result.
+It is a required implementation contract.
+The first implementation stage adds `cmd/dalgona-gui` under the `gui` build tag with the design tokens, the bundled fonts, the shell layout, and the close confirmation. It connects to no daemon yet. It certifies no desktop acceptance result.
 
 The source baseline is commit `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 The design uses the existing [web contract](web.md) and [visual system](../../../DESIGN.md).
@@ -32,7 +32,7 @@ An upstream toolkit gap MUST have an owned implementation and acceptance test be
 
 N05. The daemon MUST retain execution, journal, policy, credential, and runner authority.
 The desktop MUST NOT become another agent host or journal writer.
-The [architecture](native-architecture.md) defines the shared Go connection lifecycle and the single state owner.
+The [architecture](native-architecture.md) defines an endpoint set with independent state owners for each simultaneous endpoint session.
 
 ## Contract map
 
@@ -41,8 +41,8 @@ References to another document inherit its requirements without copying its cont
 
 |Document|Owns|Requirement prefix|
 |---|---|---|
-|[Architecture](native-architecture.md)|Packages, types, lifecycle, concurrency, subscriptions, and reconnect.|A|
-|[Protocol](native-protocol.md)|Existing API reuse and required extensions with bounds and errors.|R|
+|[Architecture](native-architecture.md)|Endpoint identity, endpoint sets, packages, lifecycle, concurrency, subscriptions, and reconnect.|A|
+|[Protocol](native-protocol.md)|Per-connection streams, endpoint-scoped receipts, existing API reuse, bounds, and errors.|R|
 |[Design](native-design.md)|Web design mapping, native tokens, layout, focus, and keyboard behavior.|V|
 |[Components](native-components.md)|Every web component and the additional desktop workflows.|C|
 |[Documents](native-documents.md)|Selectable documents, diagrams, math, images, diffs, and terminal rendering.|D|
@@ -53,7 +53,8 @@ References to another document inherit its requirements without copying its cont
 N06. A conflicting interpretation MUST follow the document that owns that decision.
 Existing shared contracts retain authority over their existing methods and storage formats.
 New desktop methods apply only when the daemon advertises the required capability.
-The GUI MUST report an incompatible daemon with an actionable explanation.
+The GUI MUST report an incompatible daemon on its owning endpoint with an actionable explanation.
+It MUST leave other endpoint sessions unchanged.
 It MUST NOT silently remove a required feature or guess a compatible wire format.
 
 ## Complete product coverage
@@ -64,7 +65,7 @@ Those additions are explicit requirements, not claims of existing web parity.
 
 |User task|Required result|Contract|
 |---|---|---|
-|Open a workspace|Select a local folder or a configured remote endpoint with clear ownership.|[Connection lifecycle](native-architecture.md), [platforms](native-platform.md)|
+|Open a workspace|Connect to local and remote workspaces concurrently with clear endpoint ownership.|[Connection lifecycle](native-architecture.md), [platforms](native-platform.md)|
 |Find a conversation|Page, search, resume, rename, archive, and restore threads.|[Components](native-components.md)|
 |Continue work|Send, steer, queue, edit a draft, attach content, and interrupt.|[Components](native-components.md)|
 |Read a conversation|Select and copy text across styled and unloaded document blocks.|[Documents](native-documents.md)|
@@ -90,7 +91,7 @@ It does not weaken the complete release requirement.
 
 |Area|Existing behavior|Required implementation|
 |---|---|---|
-|Connection|The TUI uses Go RPC. CLI packages own daemon startup and remote selection.|Extract one shared lifecycle and migrate its consumers.|
+|Connection|The TUI uses Go RPC. CLI packages own daemon startup and remote selection.|Extract one endpoint set with 32 endpoint slots, eight live transports, and per-endpoint lifecycle owners.|
 |RPC package|Client transport and server handlers share one package.|Separate client-consumable wire code from server implementation.|
 |History|Existing turn pagination still reads the complete journal.|Add bounded snapshot paging with an explicit live-event boundary.|
 |Subscriptions|The upstream schema has `thread/unsubscribe`, but the server does not implement it.|Implement detach without archiving or stopping another client.|
@@ -109,21 +110,26 @@ The protocol specification MUST label every new method as proposed until impleme
 ## User-visible boundaries
 
 N07. The application MUST distinguish the desktop host, daemon host, and thread runner.
+`EndpointID` MUST be stable and client-scoped as defined in [architecture](native-architecture.md#a03-types-and-ownership).
+Every client key naming a thread, item, request, path, workspace, terminal, attachment, or draft MUST include `EndpointID`.
+The same thread identifier on two endpoints MUST remain two distinct threads.
 A path MUST retain its owning endpoint and workspace.
 A remote path MUST NOT become a local file URL or a local command argument through implicit conversion.
+An offline remote MUST NOT fall back to the local file system.
 
 N08. A thread rewind changes conversation history under the existing rewind contract.
 The UI MUST NOT describe rewind as a filesystem rollback.
 The UI MUST preserve the distinction between an approval mode and a sandbox mode.
 The local harness sandbox MUST NOT be described as isolation from hostile code.
 
-N09. A reconnect MUST NOT replay a user mutation whose outcome is unknown.
+N09. Reconnecting one endpoint MUST NOT replay a user mutation whose outcome is unknown.
+It MUST NOT interrupt or modify another endpoint session.
 Draft preservation MUST NOT imply that a previously sent turn failed to start.
-The client MUST reconcile daemon state before offering a deliberate retry.
+The client MUST reconcile that endpoint's daemon state before offering a deliberate retry.
 
-N10. Closing the desktop MUST follow the existing last-subscriber rules for approvals and questions.
-The close flow MUST explain affected pending decisions.
-It MUST NOT imply that keeping the daemon alive preserves every unanswered request.
+N10. Closing the desktop MUST follow the existing last-subscriber rules for approvals and questions on every endpoint.
+The close flow MUST explain affected pending decisions by endpoint.
+It MUST NOT imply that keeping any daemon alive preserves every unanswered request.
 
 ## Implementation contract
 

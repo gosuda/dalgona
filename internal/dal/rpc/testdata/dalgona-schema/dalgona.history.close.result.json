@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/history/close result",
+  "type": "object",
+  "required": [
+    "closed"
+  ],
+  "properties": {
+    "closed": {
+      "const": true
+    }
+  }
+}

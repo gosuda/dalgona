@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
@@ -27,7 +28,6 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/daemon"
 	"github.com/gosuda/dalgona/internal/dalgona/discovery"
-	"github.com/gosuda/dalgona/internal/dalgona/report"
 )
 
 func executable() (string, error) {
@@ -86,7 +86,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	if len(args) != 0 {
 		return usage(std, "daemon")
 	}
-	build := client.Build()
+	build := config.Build()
 	cfg, err := loadConfig()
 	if err != nil {
 		return fail(std, 1, err)
@@ -94,12 +94,7 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 	logger := slog.New(slog.NewTextHandler(std.errOut, nil))
 	batteries := &battery.Daemon{}
 	batteries.WorkspaceApprover = workspaceTrustDecision
-	batteries.ReporterOpener = func(ctx context.Context, home string) (*report.Reporter, error) {
-		return report.OpenConsented(ctx, report.OpenParams{
-			Home: cfg.Home, Enabled: cfg.FailureReports.Enabled, Method: cfg.FailureReports.Auth,
-			Version: config.Version(), HomeOverridden: os.Getenv("DALGONA_HOME") != "", Notice: std.errOut,
-		})
-	}
+	batteries.ReporterOpener = liveReporterOpener(std.errOut)
 	advisors := advisor.NewRegistry()
 	newHost := func(ctx context.Context) (*agent.Host, func() error, error) {
 		return app.NewHost(ctx, app.Options{
@@ -107,16 +102,44 @@ func runDaemon(ctx context.Context, args []string, std stdio) int {
 		})
 	}
 	remotes := remoteExtensions(batteries)
+	logins := newAuthService(os.Getenv(boxTokenEnvironment) == "", os.Getenv("DALGONA_HOME") != "", logger)
+	loginResults := logins.operationResults()
+	mcpConfig := newMCPConfigService(batteries)
+	reporting := reportingOperations(batteries.ReloadReporter)
 	ctx, retireDaemon := context.WithCancel(ctx)
 	defer retireDaemon()
 	startedAt := time.Now()
-	serve := func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
+	terminals := newTerminalHost()
+	openPairing := sync.OnceValues(func() (*daemon.Pairing, error) { return daemon.OpenPairing(cfg.Home) })
+	serveRPC := func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
 		extensions := maps.Clone(remotes)
 		extensions[methodScriptRun] = scriptExtension(host, batteries)
 		extensions[client.MethodIdentity] = identityExtension(build, startedAt)
-		extensions[client.MethodRetire] = retireExtension(retireDaemon)
-		options := rpcserver.ServeOptions{Extensions: extensions, BeforeArchive: batteries.Archive, Advisors: advisors}
+		if !daemon.PairedConnection(ctx) {
+			extensions[client.MethodRetire] = retireExtension(retireDaemon)
+		}
+		maps.Copy(extensions, diagnosticsExtensions(cfg.Home))
+		maps.Copy(extensions, reportingExtensions())
+		maps.Copy(extensions, logins.extensions(host))
+		maps.Copy(extensions, mcpConfig.extensions(host))
+		operations := maps.Clone(reporting)
+		maps.Copy(operations, logins.operations(host))
+		maps.Copy(operations, mcpConfig.operations(host))
+		registerDaltoki(batteries.Daltoki(), extensions, operations)
+		options := rpcserver.ServeOptions{
+			Extensions: extensions, OperationExtensions: operations, OperationResults: loginResults,
+			BeforeArchive: batteries.Archive, Advisors: advisors, Terminals: terminals,
+		}
 		return rpcserver.ServeWith(ctx, conn, host, options)
+	}
+	serve := func(ctx context.Context, raw io.ReadWriteCloser, host *agent.Host) error {
+		conn, ok := raw.(net.Conn)
+		if !ok {
+			return errors.New("daemon transport does not support machine admission")
+		}
+		return daemon.ServeMachine(ctx, conn, openPairing, func(ctx context.Context, stream io.ReadWriteCloser) error {
+			return serveRPC(ctx, stream, host)
+		})
 	}
 	if err := daemon.Run(ctx, cfg.Home, newHost, serve, batteries.AfterRecover); err != nil {
 		return fail(std, 1, err)
@@ -242,6 +265,13 @@ func installService(env daemon.ServiceEnv) error {
 }
 
 func runBridge(ctx context.Context, args []string, std stdio) int {
+	if len(args) == 1 && args[0] == "--machine-version" {
+		fmt.Fprintln(std.out, "dalgona-machine-v1")
+		return 0
+	}
+	if len(args) > 0 && args[0] == "--machine" {
+		return runMachineBridge(ctx, args[1:], std)
+	}
 	if len(args) != 0 {
 		return usage(std, "bridge")
 	}

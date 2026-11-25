@@ -39,12 +39,12 @@ func (w *worker) recoverTurn(ctx context.Context) {
 	if w.recoverExternalTurn(ctx) {
 		return
 	}
-	if err := w.prime(ctx); err != nil {
+	if err := w.containedPrime(ctx); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
 	}
 	if err := w.recoverCalls(ctx); err != nil {
-		w.end(ctx, failure(ctx, err))
+		w.end(ctx, failedOutcome(ctx, err))
 		return
 	}
 	w.drive(ctx)
@@ -133,9 +133,17 @@ func (w *worker) finishRecovered(ctx context.Context, p *prepared) error {
 	return err
 }
 
+func (w *worker) readOnlyRecovery(name string) bool {
+	item, ok := w.tools.byName[name]
+	return ok && w.t.created.ReadOnly && item.Class() != tool.ClassRead
+}
+
 func (w *worker) recoverStarted(ctx context.Context, v view, state event.ToolState) error {
 	if done, err := w.completeUnresumableTool(ctx, state); done {
 		return err
+	}
+	if w.readOnlyRecovery(state.Tool) {
+		return w.completeRecovered(ctx, state.CallID, "read-only thread refused "+state.Tool, recoveredStopped)
 	}
 	item := w.tools.byName[state.Tool]
 	args, err := w.t.host.loadRaw(state.Args, state.ArgsBlob)
@@ -214,7 +222,7 @@ func (w *worker) completeRecovered(ctx context.Context, callID, output, recovere
 }
 
 func (w *worker) recoverExec(ctx context.Context, p *prepared) error {
-	out, data, err := w.readProcess(ctx, p.processID())
+	out, err := runner.ReadProcessPage(ctx, w.t.runner, p.processID(), 0, runner.MaxProcessPageBytes)
 	if errors.Is(err, runner.ErrProcessNotFound) {
 		return w.completeRecovered(ctx, p.call.ID, execInterrupted, recoveredStopped)
 	}
@@ -224,15 +232,15 @@ func (w *worker) recoverExec(ctx context.Context, p *prepared) error {
 	if out.Alive && out.Exit == nil {
 		return w.finishRecovered(ctx, p)
 	}
-	projected, _ := tool.Project(data, tool.KeepTail, out.Path)
-	result := tool.Result{Output: []byte(projected), Path: out.Path}
+	result := tool.Result{Output: out.Data, Path: out.Path, ObservedOutputBytes: max(int64(len(out.Data)), out.Next)}
+	var runErr error
 	recovered := recoveredReplay
 	if out.Exit != nil {
 		result.OK, result.ExitCode = out.Exit.Code == 0, &out.Exit.Code
 	} else {
-		result.Output, recovered = []byte(joinError(projected, execInterrupted)), recoveredStopped
+		runErr, recovered = errors.New(execInterrupted), recoveredStopped
 	}
-	completed, err := w.completion(ctx, p, result, nil)
+	completed, err := w.completion(ctx, p, result, runErr)
 	if err != nil {
 		return err
 	}
@@ -241,47 +249,46 @@ func (w *worker) recoverExec(ctx context.Context, p *prepared) error {
 	return err
 }
 
-func (w *worker) readProcess(ctx context.Context, id string) (runner.Output, []byte, error) {
-	var data []byte
-	var offset int64
-	for {
-		out, err := w.t.runner.Read(ctx, id, offset)
-		if err != nil {
-			return out, data, err
-		}
-		data = append(data, out.Data...)
-		if len(out.Data) == 0 || out.Next <= offset {
-			return out, data, nil
-		}
-		offset = out.Next
-	}
-}
-
 func (w *worker) recoverEdit(ctx context.Context, v view, p *prepared) error {
+	if identity := v.state.InFlight[p.call.ID].Invocation; identity != "" {
+		return w.recoverInvocation(ctx, v, p.call.ID, identity)
+	}
 	files := startedFiles(v, p.call.ID)
 	if len(files) == 0 {
 		return w.replanEdit(ctx, p)
 	}
-	current := make([]string, len(files))
-	allPre, allPost := true, true
+	matched, err := w.matchEdit(ctx, files)
+	if err != nil {
+		return err
+	}
+	switch {
+	case matched.post:
+		_, err := w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, OK: true, Output: editReplayed, Recovered: recoveredReplay})
+		return err
+	case matched.pre:
+		return w.replanEdit(ctx, p)
+	default:
+		return w.restoreEdit(ctx, p.call.ID, files, matched.current)
+	}
+}
+
+type editMatch struct {
+	current   []string
+	pre, post bool
+}
+
+func (w *worker) matchEdit(ctx context.Context, files []event.FileChange) (editMatch, error) {
+	matched := editMatch{current: make([]string, len(files)), pre: true, post: true}
 	for i, file := range files {
 		sha, err := w.fileSHA(ctx, file.Path)
 		if err != nil {
-			return err
+			return editMatch{}, err
 		}
-		current[i] = sha
-		allPre = allPre && sha == file.PreSHA
-		allPost = allPost && sha == file.PostSHA
+		matched.current[i] = sha
+		matched.pre = matched.pre && sha == file.PreSHA
+		matched.post = matched.post && sha == file.PostSHA
 	}
-	switch {
-	case allPost:
-		_, err := w.t.appendEvents(ctx, event.ToolCompleted{CallID: p.call.ID, OK: true, Output: editReplayed, Recovered: recoveredReplay})
-		return err
-	case allPre:
-		return w.replanEdit(ctx, p)
-	default:
-		return w.restoreEdit(ctx, p.call.ID, files, current)
-	}
+	return matched, nil
 }
 
 func startedFiles(v view, callID string) []event.FileChange {

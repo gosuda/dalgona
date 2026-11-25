@@ -2,8 +2,10 @@
 import Panel from "#lib/components/panels/Panel.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import { threadTitle } from "#lib/labels.ts";
+import { oneLine } from "#lib/oneLine.ts";
 import { appendThreadPage } from "#lib/reducer.ts";
 import type { Session } from "#lib/session.svelte.ts";
+import { searchEligible } from "#lib/text/validate.ts";
 import type { ThreadSummary } from "#lib/types.ts";
 import type { ThreadSearchHit } from "#lib/validation.ts";
 
@@ -18,6 +20,7 @@ let nextCursor = $state<string | null>(null);
 let loading = $state(false);
 let listRequest = 0;
 let filter = $state("");
+let filterError = $state("");
 let filterField: HTMLInputElement;
 let error = $state("");
 let hits = $state<readonly ThreadSearchHit[]>([]);
@@ -54,12 +57,12 @@ $effect(() => {
 });
 
 $effect(() => {
-	const query = filter.trim();
+	const query = filter;
 	void retry;
 	hits = [];
 	searchError = "";
 	searching = false;
-	if (!open || [...query].length < 3) return;
+	if (!open || !searchEligible(query)) return;
 	const controller = new AbortController();
 	searching = true;
 	const timer = setTimeout(() => {
@@ -124,7 +127,15 @@ async function choose(threadId: string): Promise<void> {
 
 <Panel title="Open an earlier thread" {open} onClose={() => session.closePanel()}>
 	{#snippet children()}
-		<input type="search" bind:this={filterField} bind:value={filter} placeholder="Filter threads" aria-label="Filter threads" />
+		<input
+			type="search" bind:this={filterField} bind:value={filter} placeholder="Filter threads" aria-label="Filter threads"
+			aria-invalid={filterError === "" ? undefined : "true"}
+			oninput={() => (filterError = "")}
+			{@attach oneLine((message) => (filterError = message))}
+		/>
+		{#if filterError !== ""}
+			<p class="error" role="alert">{filterError}</p>
+		{/if}
 		{#if opening}
 			<p role="status">Opening thread…</p>
 		{/if}
@@ -152,7 +163,7 @@ async function choose(threadId: string): Promise<void> {
 				{@attach handoffFocus(() => filterField)}
 			>{error === "" ? "Load more threads" : "Try again"}</button>
 		{/if}
-		{#if [...filter.trim()].length >= 3}
+		{#if searchEligible(filter)}
 			<section aria-label="Matches in conversations" aria-busy={searching}>
 				<h3>Matches in conversations</h3>
 				{#if searching}

@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/search params",
+  "type": "object",
+  "required": [
+    "workspaceId",
+    "query"
+  ],
+  "properties": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    }
+  }
+}

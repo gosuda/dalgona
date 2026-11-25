@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 
@@ -24,7 +26,6 @@ var methods map[string]method
 
 func init() {
 	methods = map[string]method{
-		"initialize":                     (*server).initialize,
 		"thread/start":                   (*server).threadStart,
 		"thread/resume":                  (*server).threadResume,
 		"thread/list":                    (*server).threadList,
@@ -74,6 +75,15 @@ func init() {
 		"dalgona/settings/read":          (*server).settingsRead,
 		"dalgona/item/output/read":       (*server).itemOutputRead,
 	}
+	maps.Copy(methods, capabilityMethods())
+	maps.Copy(methods, historyMethods())
+	maps.Copy(methods, decisionMethods())
+	maps.Copy(methods, operationMethods())
+	maps.Copy(methods, imageMethods())
+	maps.Copy(methods, failureMethods())
+	maps.Copy(methods, workspaceMethods())
+	maps.Copy(methods, terminalMethods())
+	coverMutations(methods)
 }
 
 type server struct {
@@ -85,8 +95,10 @@ type server struct {
 	log        *slog.Logger
 	mu         sync.Mutex
 	watches    map[string]*watch
+	watchSlots int
 	procs      map[string]context.CancelFunc
 	pending    map[string]context.CancelFunc
+	threads    map[string]string
 	refused    map[string]struct{}
 	logins     map[string]context.CancelFunc
 	searches   map[string]*fuzzySearch
@@ -94,25 +106,38 @@ type server struct {
 	tasks      sync.WaitGroup
 	fsWatches  map[string]*fsWatcher
 	fsWatchers sync.WaitGroup
+	ctx        context.Context
+	connection string
+	native     atomic.Pointer[nativeSession]
+	workspace  workspaceTable
+	terminalMu sync.Mutex
 }
 
 type watch struct {
-	thread  *agent.Thread
-	tracker *tracker
-	head    uint64
-	mu      sync.Mutex
-	ch      <-chan agent.Update
-	stopped bool
+	thread     *agent.Thread
+	tracker    *tracker
+	head       uint64
+	ready      chan struct{}
+	initErr    error
+	overflowed func() bool
+	mu         sync.Mutex
+	ch         <-chan agent.Update
+	stopped    bool
+	apply      sync.Mutex
+	live       liveProjection
 }
 
 type Extension func(ctx context.Context, params jsontext.Value) (jsontext.Value, error)
 
 type ServeOptions struct {
-	Extensions     map[string]Extension
-	BeforeArchive  func(ctx context.Context, threadID string) error
-	Logger         *slog.Logger
-	Advisors       *advisor.Registry
-	ProviderLookup func(id string) (oauth.Provider, bool)
+	Extensions          map[string]Extension
+	OperationExtensions map[string]Extension
+	OperationResults    map[string]Extension
+	BeforeArchive       func(ctx context.Context, threadID string) error
+	Logger              *slog.Logger
+	Advisors            *advisor.Registry
+	ProviderLookup      func(id string) (oauth.Provider, bool)
+	Terminals           *TerminalHost
 }
 
 func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, opts ServeOptions) error {
@@ -127,8 +152,8 @@ func ServeWith(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host, o
 	}
 	s := &server{
 		host: host, log: cmp.Or(opts.Logger, slog.Default()), opts: opts, providers: providerLookup,
-		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, refused: map[string]struct{}{}, logins: map[string]context.CancelFunc{},
-		fsWatches: map[string]*fsWatcher{},
+		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, threads: map[string]string{}, refused: map[string]struct{}{}, logins: map[string]context.CancelFunc{},
+		fsWatches: map[string]*fsWatcher{}, ctx: ctx, connection: newHandle(),
 	}
 	s.conn = rpc.NewServerConn(ctx, conn, s.handle)
 	s.conn.Start()
@@ -165,19 +190,17 @@ func (s *server) shutdown() {
 		w.stop()
 	}
 	s.watchers.Wait()
+	s.releaseNative(watches)
 	s.stopFsWatches()
+	s.workspace.closeAll()
 }
 
 func (s *server) handle(ctx context.Context, name string, params jsontext.Value) (jsontext.Value, error) {
 	if call, ok := methods[name]; ok {
-		return call(s, ctx, params)
+		return s.invoke(ctx, name, call, params)
 	}
-	if extension, ok := s.opts.Extensions[name]; ok {
-		result, err := extension(ctx, params)
-		if err != nil {
-			return nil, internalError(err)
-		}
-		return result, nil
+	if call, ok := s.extension(name); ok {
+		return s.invoke(context.WithValue(ctx, serverKey{}, s), name, call, params)
 	}
 	if name == "initialized" {
 		return nil, nil
@@ -264,8 +287,8 @@ type snapshot struct {
 	turnEffort *string
 }
 
-func (s *server) attach(ctx context.Context, thread *agent.Thread, replay replayer) (snapshot, error) {
-	snap, fresh, err := s.watch(ctx, thread, replay)
+func (s *server) attach(ctx context.Context, thread *agent.Thread, replay replayer, slot *subscriptionReservation) (snapshot, error) {
+	snap, fresh, err := s.watchWithReservation(ctx, thread, replay, slot)
 	if err != nil || fresh {
 		return snap, err
 	}
@@ -273,51 +296,160 @@ func (s *server) attach(ctx context.Context, thread *agent.Thread, replay replay
 }
 
 func (s *server) watch(ctx context.Context, thread *agent.Thread, replay replayer) (snapshot, bool, error) {
-	id := thread.ID()
+	return s.watchWithReservation(ctx, thread, replay, nil)
+}
+
+type subscriptionReservation struct{ held bool }
+
+func (s *server) reserveSubscription() (*subscriptionReservation, error) {
 	s.mu.Lock()
-	_, watched := s.watches[id]
-	w := &watch{thread: thread}
-	if !watched {
-		s.watches[id] = w
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, io.ErrClosedPipe
 	}
-	s.mu.Unlock()
-	if watched {
-		return snapshot{}, false, nil
+	if s.native.Load() == nil {
+		return nil, nil
 	}
-	ch := thread.Subscribe()
-	if !w.setChannel(ch) {
-		thread.Unsubscribe(ch)
-		return snapshot{}, false, io.ErrClosedPipe
+	if s.subscriptionsFullLocked() {
+		return nil, rpc.NativeKind(rpc.ErrorLimitExceeded)
 	}
-	w.tracker = s.newTracker(id)
-	snap, head, err := s.fill(thread, w.tracker, replay)
+	s.watchSlots++
+	return &subscriptionReservation{held: true}, nil
+}
+
+func (s *server) releaseSubscription(slot *subscriptionReservation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseSubscriptionLocked(slot)
+}
+
+func (s *server) releaseSubscriptionLocked(slot *subscriptionReservation) {
+	if slot != nil && slot.held {
+		slot.held = false
+		s.watchSlots--
+	}
+}
+
+func (s *server) subscriptionsFullLocked() bool {
+	return len(s.watches)+s.watchSlots >= connectionSubscriptions
+}
+
+func (s *server) registerWatch(thread *agent.Thread, slot *subscriptionReservation) (*watch, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releaseSubscriptionLocked(slot)
+	if s.closing {
+		return nil, false, io.ErrClosedPipe
+	}
+	id := thread.ID()
+	if w := s.watches[id]; w != nil {
+		return w, false, nil
+	}
+	if s.native.Load() != nil && s.subscriptionsFullLocked() {
+		return nil, false, rpc.NativeKind(rpc.ErrorLimitExceeded)
+	}
+	w := &watch{thread: thread, live: liveProjection{threadID: id}, ready: make(chan struct{})}
+	s.watches[id] = w
+	return w, true, nil
+}
+
+func (w *watch) waitReady(ctx context.Context) error {
+	select {
+	case <-w.ready:
+		return w.initErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *server) watchWithReservation(ctx context.Context, thread *agent.Thread, replay replayer, slot *subscriptionReservation) (snapshot, bool, error) {
+	w, fresh, err := s.registerWatch(thread, slot)
 	if err != nil {
-		w.stop()
-		s.forget(id)
 		return snapshot{}, false, err
 	}
-	w.head = head
-	if !s.startWatcher(ctx, w) {
+	if !fresh {
+		return snapshot{}, false, w.waitReady(ctx)
+	}
+	snap, err := s.initializeWatch(ctx, w, replay)
+	w.initErr = err
+	close(w.ready)
+	if err != nil {
 		w.stop()
-		return snapshot{}, false, io.ErrClosedPipe
+		w.closeProjection()
+		s.forget(w)
+		return snapshot{}, false, err
 	}
 	s.autoAdvisor(ctx, thread)
 	return snap, true, nil
 }
 
-func (s *server) startWatcher(ctx context.Context, w *watch) bool {
+func (s *server) initializeWatch(ctx context.Context, w *watch, replay replayer) (snapshot, error) {
+	w.tracker = s.newTracker(w.thread.ID())
+	snap, err := s.loadWatch(ctx, w, replay)
+	if err != nil {
+		return snapshot{}, err
+	}
+	w.tracker.deferred = s.native.Load() != nil
+	if !s.startWatcher(w) {
+		return snapshot{}, io.ErrClosedPipe
+	}
+	return snap, nil
+}
+
+func (s *server) loadWatch(ctx context.Context, w *watch, replay replayer) (snapshot, error) {
+	if s.native.Load() != nil {
+		return s.loadSeededWatch(ctx, w, replay)
+	}
+	if err := w.listen(w.thread.Subscribe()); err != nil {
+		return snapshot{}, err
+	}
+	snap, head, err := s.fill(w.thread, w.tracker, replay)
+	w.head = head
+	return snap, err
+}
+
+func (w *watch) listen(ch <-chan agent.Update) error {
+	if !w.setChannel(ch) {
+		w.thread.Unsubscribe(ch)
+		return io.ErrClosedPipe
+	}
+	return nil
+}
+
+func (s *server) loadSeededWatch(ctx context.Context, w *watch, replay replayer) (snapshot, error) {
+	sub, err := w.thread.SubscribeSeeded(ctx)
+	if err != nil {
+		return snapshot{}, err
+	}
+	defer sub.Release()
+	if listenErr := w.listen(sub.Updates); listenErr != nil {
+		return snapshot{}, listenErr
+	}
+	records, _, err := w.thread.Records()
+	if err != nil {
+		return snapshot{}, hostError(err, w.thread.ID(), "")
+	}
+	w.overflowed = sub.Overflowed
+	w.head = sub.Head
+	snap := replayRecords(w.tracker, replay, records[:min(sub.Head, uint64(len(records)))])
+	return snap, w.seedProjection(ctx, sub.Seed)
+}
+
+func (s *server) startWatcher(w *watch) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing {
+	if s.closing || s.watches[w.thread.ID()] != w {
 		return false
 	}
-	s.watchers.Go(func() { s.run(ctx, w) })
+	s.watchers.Go(func() { s.run(s.ctx, w) })
 	return true
 }
 
-func (s *server) forget(id string) {
+func (s *server) forget(w *watch) {
 	s.mu.Lock()
-	delete(s.watches, id)
+	if s.watches[w.thread.ID()] == w {
+		delete(s.watches, w.thread.ID())
+	}
 	s.mu.Unlock()
 }
 
@@ -331,35 +463,51 @@ func (s *server) fill(thread *agent.Thread, tr *tracker, replay replayer) (snaps
 	if err != nil {
 		return snapshot{}, 0, hostError(err, thread.ID(), "")
 	}
-	if created, ok := sessionCreated(records); ok {
-		tr.created = created
-	}
-	turns := replay(tr, event.ActivePath(records))
 	var head uint64
 	if len(records) > 0 {
 		head = records[len(records)-1].Seq
 	}
-	return snapshot{created: tr.created, turns: turns, usage: tr.usageSnapshot(), turnEffort: tr.turnEffort}, head, nil
+	return replayRecords(tr, replay, records), head, nil
+}
+
+func replayRecords(tr *tracker, replay replayer, records []event.Seqd) snapshot {
+	if created, ok := sessionCreated(records); ok {
+		tr.created = created
+	}
+	turns := replay(tr, event.ActivePath(records))
+	return snapshot{created: tr.created, turns: turns, usage: tr.usageSnapshot(), turnEffort: tr.turnEffort}
 }
 
 func (s *server) run(ctx context.Context, w *watch) {
-	defer s.forget(w.thread.ID())
-	w.tracker.sink = liveSink{s: s, thread: w.thread.ID()}
+	defer s.forget(w)
+	defer w.closeProjection()
+	w.tracker.sink = liveSink{s: s, thread: w.thread.ID(), w: w}
 	ch := w.channel()
 	for {
 		s.drain(ctx, w, ch)
 		if ctx.Err() != nil {
 			return
 		}
+		if w.overflowed != nil {
+			if w.overflowed() {
+				s.closeStream(errors.New("native subscription overflow"))
+			}
+			return
+		}
 		ch = w.thread.Subscribe()
-		if !w.setChannel(ch) {
-			w.thread.Unsubscribe(ch)
+		if err := w.listen(ch); err != nil {
 			return
 		}
 		if err := s.catchUp(w); err != nil {
 			return
 		}
 	}
+}
+
+func (w *watch) closeProjection() {
+	w.apply.Lock()
+	defer w.apply.Unlock()
+	w.live.close()
 }
 
 func (s *server) catchUp(w *watch) error {
@@ -391,6 +539,11 @@ func (s *server) drain(ctx context.Context, w *watch, ch <-chan agent.Update) {
 }
 
 func (w *watch) trackDelta(update agent.Update) {
+	w.apply.Lock()
+	defer w.apply.Unlock()
+	if w.live.closed {
+		return
+	}
 	switch update.Kind {
 	case agent.UpdateTextDelta:
 		w.tracker.agentDelta(update.ItemID, update.Delta)
@@ -405,7 +558,9 @@ func (w *watch) trackDelta(update agent.Update) {
 }
 
 func (s *server) applyUpdate(w *watch, update agent.Update) {
-	if update.Seq <= w.head {
+	w.apply.Lock()
+	defer w.apply.Unlock()
+	if update.Seq <= w.head || w.live.closed {
 		return
 	}
 	w.head = update.Seq
@@ -471,14 +626,22 @@ func (c *collector) result() []rpc.Turn {
 type liveSink struct {
 	s      *server
 	thread string
+	w      *watch
 }
 
 func (l liveSink) turn(method string, turn rpc.Turn) {
+	if method == methodTurnCompleted && l.s.native.Load() != nil {
+		l.w.live.endTurn(turn.ID)
+	}
 	l.s.send(method, rpc.TurnStartedNotification{ThreadID: l.thread, Turn: turn})
 }
 
 func (l liveSink) item(method, turnID string, it *rpc.Item) {
 	now := nowMillis()
+	if l.s.native.Load() != nil {
+		l.s.nativeItem(l.w, method, turnID, it, now)
+		return
+	}
 	if method == methodItemStarted {
 		l.s.send(method, rpc.ItemStartedNotification{ThreadID: l.thread, TurnID: turnID, StartedAtMs: now, Item: *it})
 		return
@@ -486,4 +649,10 @@ func (l liveSink) item(method, turnID string, it *rpc.Item) {
 	l.s.send(method, rpc.ItemCompletedNotification{ThreadID: l.thread, TurnID: turnID, CompletedAtMs: now, Item: *it})
 }
 
-func (l liveSink) notify(method string, build func() rpc.Encoder) { l.s.send(method, build()) }
+func (l liveSink) notify(method string, build func() rpc.Encoder) {
+	if l.s.native.Load() != nil {
+		l.s.nativeNotify(l.w, method, build())
+		return
+	}
+	l.s.send(method, build())
+}

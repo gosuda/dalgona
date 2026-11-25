@@ -1,6 +1,6 @@
 # Native components
 
-Status: Required design. This document does not describe an implemented or certified desktop client.
+Status: Required design. `internal/dalgona/gui/shell` implements C01, C02, and C04 through C08 against headless tests. C01 covers regions with one active thread per window, request and composer dock, and panel host. It covers `?` key list routing, follow-up discard decision, and close confirmation by endpoint. C02 covers endpoint lanes with per-lane paging, retry, and offline retention. `internal/dalgona/gui/decision` implements C15 and C16 against headless tests. Its answer field uses the platform composition editor with scripted composition tests. Native input-method checks remain open. Notification activation opens the named thread through `platform.Notifier` on Linux. The Windows and macOS notifiers are pending. `internal/dalgona/gui/manage` implements the C44 through C51 panels over an injected endpoint session and lifecycle. Headless tests cover C44, C45, C50, and C51. C46 through C49 have no tests yet. They still draw their own card instead of the C20 `panel.Frame`. This document certifies no desktop client.
 The source baseline is `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 
 The [native decision](../decisions/native-client.md) selects Gio.
@@ -81,38 +81,44 @@ They MUST NOT add permanent dashboard columns.
 The visible thread title MUST use at most two lines.
 Its complete value MUST remain selectable and available to accessibility.
 
+The application MUST hold concurrent session state for every configured endpoint.
+Each endpoint session MUST own its phase, retry ladder, subscriptions, requests, budgets, and receipts.
+Every thread-scoped panel session and asynchronous result MUST include `EndpointID`.
+An endpoint loss MUST make only that endpoint's projections read-only while other endpoint projections remain live and actionable.
+The open thread's endpoint alone MUST gate sending for that thread.
+Offline MUST block sending until explicit Connect succeeds.
+Selecting a thread MUST NOT disconnect or reconnect any endpoint.
+Notifications and approval or question requests MUST name their endpoint.
+
 A launch without saved thread references MUST NOT open a thread automatically.
 An ordinary restart MAY restore explicit references under [the restore contract](native-architecture.md#a10-restore-close-and-shared-state).
 Restoration MUST NOT submit input or repeat a mutation.
 The empty workspace MUST say `Pick a thread or start a new one`.
-When connected, it MUST explain that earlier threads appear in the list.
-When disconnected, it MUST offer connection recovery.
+When any endpoint is connected, it MUST explain that earlier threads appear in the list.
+When every endpoint lacks a live transport, it MUST offer endpoint recovery.
 Start thread MUST remain focusable while its operation runs and expose its busy state.
 An accessibility action MUST move directly to the transcript without changing its scroll position.
 
 Each window MUST have a stable `windowId` and independent editing and navigation state.
-Draft and follow-up keys MUST include endpoint identity, `windowId`, and `threadId`.
+Draft and follow-up keys MUST include `EndpointID`, `windowId`, and `threadId`.
 The application state owner MUST store those keyed payloads.
 The shared worker MUST own protocol projections rather than editor widgets.
 Each window's Gio event loop MUST own its editors, selection, focus, panels, and layout state.
 Creating another window MUST NOT alias an existing window's mutable draft or queue.
-Window-scoped asynchronous results MUST carry `windowId`, the connection generation, and the relevant thread identity.
+Window-scoped asynchronous results MUST carry `windowId`, `EndpointID`, connection generation, and thread identity.
 An obsolete result MUST NOT replace the current window state.
 Closing a panel MUST preserve the composer draft and transcript anchor.
 
-Reconnection MUST follow the shared client lifecycle in [native architecture](native-architecture.md).
-It MUST reload thread navigation and resume the open thread.
-It MUST retain queued follow-ups for that same thread.
-It MUST NOT repeat a running turn or retry an uncertain write automatically.
-A resume error identifying an unknown thread MUST clear that open thread and its transcript.
+Reconnection MUST follow the shared client lifecycle in [native architecture](native-architecture.md). It MUST affect only its target endpoint. It MUST reload that endpoint's navigation lane and resume its open threads. It MUST retain queued follow-ups by endpoint, window, and thread.
+A resume error identifying an unknown thread MUST clear only that endpoint's matching open thread and transcript.
 Requests cached from a disconnected connection MUST lose their actionable state.
-Only requests delivered by the current connection MAY become actionable again.
+Only requests from the current generation of the same endpoint session MAY become actionable again.
 
 The client MUST treat `seq` according to its per-thread scope in [native protocol](native-protocol.md).
-It MUST NOT treat `seq` as a global cursor for every notification.
-Closing or switching a thread MUST release only that view's subscription interest.
-The application MUST count interests by endpoint and thread.
-It MUST call `thread/unsubscribe` only when the final interest ends.
+It MUST NOT treat `seq` as a global cursor across threads or endpoint sessions.
+Closing a thread or opening another MUST release only the original view's subscription interest.
+The application MUST count interests by `EndpointID` and thread.
+It MUST call `thread/unsubscribe` only when the final interest ends on that endpoint.
 One window closing MUST preserve another window's live view and pending requests.
 Subscription saturation MUST offer closing an existing view or cancelling the new open.
 It MUST NOT evict another window's live subscription silently.
@@ -120,35 +126,49 @@ The UI MUST preserve pending-request ownership when multiple windows or clients 
 
 ## C02: Thread list
 
+The list MUST merge threads from every configured endpoint into one navigation surface.
+It MUST group thread rows by endpoint lane without adding a permanent endpoint column.
+Each lane header MUST show the endpoint label and phase word defined by [native design](native-design.md).
+The seven phases MUST remain independent, and `Idle` MUST NOT appear as a loss.
+
 The list MUST show each thread's title, preview, model, update time, and state when available.
 Title fallback MUST use the preview, then `Untitled thread`.
+Every row MUST use `(EndpointID, threadId)` as its identity.
+Equal thread identifiers on different endpoints MUST produce distinct rows.
 The selected thread MUST have an inline-start bar and a strong title.
 Its selection MUST remain identifiable under high contrast.
 
-Active navigation requests MUST use `thread/list` with `limit: 100` and its cursor only.
-It MUST NOT send `sortKey` or `sortDirection`.
-Load more threads MUST append unseen threads in response order.
-Paging MUST preserve the open thread and existing rows.
+Active navigation requests for each lane MUST use that endpoint's `thread/list` method with `limit: 100` and its cursor only.
+They MUST NOT send `sortKey` or `sortDirection`.
+Load more threads MUST append unseen threads in response order within that lane.
+Paging MUST preserve every open thread and existing row across all lanes.
+Cursors and page results MUST remain keyed by `EndpointID`.
 Load more threads MUST remain focusable while loading and expose its busy state.
 
-Overlapping pages MUST trigger earlier-page reconciliation under [the web contract](web.md#empty-states-and-errors).
-A final non-overlapping page MUST check the first page's identifiers and update times.
-A changed first page MUST trigger reconciliation of the other earlier pages.
-A failed page MUST retain existing rows and retry its original cursor.
+Overlapping pages within a lane MUST trigger earlier-page reconciliation under [the web contract](web.md#empty-states-and-errors).
+A final non-overlapping page MUST check that lane's first-page identifiers and update times.
+A changed first page MUST trigger reconciliation of that lane's other earlier pages.
+It MUST NOT reconcile matching identifiers on another endpoint.
+A failed page MUST retain existing rows and retry its original cursor on the same endpoint.
 Retry MUST remove that page's previous failure notice.
 
-A disconnected list MUST say `Threads unavailable`.
-It MUST NOT claim that no threads exist.
-An empty connected list MUST offer Start thread.
+A lane whose endpoint is offline MUST say `Threads unavailable` beside its retained rows.
+Its cached projections MUST remain read-only until that endpoint reconnects.
+An idle-evicted lane MUST retain its cached rows and `Idle` phase without a loss notice.
+Other lanes MUST remain live.
+A disconnected lane MUST NOT claim that no threads exist.
+An empty connected lane MUST offer Start thread.
 Opening a different thread MUST use the explicit queued-follow-up decision in C13.
+It MUST NOT disconnect or reconnect any endpoint.
 A disappearing focused row MUST return focus to the composer or transcript.
 Thread management MUST use C44 without adding permanent row clutter.
 
 ## C03: Transcript
 
-Transcript identity MUST include `threadId`, `turnId`, and `itemId`.
+Transcript identity MUST include `EndpointID`, `threadId`, `turnId`, and `itemId`.
 Repeated item identifiers in different turns MUST remain distinct.
-Notifications MUST update only their named thread and turn.
+Repeated thread identifiers on different endpoints MUST remain distinct.
+Notifications MUST update only their named endpoint, thread, and turn.
 Nested calls MUST appear directly after their owning `eval` row.
 Rows MUST be selected by item kind rather than tool name.
 
@@ -245,13 +265,15 @@ While disconnected, the notice MUST offer Reconnect.
 An uncertain write MUST follow the explicit reconciliation path in [native protocol](native-protocol.md).
 Its retry MUST NOT be presented as harmless repetition.
 
-Connection messages MUST name the selected local or remote endpoint.
+Connection messages MUST name their specific local or remote endpoint.
 They MUST NOT instruct native users to run `dalgona web`.
-Automatic retries MUST use the bounded shared lifecycle policy.
-Manual Reconnect MUST cancel a scheduled attempt and connect immediately.
-The header MUST remain Offline until the connection succeeds.
-Late transport errors MUST NOT change the current connection presentation.
-Already dispatched mutations MUST retain their unknown-outcome records across that transition.
+Automatic retries MUST use each endpoint's independent bounded lifecycle policy.
+Manual Reconnect MUST cancel only that endpoint's scheduled attempt and connect immediately.
+The affected lane and any open-thread header for that endpoint MUST retain `Reconnecting` during attempts.
+They MUST show `Offline` after the retry ladder or explicit Disconnect.
+Idle eviction MUST retain `Idle` without a loss message.
+Late transport errors MUST NOT change another generation or endpoint's presentation.
+Already dispatched mutations MUST retain their endpoint-scoped unknown-outcome records across that transition.
 
 Panel operation errors MUST remain inside their panel unless C24 or C25 specifies a save notice.
 Composer errors MUST appear beside the field and identify its accessible error description.
@@ -265,9 +287,9 @@ The client MUST NOT request permission during launch.
 It MUST notify only when no window showing that endpoint and thread is visible and active.
 Waiting requests MUST use `Waiting for your reply`.
 Completed, failed, and interrupted turns MUST use Done, Failed, and Stopped.
-Each notification MUST identify its thread and avoid including transcript content.
+Each notification MUST name its endpoint and thread and avoid including transcript content.
 
-Notification identity MUST include endpoint and thread identity.
+Notification identity MUST include `EndpointID` and thread identity.
 Duplicate delivery across reconnects MUST NOT produce duplicate attention for the same event.
 Activation MUST focus the appropriate window and open the named thread.
 It MUST NOT send input or approve a request.
@@ -276,6 +298,8 @@ A blocked permission MUST offer the platform's notification settings when availa
 The [platform contract](native-platform.md) defines platform delivery and activation.
 
 ## C09: Composer
+
+Status: `internal/dalgona/gui/composer` implements the field, send, steer, queue, interrupt guard, recall, and `!` shell entry. Shell execution waits for the state owner's `RunShell` and `ShellRuns` support.
 
 The composer MUST retain its visible label, editable field, help line, and action area.
 Its primary control MUST retain focus identity while its label changes.
@@ -316,7 +340,7 @@ An uncertain send MUST retain its payload and expose the protocol's outcome-reco
 
 ### Shell input
 
-A leading `!` MUST switch the field label to `Shell command`.
+A leading `!` MUST change the field label to `Shell command`.
 The trigger MUST be ASCII `!`. Removing that marker MUST preserve every remaining command scalar, including whitespace.
 The help MUST say `Enter runs the command in <cwd>. It is not sent to the agent.`
 The displayed directory MUST be the granted runner workspace root.
@@ -347,6 +371,8 @@ Transient shell rows MUST NOT be presented as journaled history.
 Interactive terminals MUST use C49 rather than this one-shot command path.
 
 ## C10: Command palette
+
+Status: `internal/dalgona/gui/composer` implements the palette with prefix-first ranking, unmet prerequisites, and the `//` escape.
 
 A leading `/` MUST open prefix-matching commands.
 Arrow keys MUST move through the visible matches.
@@ -383,7 +409,7 @@ The native client MUST add these compact panel commands.
 
 | Command | User task |
 |---|---|
-| `/remote` | Select and manage daemon endpoints through C45. |
+| `/remote` | Manage concurrent daemon endpoints through C45. |
 | `/runner` | Inspect runner mode and transfer files through C46. |
 | `/mcp` | Configure and authenticate MCP servers through C47. |
 | `/files` | Browse and edit workspace files through C48. |
@@ -396,6 +422,8 @@ Disabled actions MUST state their unmet prerequisite.
 Commands MUST NOT bypass the corresponding panel's validation or confirmation.
 
 ## C11: File completion
+
+Status: `internal/dalgona/gui/composer` implements the debounced, ticket-bound completion. Searching waits for the state owner's `SearchFiles` and `FileSearch` support.
 
 An `@` at a word boundary MUST start file completion for the following non-whitespace text.
 The trigger MUST be ASCII `@`. Unicode lookalikes MUST remain ordinary text.
@@ -426,6 +454,8 @@ Incomplete searches MUST identify partial results without claiming exhaustive ma
 The client MUST NOT substitute host `fuzzyFileSearch` for runner-aware completion.
 
 ## C12: Attachment chips
+
+Status: `internal/dalgona/gui/composer` implements text, image, and shell-output chips with their limits. Image thumbnails wait for the renderer child's image decoder.
 
 Pastes containing at least ten lines MUST become text chips.
 Line counting MUST follow the shared line-ending conversion. Chip text MUST preserve every accepted scalar, including the final LF.
@@ -458,6 +488,8 @@ Unsupported or damaged images MUST retain their label and error instead of becom
 
 ## C13: Follow-up queue
 
+Status: `internal/dalgona/gui/composer` implements the queue list with Edit and Remove. The shell owns the thread-switch decision.
+
 The queue MUST show each item's first line above the field.
 Each item MUST have Edit and Remove actions.
 Edit MUST remove that queued item and place its complete text in the field.
@@ -472,15 +504,18 @@ It MUST remove that item from the queue before starting its send.
 A failed send MUST retain the payload in an actionable failure notice.
 An explicit safe retry MUST send that payload once.
 An uncertain result MUST require reconciliation before any repeat.
-Reconnect MUST retain the remaining queue for the same thread.
-Switching threads with queued follow-ups MUST show their count and request an explicit discard decision.
+Reconnect of one endpoint MUST retain the remaining queue for the same `(EndpointID, windowId, threadId)`.
+It MUST NOT change another endpoint's queue.
+Opening another thread with queued follow-ups MUST show their count and request an explicit discard decision.
 The actions MUST be Discard follow-ups and open, and Cancel.
 Cancel MUST preserve the current thread and queue.
-Confirmed switching MUST discard the old queue only after the new thread opens successfully.
+Confirmed opening MUST discard the old queue only after the new thread opens successfully.
 A failed open MUST retain the original queue.
 The status-band count MUST match the remaining queue.
 
 ## C14: Keywords
+
+Status: `internal/dalgona/gui/composer` exports `KeywordSpans` and `KeywordWords` and shows draft keywords.
 
 User messages MUST underline every valid server-reported keyword range.
 They MUST also list keyword words on a `Keywords:` line.
@@ -499,8 +534,9 @@ Underlines MUST remain visible in high contrast and while text is selected.
 Approvals, questions, sandbox choices, and workspace permissions MUST share one arrival order.
 The dock MUST show the oldest relevant request for the open thread or its child.
 Other-thread requests MUST produce the notice defined in C07.
-Each request MUST retain its original request identifier and source thread.
-Each connection MUST deduplicate repeated delivery of that identifier.
+Each request MUST retain its `EndpointID`, original request identifier, and source thread.
+The card and its notice MUST show the endpoint label.
+Each endpoint connection MUST deduplicate repeated delivery of that identifier independently.
 Native request manifests MUST load through the bounded detail reads in [native protocol](native-protocol.md).
 The worker MUST reconstruct and validate the exact original parameters before publishing an actionable card.
 Decision controls MUST remain disabled until all required details and their digest have been verified.
@@ -512,6 +548,8 @@ Command approvals MUST ask `Run this command?`.
 File approvals MUST ask `Apply these changes?` and show their supplied diffs.
 Command text MUST remain verbatim rather than reconstructed from arguments.
 The card MUST show the working directory, reason, escalation state, and child identity when supplied.
+Escalation state MUST come from the `escalated` member in [server requests](../../dal/spec/protocol.md#server-requests).
+An escalated command MUST state that it runs outside the harness sandbox.
 
 Command and file approvals MUST offer Accept, Accept for thread, Decline, and Cancel and interrupt.
 Accept for thread MUST send the existing wire decision `acceptForSession`.
@@ -538,11 +576,21 @@ Sandbox choice MUST remain a separate request type.
 It MUST show the missing-sandbox cause and distinct Accept and Dangerously accept choices.
 It MUST explain their thread-level execution consequences from [approvals](../../dal/spec/approvals.md#gate-order).
 It MUST NOT substitute an ordinary approval or silently choose unconfined execution.
+The sandbox card title MUST be `Run commands without a sandbox?`.
+Its actions MUST be Accept, Dangerously accept, and Cancel.
+Accept and Dangerously accept MUST send their original option labels.
+Cancel and Escape MUST send `{"answers": {}}`.
 
 Workspace MCP trust MUST show the workspace path, commands, arguments, and environment key names supplied by the host.
 It MUST NOT reveal environment secret values.
 The choice MUST follow [MCP workspace trust](mcp.md#workspace-trust) through the same ordered request queue.
 Opening a thread or inspecting the MCP panel MUST NOT manufacture a trust request.
+The trust card title MUST be `Trust this workspace?`.
+Its actions MUST be Trust workspace, Decline, and Not now.
+These actions MUST send `accept`, `decline`, and `cancel` respectively.
+Not now and Escape MUST keep the servers stopped and ask again on the next turn.
+Decline MUST keep the servers stopped for the host session.
+The trust card MUST NOT offer a thread grant.
 
 `dalgona/workspace/requestPermission` MUST show its thread, runner, binding, root, requested rights, and reason.
 Its title MUST ask `Allow workspace access?`.
@@ -581,6 +629,16 @@ Local submission MUST NOT count as daemon acceptance.
 A correlated validation warning MUST restore editing and identify the invalid field when supplied.
 The original request ID and deadline MUST remain unchanged.
 Correction and retry MUST reuse that pending request. They MUST NOT create another question or consume a successful-answer slot.
+
+An answer field MUST keep preedit text out of the answer until the input method commits it.
+A refused candidate MUST stay available through Copy rejected text, except in a secret field.
+Enter in an answer field MUST submit the card when no composition is active.
+Shift+Enter MUST add a line break.
+Escape in an answer field MUST dismiss the card when no composition is active.
+A window MUST keep unsent answers for at most 64 requests.
+At that limit, a new question card MUST block new answers.
+Its notice MUST name the oldest held request, its thread, and its endpoint.
+The window MUST NOT discard an unsent answer to make space.
 
 The shared request layout, focus, scrolling, and IME rules from C15 MUST apply.
 Submit MUST be the card's sole point-filled action.
@@ -644,6 +702,8 @@ The viewer MUST distinguish missing content from empty output.
 
 ## C20: Common panel
 
+Status: `internal/dalgona/gui/panel` exports `Frame`, `Content`, `Button`, `Choice`, and `Check`. The package implements the card, body-only scrolling, the Tab trap, and Escape after any field that claims it. It implements the permanent Close or Cancel action and busy progress against headless tests. The shell panel host restores focus. Text fields use `platform.Editor`. The V12 composition gate stays with its hardware checks.
+
 Every modal panel MUST use one title, scrollable body, and reachable footer.
 Only the body MUST scroll when the panel exceeds the client area.
 Tab and Shift+Tab MUST remain inside the active panel.
@@ -661,6 +721,8 @@ Secret fields MUST clear when their authentication flow ends.
 
 ## C21: Thread panel routing
 
+Status: `internal/dalgona/gui/panel` resolves the target from the route. It refuses new, compact, fork, tree, and revert while a turn runs. The refusal offers Interrupt for that exact turn and Close. It keeps panel errors out of the notice stack.
+
 Thread actions MUST resolve their target when invoked and preserve that identity during the operation.
 Changing the open thread MUST NOT redirect a pending action to another thread.
 While a turn runs, new, compact, fork, tree, and revert MUST refuse entry.
@@ -674,6 +736,8 @@ The application menu and slash commands MUST share these guards.
 
 ## C22: Turn list
 
+Status: `internal/dalgona/gui/panel` implements the turn list for C30, C31, and C32.
+
 Turn lists MUST retain server order and turn identifiers.
 Each row MUST show its preview or `Untitled turn`.
 The active turn MUST carry an Active text marker.
@@ -683,6 +747,8 @@ Loading MUST preserve a valid selection when the same turn remains available.
 Confirmation MUST revalidate the selected identifier against the current result.
 
 ## C23: Key list
+
+Status: `internal/dalgona/gui/panel` implements the list by route context with platform modifier labels. The shell routes `/help`, `?`, and the application menu.
 
 The key list MUST be available through `/help`, the application menu, and `?` outside editable controls.
 It MUST show the shortcuts actually supported by the focused context.
@@ -710,6 +776,8 @@ Shortcut labels MUST remain accurate when platform modifiers differ for ordinary
 
 ## C24: Model panel
 
+Status: `internal/dalgona/gui/panel` implements the panel per endpoint and refreshes the shared endpoint state after a save. C12 revalidates attached images from that refreshed model list.
+
 The panel MUST list every visible model with its description.
 Hidden models MUST NOT appear as selectable choices.
 Presets MUST show default, smol, and slow in that order when supplied.
@@ -726,6 +794,8 @@ A model list without entries MUST explain authentication and offer Log in.
 Model changes MUST revalidate attached images under C12.
 
 ## C25: Settings panel
+
+Status: `internal/dalgona/gui/panel` implements the panel per endpoint. The C08 row is the shell's notification widget.
 
 Settings MUST load from `dalgona/settings/read`.
 The panel MUST expose approval, verbosity, theme, status visibility, and edit review.
@@ -747,6 +817,8 @@ Opening Settings MUST NOT enable reporting, authenticate, or start a network dia
 
 ## C26: Provider login
 
+Status: `internal/dalgona/gui/panel` implements every R09 flow per endpoint. It offers `browserCallback` only on the local endpoint. It polls status bound to the transaction and connection generation. It cancels closed or late flows through `Panels.Settle`.
+
 The panel MUST list providers and supported methods from `dalgona/auth/providers`.
 It MUST use provider targets with the exact identifiers from that response.
 API-key providers MUST offer a masked editable field and explicit submit.
@@ -763,7 +835,7 @@ Authentication MUST use the generalized `dalgona/auth` methods in [native protoc
 An API-key flow MUST start with `flow:"apiKey"` and no `callbackMode`, then submit the protected field to the returned transaction.
 It MUST NOT open a browser or allocate a callback listener.
 Other flows MUST use the exact callback variant in R09. The panel MUST NOT invent a callback mode for a direct-key flow.
-Every status update MUST match the flow identifier and connection generation.
+Every status update MUST match the flow identifier, `EndpointID`, and connection generation.
 Callback-based remote OAuth MUST use an offered device or manual variant when the backend callback is unreachable from the desktop.
 Offered callback-free flows remain available without that fallback.
 The panel MUST NOT present a remote loopback URL as a local callback listener.
@@ -783,39 +855,58 @@ External browser authorization remains a deliberate platform action under [nativ
 
 ## C27: Resume and search
 
-The panel MUST use C02 paging and filter title, preview, and identifier immediately.
+Status: `internal/dalgona/gui/panel` implements the lanes, the immediate filter, and the per-endpoint search.
+
+The panel MUST use C02 paging within each lane and filter title, preview, identifier, and endpoint immediately.
+Each local or remote result MUST retain `(EndpointID, threadId)` as its identity.
+Equal thread identifiers on different endpoints MUST remain separate results.
 A query MUST start conversation search after 300 milliseconds only when it contains at least one Unicode-whitespace-separated term.
 Every term MUST contain at least three Unicode scalars. Padding and separators MUST NOT satisfy that minimum.
 Eligibility MUST remain separate from the value. Search MUST send the unchanged query.
 `ab ` and `abc de` MUST remain local filters. ` abc ` MUST search with its spaces preserved.
+An eligible query MUST run independently on every connected endpoint.
+An offline lane MAY filter its retained local results but MUST NOT use another endpoint for its remote search.
 Derived matching keys MUST NOT replace field text, result identities, or source offsets.
-Each new keystroke MUST cancel the previous search and clear its results.
-Earlier-connection results MUST be discarded.
-Matches in conversations MUST show each matching title and snippet.
+Each new keystroke MUST cancel every previous per-endpoint search and clear their results.
+Results from an earlier generation of the same endpoint MUST be discarded.
+Results from another endpoint MUST NOT replace a result with an equal thread identifier.
+Matches in conversations MUST show each matching endpoint, title, and snippet.
 The search MUST NOT require downloading every transcript to the desktop.
 
-No matches MUST say `No conversation mentions this text.`
-A failure MUST show `Search failed: <cause>.` and Try again.
-Selecting a result MUST retain the panel until opening completes.
-While opening, choices MUST be disabled and the panel MUST show `Opening thread`.
+After every applicable search succeeds without a match, the panel MUST say `No conversation mentions this text.`
+A failure MUST name its endpoint.
+The panel MUST show `Search failed: <cause>.`
+It MUST offer Try again for that endpoint.
+A failure MUST NOT count as a matchless success.
+Selecting a result MUST retain the panel until opening completes on the result's endpoint.
+While opening, choices MUST be disabled and the panel MUST show the endpoint and `Opening thread`.
 Success MUST close the panel.
 Failure MUST preserve the filter and results for recovery.
 If a focused choice disappears, focus MUST return to the filter.
 
 ## C28: New thread
 
+Status: `internal/dalgona/gui/panel` implements `Run on`, the native folder chooser through `Panels.FolderChosen`, and remote path entry.
+
 The panel MUST expose the selected model and working directory before creation.
+It MUST provide a manual `Run on` choice listing every configured endpoint.
+When a thread is on screen, `Run on` MUST default to that thread's `EndpointID`.
+Changing `Run on` MUST NOT disconnect or reconnect another endpoint.
+The start operation MUST connect an `Idle` target on first use within the transport cap.
 A local directory chooser MUST use the native platform dialog.
-Remote creation MUST offer explicit working-directory path entry in the selected endpoint's path syntax.
+Remote creation MUST offer explicit working-directory path entry in the chosen endpoint's path syntax.
 The start operation MUST validate that path under the existing backend contract.
 Runner-aware directory browsing becomes available through C48 after thread creation.
 The client MUST NOT silently substitute its own local working directory for a remote path.
-The panel MUST show the effective runner, approval mode, and sandbox when known.
-Creation MUST call `thread/start` with validated values.
-Success MUST use the authoritative returned thread and top-level directory.
+The panel MUST show the chosen endpoint, effective runner, approval mode, and sandbox when known.
+Creation MUST call `thread/start` through the chosen endpoint session with validated values.
+Success MUST return a thread keyed by that `EndpointID` and the authoritative returned thread identifier.
+It MUST use the authoritative returned thread and top-level directory.
 Failure MUST retain the selections and provide a specific retry path.
 
 ## C29: Context compaction
+
+Status: `internal/dalgona/gui/panel` implements this panel.
 
 The panel MUST explain that earlier turns remain in the journal.
 It MUST require the explicit Compact action.
@@ -826,6 +917,8 @@ Failure MUST remain in the panel.
 
 ## C30: Fork
 
+Status: `internal/dalgona/gui/panel` implements this panel.
+
 The panel MUST present C22 turns and require a selected turn.
 Fork MUST call `thread/fork` with that exact source thread and turn.
 Success MUST open the returned thread.
@@ -833,6 +926,8 @@ It MUST preserve the source thread's history.
 Failure MUST retain the selected turn and source identity.
 
 ## C31: Branch tree
+
+Status: `internal/dalgona/gui/panel` implements this panel.
 
 The panel MUST show turn previews, parent relationships, and the active leaf.
 It MUST remain a compact branch-navigation surface rather than a permanent graph dashboard.
@@ -843,6 +938,8 @@ The panel MUST NOT imply that changing the leaf restores workspace files.
 
 ## C32: Rewind
 
+Status: `internal/dalgona/gui/panel` implements the panel. C35 opens it with the turn of its user message.
+
 The panel MUST identify the selected user turn and its preview.
 It MUST explain that rewind changes the conversation path and does not revert workspace files.
 Only explicit confirmation MAY call `thread/revert`.
@@ -852,6 +949,8 @@ Failure MUST retain the target and explanation.
 
 ## C33: Advisor
 
+Status: `internal/dalgona/gui/panel` implements this panel.
+
 The panel MUST show every advisor's name, model, and current state.
 Loading, unavailable, and unattached states MUST remain distinct.
 It MUST offer turning the advisor on or off and resetting it through existing advisor methods.
@@ -860,6 +959,8 @@ Failures MUST remain in the panel.
 Advisor notes MUST use C41 in the transcript.
 
 ## C34: Start change review
+
+Status: `internal/dalgona/gui/panel` implements this panel with the branch and commit grammar of `review/start`.
 
 The panel MUST offer uncommitted changes, base branch, commit, and custom instructions.
 Base branch MUST require a nonempty branch.
@@ -959,8 +1060,8 @@ Plan updates MUST replace the plan without moving transcript focus.
 
 Each child of the open thread MUST appear with title, state, and Open.
 A missing summary MUST display its identifier until metadata arrives.
-Child links MUST remain keyed by parent thread.
-History reconstruction MUST NOT apply another parent's links.
+Child links MUST remain keyed by `(EndpointID, parentThreadId)`.
+History reconstruction MUST NOT apply another parent's links or an equal parent identifier from another endpoint.
 Opening a child MUST preserve a route back to its parent.
 Parent-approved child requests MUST retain the child's request identifier and thread identity.
 Watching both parent and child MUST NOT duplicate requests or transcript updates.
@@ -968,6 +1069,8 @@ The behavior MUST follow [delegation graph](delegation-graph.md) and [native pro
 
 ## C44: Thread management
 
+Every action MUST resolve its target through `(EndpointID, threadId)` and use that endpoint's session.
+Equal thread identifiers on another endpoint MUST remain unaffected.
 The thread menu MUST offer Rename, Archive, and the corresponding archived-thread recovery view.
 Rename MUST show the current title, validate the new title, and call `thread/name/set`.
 Success MUST update the header, navigation, and window title from authoritative state.
@@ -988,23 +1091,41 @@ The GUI MUST NOT offer journal deletion as an archive action.
 
 ## C45: Endpoints and remotes
 
-The remote panel MUST show configured daemon endpoints and the current endpoint.
-It MUST distinguish a remote daemon from a remote execution runner.
-Add and edit MUST validate the endpoint fields through the shared lifecycle package.
+The endpoints panel MUST use the compact common panel and MUST NOT become a permanent column.
+It MUST list the local endpoint and every configured box or daemon remote with its independent phase.
+The phases MUST be `Idle`, `Connecting`, `Connected`, `Reconnecting`, `Offline`, `Incompatible`, and `Failed`.
+Each row MUST show the display label and transport kind while retaining `EndpointID` as its key.
+The panel MUST distinguish a remote daemon from a remote execution runner.
+It MUST support up to 32 configured endpoints without merging their rows or sessions.
+
+Add and edit MUST validate endpoint fields through the shared lifecycle package.
+The shared lifecycle package returns the saved configuration for both box and daemon remotes.
+A `daemon` remote MUST require `url` and `token_file` under [configuration](../../dal/spec/config.md).
+Its URL accepts `https` or `wss`, and the lifecycle owner resolves its `/rpc` endpoint.
 Credentials MUST remain with the shared lifecycle or backend credential owner defined in [native architecture](native-architecture.md).
+The panel MUST NOT display token contents or persist them in GUI restore state.
 The GUI MUST NOT create a second persistent credential store.
 The panel MUST NOT derive remote credentials from transcript or workspace content.
 
-Connect MUST identify the endpoint and show progress, success, or a specific failure.
-Switching endpoints MUST isolate drafts, histories, requests, and credentials by endpoint identity.
-It MUST release old subscriptions without stopping the daemon's running turns.
-Disconnect MUST remove actionable requests and preserve recoverable local drafts.
+Every row MUST provide Connect and Disconnect operations with an explicit target `EndpointID`.
+Connect MUST show that endpoint's progress, success, or specific failure without changing another phase.
+An `Idle` endpoint MUST connect on first use.
+An `Offline` endpoint MUST require explicit Connect before sending resumes.
+Disconnect MUST make only that endpoint offline and its projections read-only.
+It MUST remove only that endpoint's actionable requests and release only its subscriptions.
+It MUST preserve recoverable drafts and MUST NOT stop the daemon's running turns.
 Reconnect MUST use C01 and C07.
 
-Endpoint listing and saving MUST use shared lifecycle `Endpoints` and `SaveRemote` operations.
-Cloud management MUST use shared lifecycle `CloudUp`, `CloudPull`, and `CloudDown` operations.
+A ninth connection MUST follow the idle-eviction and attachment rules in [architecture](native-architecture.md#a07-connection-ownership-and-backpressure).
+If admission succeeds through eviction, the evicted row MUST display `Idle` without a loss message.
+If no session is eligible, the panel MUST report capacity without closing another endpoint.
+Selecting a thread MUST NOT disconnect or reconnect an endpoint.
+Closing this panel MUST NOT change any endpoint's transport.
+
+Endpoint listing and saving MUST use shared lifecycle `Endpoints` and `SaveRemote` operations with explicit targets.
+Cloud management MUST use shared lifecycle `CloudUp`, `CloudPull`, and `CloudDown` operations on box remotes only.
 The panel MUST show the resolved target and requested effect before an explicit mutation.
-Long operations MUST expose progress, cancellation, and authoritative completion.
+Long operations MUST expose progress, cancellation, and authoritative completion for their target only.
 Cloud creation MUST leave credential copying off until the user explicitly selects it.
 Without copying, the created endpoint MUST offer native provider login through C26.
 Cloud removal MUST require confirmation naming its service and box.
@@ -1015,22 +1136,25 @@ These operations MUST follow [native architecture](native-architecture.md) rathe
 
 ## C46: Runners
 
-The runner panel MUST display the current thread's effective mode, endpoint, workspace root, and archive mapping.
-It MUST obtain runner inventory and bindings through `dalgona/remote/status`.
+The runner panel MUST bind the `(EndpointID, threadId)` of the thread from which it opens.
+It MUST display that thread's effective mode, endpoint, workspace root, and archive mapping.
+It MUST obtain runner inventory and bindings through `dalgona/remote/status` on that endpoint's session.
+It MUST NOT resolve an equal thread identifier through another endpoint.
 It MUST distinguish local execution, remote archive execution, and a remote daemon.
-Configuration changes MUST state whether they affect future threads or the selected active thread.
+Configuration changes MUST state whether they affect future threads or the open thread on that endpoint.
 The [runner contract](runners.md) remains authoritative for mode behavior.
 
-Pull MUST use `dalgona/remote/pull` and show its target, progress, changed paths, and failures.
-The client MUST use structured results negotiated through capabilities.
+Pull MUST use `dalgona/remote/pull` on that endpoint and show its target, progress, changed paths, and failures.
+The client MUST key progress and structured results by `EndpointID` and operation identifier.
+It MUST use structured results negotiated through capabilities.
 It MUST NOT parse human terminal output as an RPC schema.
 Pull MUST explain that applying the diff changes the destination workspace.
 Three-way conflicts MUST retain and list the resulting conflicted paths.
 The result MUST NOT promise automatic rollback or a clean workspace after a conflict.
-Garbage collection MUST use `dalgona/remote/gc`.
-Its confirmation MUST identify the runner and removal scope.
+Garbage collection MUST use `dalgona/remote/gc` on that endpoint.
+Its confirmation MUST identify the endpoint, runner, and removal scope.
 Success MUST report the authoritative result rather than assume every candidate was removed.
-File and terminal actions MUST use the selected runner's workspace mapping.
+File and terminal actions MUST use the owning thread's runner workspace mapping.
 
 ## C47: MCP servers
 
@@ -1059,17 +1183,25 @@ Save results MUST identify servers requiring restart or authentication.
 Authentication MUST use `dalgona/auth` with the exact MCP target.
 The panel MUST support browser, device, or manual methods advertised by that target.
 It MUST expose cancellation, retry, status, and logout.
-Server tool discovery MUST remain scoped to the selected thread's effective registry.
+The panel session MUST retain the `(EndpointID, threadId)` of its invoking thread.
+Configuration and authentication operations MUST use that thread's endpoint session.
+Server tool discovery MUST remain scoped to that thread's effective registry.
+Equal server names or thread identifiers on another endpoint MUST remain independent.
 This panel MUST retain the existing tools-only MCP scope.
 Refresh MUST report a specific discovery failure without claiming an empty registry.
 No required authentication path MAY be replaced by a terminal-only instruction.
 
 ## C48: Workspace files
 
-The files panel MUST provide runner-aware directory navigation and a compact file viewer or editor.
-It MUST open the selected thread's workspace through `dalgona/workspace/open`.
+The files panel MUST bind `(EndpointID, threadId)` for its invoking thread.
+It MUST provide runner-aware directory navigation and a compact file viewer or editor.
+It MUST open that thread's workspace through `dalgona/workspace/open` on the owning endpoint session.
 Listing, metadata, reads, writes, and mutations MUST use the workspace methods in [native protocol](native-protocol.md).
-Remote paths MUST remain remote and MUST NOT be resolved through desktop filesystem APIs.
+Every handle, path, watch, draft, and result MUST retain its `EndpointID`.
+Equal thread identifiers or textual paths on another endpoint MUST identify different resources.
+Remote paths MUST remain remote and MUST NOT resolve through desktop filesystem APIs.
+An offline remote MUST NOT fall back to the local file system.
+Only that endpoint's views MUST become read-only while other endpoint panels remain live.
 Directory rows MUST show type, name, and useful size or modification details.
 The panel MUST support parent navigation, path entry, refresh, and filename filtering.
 
@@ -1077,31 +1209,41 @@ Text files MUST support bounded loading, selection, search, editing, Save, and S
 Images MUST use the native image viewer.
 Binary files MUST show metadata and offer explicit export without guessed text decoding.
 Encoding failures MUST preserve the original bytes and explain why editing is unavailable.
-Saving MUST use the loaded revision and detect concurrent changes.
+Saving MUST use the loaded revision and detect concurrent changes on the same endpoint.
 A conflict MUST show the changed versions and require an explicit resolution.
 
-Create file, create directory, rename, and remove MUST use their named workspace methods.
-Remove MUST identify its path and recursive scope before confirmation.
+Create file, create directory, rename, and remove MUST use their named workspace methods on the owning endpoint.
+Remove MUST identify its endpoint, path, and recursive scope before confirmation.
 Watch updates MUST refresh visible metadata without replacing an unsaved buffer.
 An unsaved file MUST require Save, Discard, or Cancel before closing or changing its target.
 Closing or changing the view MUST release its local workspace interest after that decision and completion of its owned operations.
-The shared owner MUST call `dalgona/workspace/close` only after the final interest and terminal attachment are released.
-Another window, completion request, running command, or terminal MUST retain its own interest.
-An in-flight mutation MUST be reconciled before the handle is released. A `busy` response MUST preserve the handle for that cleanup.
+The shared owner MUST key interests by `EndpointID` before counting them.
+It MUST call `dalgona/workspace/close` only after the final interest and terminal attachment are released on that endpoint.
+Another window, completion request, running command, or terminal on that endpoint MUST retain its own interest.
+An in-flight mutation MUST be reconciled before the handle is released.
+A `busy` response MUST preserve the handle for that cleanup.
 Read-only, denied, missing, and disconnected states MUST remain distinct.
-Copy path MUST preserve the workspace's path syntax.
+Copy path MUST preserve the workspace's path syntax and endpoint label.
 Export MUST use a native destination chooser and the bounded transfer contract.
 
 ## C49: Interactive terminal
 
-The terminal panel MUST provide a real terminal attached to the selected thread's runner.
-It MUST use `dalgona/terminal/open`, `attach`, `read`, `write`, `resize`, `close`, and `detach`.
-The panel MUST show the target shell, workspace root, and sandbox state before launch.
+The terminal panel MUST bind `(EndpointID, threadId)` for its invoking thread.
+It MUST provide a real terminal attached to that thread's runner through the owning endpoint session.
+It MUST use `dalgona/terminal/open`, `attach`, `read`, `write`, `resize`, `close`, and `detach` on that connection.
+The panel MUST show the endpoint, target shell, workspace root, and sandbox state before launch.
+Panel, attachment, writer-lease, and checkpoint keys MUST include `EndpointID`.
+Equal terminal identifiers on another endpoint MUST remain distinct.
 The protocol MUST carry the authoritative terminal identifier and stream position.
 The desktop MUST NOT substitute `command/exec` for interactive operation.
+Transport loss MUST stop input only for that endpoint's terminals while other endpoint sessions remain live.
 The renderer and terminal emulator MUST follow [native documents](native-documents.md).
 
 Terminal input MUST own ordinary keys while its viewport has focus.
+Tab and Shift+Tab MUST go to the terminal program while its viewport has focus.
+Ctrl+Tab MUST move focus from the viewport to the next control in the panel.
+Ctrl+Shift+Tab MUST move focus from the viewport to the previous control in the panel.
+The terminal MUST NOT send Ctrl+Tab or Ctrl+Shift+Tab to the terminal program.
 It MUST support text selection, copy, paste, scrollback, resize, and reported exit state.
 Composer interrupt shortcuts MUST NOT intercept terminal escape sequences.
 Paste MUST preserve bracketed-paste behavior when the terminal requests it.
@@ -1111,17 +1253,19 @@ The platform contract MUST define explicit clipboard handling.
 Explicitly closing the panel MUST release its attachment through `dalgona/terminal/detach` without claiming the process exited.
 Hiding a retained panel MUST keep its attachment and lease reads.
 The application MUST retain and renew its owned attachment while that terminal remains open.
-Stop terminal MUST explicitly close the identified terminal process through the server.
+Stop terminal MUST explicitly close the identified terminal process through the owning endpoint server.
 Stop MUST keep the reader until both final cursors are collected, the user releases it, or output retention expires.
 Expiry MUST release local attachment and workspace interests while preserving collected output and identifying any missing tail.
 The UI MUST report a drain timeout as truncated output and display expired output as unavailable.
 The fixed retention deadline MUST NOT be extended by polling, repeated Stop, or reattachment.
-The terminal MUST detach before releasing its workspace reference. Another window's or terminal's workspace interest MUST remain valid.
-Reopening MUST use `dalgona/terminal/list` with a fresh workspace handle.
+The terminal MUST detach before releasing its workspace reference.
+Another window's or terminal's workspace interest on that endpoint MUST remain valid.
+Reopening MUST use `dalgona/terminal/list` with a fresh workspace handle on the same endpoint.
 It MUST offer attachment to still-running terminals within that authorized workspace.
-Reconnect MUST resume from the protocol's stream position or report an output gap.
+Reconnect of that endpoint MUST resume from its protocol stream position or report an output gap.
+It MUST NOT change another endpoint's attachments or stream positions.
 Each reader MUST apply ordered resize records at their output-byte positions and retain both cursors from reads and checkpoints.
-An existing reader recovering from `replay_gap` MUST use `dalgona/terminal/checkpoint/open` without consuming another attachment slot.
+An existing reader recovering `replay_gap` MUST use `dalgona/terminal/checkpoint/open` without consuming another attachment slot.
 A resize acknowledgment MUST NOT change the replicated grid before unread output reaches its resize record.
 It MUST NOT duplicate input after an uncertain write.
 An uncertain terminal input state MUST disable further input while retaining output, copy, and Stop.
@@ -1130,13 +1274,16 @@ The panel MUST show startup failure, disconnection, exit code, and retained outp
 
 ## C50: Diagnostics
 
-The diagnostics panel MUST offer local checks and explicit online checks.
-Disconnected local checks MUST use shared lifecycle `Diagnose`.
-Connected checks MUST use `dalgona/diagnostics/run` with the chosen `online` value.
+The diagnostics panel MUST identify its explicit target `EndpointID`.
+It MUST offer local checks and explicit online checks for that endpoint.
+Disconnected local checks MUST use shared lifecycle `Diagnose` with the same target.
+Connected checks MUST use `dalgona/diagnostics/run` on the target session with the chosen `online` value.
+Results and cancellation MUST remain scoped to that endpoint and operation.
+Other endpoint sessions MUST remain unaffected.
 The panel MUST explain which checks contact providers or remote services before online execution.
 Opening the panel MUST NOT start those checks automatically.
 
-Results MUST retain the ordered doctor rows, states, details, and remediation text.
+Results MUST retain the target endpoint, ordered doctor rows, states, details, and remediation text.
 The [doctor contract](doctor.md) defines their meaning.
 The panel MUST support rerun, copy, and export of masked diagnostics.
 It MUST identify partial completion and cancellation.
@@ -1145,8 +1292,11 @@ A recommended repair MUST remain a separate explicit operation with its own resu
 
 ## C51: Failures and reporting
 
-The failures panel MUST list and read masked records through `dalgona/failures/list` and `dalgona/failures/read`.
-It MUST show the record time, kind, status, and available excerpt.
+The failures panel MUST identify its explicit target `EndpointID` and use only that endpoint session.
+Its records, reporting state, consent, operations, and cached results MUST remain partitioned by that identity.
+An endpoint failure MUST NOT alter another endpoint's records or reporting controls.
+The failures panel MUST list and read masked records through `dalgona/failures/list` and `dalgona/failures/read` on its target.
+It MUST show the endpoint, record time, kind, status, and available excerpt.
 Viewing or exporting a record MUST NOT enable publication.
 The record viewer MUST preserve masking and identify unavailable or removed content.
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -51,13 +52,13 @@ func TestThreadInfoModelFollowsLeafBackToOverrideBranch(t *testing.T) {
 	h.waitIdle(thread)
 	override := turnIDs(h.events(thread.ID()))[1]
 	expectModel(t, h, thread, "openai/gpt-y")
-	if err := thread.Revert(override); err != nil {
+	if err := thread.Revert(t.Context(), override); err != nil {
 		t.Fatal(err)
 	}
 	h.submit(thread, "three")
 	h.waitIdle(thread)
 	expectModel(t, h, thread, "openai/gpt-test")
-	if err := thread.SetLeaf(override); err != nil {
+	if err := thread.SetLeaf(t.Context(), override); err != nil {
 		t.Fatal(err)
 	}
 	expectModel(t, h, thread, "openai/gpt-y")
@@ -230,4 +231,65 @@ func TestToolSetBuildDoesNotBlockSubmit(t *testing.T) {
 		h.waitIdle(thread)
 		expectOneToolset(t, thread, "openai/gpt-z")
 	})
+}
+
+func TestExistingThreadRefreshesToolsetAfterMCPGenerationChanges(t *testing.T) {
+	t.Parallel()
+	var generation atomic.Uint64
+	h := newHarness(t, func(h *harness) {
+		h.cfg.ToolsGeneration = generation.Load
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			name := "mcp_before"
+			if generation.Load() != 0 {
+				name = "mcp_after"
+			}
+			return []tool.Tool{stubTool{name: name, class: tool.ClassRemote}}, nil
+		}
+	})
+	thread := h.start()
+	if err := thread.ensureTools(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := thread.currentTools().lookup("mcp_before"); !found {
+		t.Fatal("the initial toolset did not include the original MCP tool")
+	}
+	generation.Add(1)
+	if err := thread.ensureTools(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	requireRefreshedMCPTools(t, thread.currentTools())
+}
+
+func TestThreadToolsetDiscardsBuildWithStaleMCPGeneration(t *testing.T) {
+	t.Parallel()
+	var generation atomic.Uint64
+	h := newHarness(t, func(h *harness) {
+		h.cfg.ToolsGeneration = generation.Load
+		h.cfg.Tools = func(context.Context, string, string) ([]tool.Tool, error) {
+			name := "mcp_after"
+			if generation.CompareAndSwap(0, 1) {
+				name = "mcp_before"
+			}
+			return []tool.Tool{stubTool{name: name, class: tool.ClassRemote}}, nil
+		}
+	})
+	thread := h.start()
+	tools, err := thread.toolsFor(t.Context(), h.cfg.Config.Model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireRefreshedMCPTools(t, tools)
+	if tools != thread.currentTools() {
+		t.Fatal("the returned toolset was not published")
+	}
+}
+
+func requireRefreshedMCPTools(t *testing.T, tools *toolset) {
+	t.Helper()
+	if _, found := tools.lookup("mcp_before"); found {
+		t.Fatal("the toolset still exposes the old MCP tool")
+	}
+	if _, found := tools.lookup("mcp_after"); !found {
+		t.Fatal("the toolset does not expose the MCP tool after reload")
+	}
 }

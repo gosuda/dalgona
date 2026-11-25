@@ -4,6 +4,12 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import NoticeStack from "#lib/components/NoticeStack.svelte";
 import { appliedRule, ruleSelectors } from "#lib/css-rule.ts";
 
+function elementStyle(id: string): CSSStyleDeclaration {
+	const element = document.getElementById(id);
+	if (!element) throw new Error(`no element has id ${id}`);
+	return getComputedStyle(element);
+}
+
 describe("button type", () => {
 	const selector =
 		"button:not(.thread, .thread-choice, .model-button, .request-actions button)";
@@ -80,9 +86,7 @@ describe("button hover", () => {
 		try {
 			document.body.innerHTML =
 				'<button id="disabled-control" aria-disabled="true">Disabled</button>';
-			const style = getComputedStyle(
-				document.getElementById("disabled-control")!,
-			);
+			const style = elementStyle("disabled-control");
 			expect(style.color).toBe("rgb(1, 2, 3)");
 			expect(style.borderColor).toBe("rgb(4, 5, 6)");
 		} finally {
@@ -105,11 +109,11 @@ describe("disabled point button", () => {
 		try {
 			document.body.innerHTML =
 				'<button id="busy-point" class="point" aria-disabled="true">Save</button><button id="live-point" class="point">Save</button>';
-			const busy = getComputedStyle(document.getElementById("busy-point")!);
+			const busy = elementStyle("busy-point");
 			expect(busy.color).toBe("rgb(1, 2, 3)");
 			expect(busy.borderColor).toBe("rgb(4, 5, 6)");
 			expect(busy.backgroundColor).toBe("rgb(7, 8, 9)");
-			const live = getComputedStyle(document.getElementById("live-point")!);
+			const live = elementStyle("live-point");
 			expect(live.color).toBe("rgb(13, 14, 15)");
 			expect(live.backgroundColor).toBe("rgb(10, 11, 12)");
 		} finally {

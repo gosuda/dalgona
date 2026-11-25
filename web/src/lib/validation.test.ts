@@ -54,6 +54,45 @@ describe("notification validation", () => {
 		});
 	});
 
+	it("keeps only a warning that names a request", () => {
+		expect(
+			parseNotification({
+				method: "warning",
+				params: { message: "The sandbox is not available.", threadId: null },
+			}),
+		).toBeNull();
+		expect(
+			parseNotification({
+				method: "warning",
+				params: {
+					message: "invalid text",
+					threadId: "thread-1",
+					requestId: 7,
+					reason: "text_too_large",
+				},
+			}),
+		).toBeNull();
+		expect(
+			parseNotification({
+				method: "warning",
+				params: {
+					message: "invalid text",
+					threadId: "thread-1",
+					requestId: 7,
+					reason: "disallowed_control",
+					field: "answers.q1.answers[0]",
+				},
+			}),
+		).toEqual({
+			type: "requestWarning",
+			threadId: "thread-1",
+			requestId: 7,
+			field: "answers.q1.answers[0]",
+			reason: "disallowed_control",
+			message: "invalid text",
+		});
+	});
+
 	it("rejects a delta without a string item id", () => {
 		expect(
 			parseNotification({
@@ -361,6 +400,84 @@ describe("notification validation", () => {
 				params({ last: { ...breakdown, inputTokens: "5" }, total: breakdown }),
 			),
 		).toBeNull();
+	});
+});
+
+describe("output spill validation", () => {
+	const completedCommand = (outputSpill: unknown) =>
+		parseNotification({
+			method: "item/completed",
+			params: {
+				threadId: "thread-1",
+				turnId: "turn-1",
+				completedAtMs: 3,
+				item: {
+					type: "commandExecution",
+					id: "cmd-1",
+					command: "cat big.txt",
+					aggregatedOutput: "preview",
+					status: "completed",
+					exitCode: 0,
+					durationMs: 5,
+					...(outputSpill === undefined ? {} : { outputSpill }),
+				},
+			},
+		});
+
+	it("accepts a command result without an output spill", () => {
+		expect(completedCommand(undefined)).toEqual({
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: {
+				id: "cmd-1",
+				kind: "commandExecution",
+				command: "cat big.txt",
+				output: "preview",
+				status: "completed",
+				exitCode: 0,
+				durationMs: 5,
+			},
+		});
+	});
+
+	it("accepts a well-formed output spill", () => {
+		const spill = { path: "blobs/abc", bytes: 8, sha256: "0".repeat(64) };
+		expect(completedCommand(spill)).toEqual({
+			type: "itemCompleted",
+			threadId: "thread-1",
+			turnId: "turn-1",
+			item: {
+				id: "cmd-1",
+				kind: "commandExecution",
+				command: "cat big.txt",
+				output: "preview",
+				status: "completed",
+				exitCode: 0,
+				durationMs: 5,
+				spill,
+			},
+		});
+	});
+
+	it("rejects an output spill with a string byte count", () => {
+		expect(() =>
+			completedCommand({
+				path: "blobs/abc",
+				bytes: "8",
+				sha256: "0".repeat(64),
+			}),
+		).toThrow("invalid item");
+	});
+
+	it("rejects an output spill without a sha256", () => {
+		expect(() => completedCommand({ path: "blobs/abc", bytes: 8 })).toThrow(
+			"invalid item",
+		);
+	});
+
+	it("rejects a non-object output spill", () => {
+		expect(() => completedCommand("blobs/abc")).toThrow("invalid item");
 	});
 });
 

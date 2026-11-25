@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/remove params",
+  "type": "object",
+  "required": [
+    "workspaceId",
+    "path",
+    "expectedRevision",
+    "recursive",
+    "operationId"
+  ],
+  "properties": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "expectedRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "recursive": {
+      "type": "boolean"
+    },
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

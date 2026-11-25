@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/mkdir params",
+  "type": "object",
+  "required": [
+    "workspaceId",
+    "path",
+    "recursive",
+    "operationId"
+  ],
+  "properties": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "recursive": {
+      "type": "boolean"
+    },
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

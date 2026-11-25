@@ -46,8 +46,10 @@ const (
 const MaxInlineBytes = 64 << 10
 
 const (
-	MaxImages     = 10
-	MaxImageBytes = 5 << 20
+	MaxImages         = 10
+	MaxImageBytes     = 5 << 20
+	MaxImageNameBytes = 4096
+	MaxImageAltBytes  = 4096
 )
 
 const MaxProjectionBytes = MaxInlineBytes + 4<<10
@@ -75,9 +77,11 @@ type Mention struct {
 }
 
 type Image struct {
-	Mime string
-	Path string
-	Blob BlobRef
+	Mime    string
+	Path    string
+	Name    string
+	AltText string
+	Blob    BlobRef
 }
 
 type ToolCall struct {
@@ -144,6 +148,9 @@ type SessionCreated struct {
 	InstructionsBlob *BlobRef
 	Advisor          string
 	CreatedAt        time.Time
+	Operation        string
+	ReadOnly         bool
+	Profile          string
 }
 
 func (SessionCreated) Type() string { return TypeSessionCreated }
@@ -167,7 +174,7 @@ func (e SessionCreated) Validate() error {
 	if e.Advisor != "" && e.Parent == "" {
 		return errors.New("advisor session needs a parent")
 	}
-	return validateBlob("instructions_blob", e.InstructionsBlob)
+	return errors.Join(validateBlob("instructions_blob", e.InstructionsBlob), validateOperation(e.Operation))
 }
 
 type RunnerBound struct {
@@ -216,6 +223,7 @@ type TurnCompleted struct {
 	Status      string
 	Error       string
 	CompletedAt time.Time
+	Operation   string
 }
 
 func (TurnCompleted) Type() string { return TypeTurnCompleted }
@@ -223,7 +231,7 @@ func (e TurnCompleted) Validate() error {
 	if err := required(map[string]string{"turn_id": e.TurnID}); err != nil {
 		return err
 	}
-	return oneOf("status", e.Status, "completed", "interrupted", "failed")
+	return errors.Join(oneOf("status", e.Status, "completed", "interrupted", "failed"), validateOperation(e.Operation))
 }
 
 type TurnRecovery struct {
@@ -240,19 +248,20 @@ func (e TurnRecovery) Validate() error {
 }
 
 type UserMessage struct {
-	ItemID   string
-	TurnID   string
-	Text     string
-	TextBlob *BlobRef
-	Kind     string
-	Notices  []Notice
-	Mentions []Mention
-	Images   []Image
-	Effort   string
-	Model    string
-	Approval string
-	Sandbox  string
-	Verbatim bool
+	ItemID    string
+	TurnID    string
+	Text      string
+	TextBlob  *BlobRef
+	Kind      string
+	Notices   []Notice
+	Mentions  []Mention
+	Images    []Image
+	Effort    string
+	Model     string
+	Approval  string
+	Sandbox   string
+	Verbatim  bool
+	Operation string
 }
 
 func (UserMessage) Type() string { return TypeUserMessage }
@@ -278,7 +287,7 @@ func (e UserMessage) Validate() error {
 	if e.Verbatim && len(e.Notices)+len(e.Mentions) > 0 {
 		return errors.New("a verbatim message must not have notices or mentions")
 	}
-	return e.validateSettings()
+	return errors.Join(e.validateSettings(), validateOperation(e.Operation))
 }
 
 func (e UserMessage) validateSettings() error {
@@ -348,6 +357,12 @@ func validateImage(i int, image Image) error {
 	}
 	if err := validSHA("image", image.Blob.Blob); err != nil {
 		return fmt.Errorf("images[%d]: %w", i, err)
+	}
+	if len(image.Name) > MaxImageNameBytes {
+		return fmt.Errorf("images[%d]: name exceeds %d bytes", i, MaxImageNameBytes)
+	}
+	if len(image.AltText) > MaxImageAltBytes {
+		return fmt.Errorf("images[%d]: alt_text exceeds %d bytes", i, MaxImageAltBytes)
 	}
 	return nil
 }
@@ -569,6 +584,7 @@ type Compaction struct {
 	Method       string
 	TokensBefore int
 	TokensAfter  int
+	Operation    string
 }
 
 func (Compaction) Type() string { return TypeCompaction }
@@ -576,7 +592,7 @@ func (e Compaction) Validate() error {
 	if e.FirstKeptSeq == 0 || e.Summary == "" || e.TokensBefore < 0 || e.TokensAfter < 0 {
 		return errors.New("compaction needs first_kept_seq, summary, and non-negative token counts")
 	}
-	return oneOf("method", e.Method, "auto", "manual", "overflow")
+	return errors.Join(oneOf("method", e.Method, "auto", "manual", "overflow"), validateOperation(e.Operation))
 }
 
 type ContextPruned struct {
@@ -628,11 +644,14 @@ func sortedNames(member string, names []string) error {
 	return nil
 }
 
-type Branch struct{ ParentSeq uint64 }
+type Branch struct {
+	ParentSeq uint64
+	Operation string
+}
 
 func (Branch) Type() string { return TypeBranch }
-func (Branch) Validate() error {
-	return nil
+func (e Branch) Validate() error {
+	return validateOperation(e.Operation)
 }
 
 type ScriptStarted struct {
@@ -744,23 +763,59 @@ func (e AdvisorNote) Render() string {
 		html.EscapeString(e.Note) + `</advisory>`
 }
 
-const MaxThreadNameBytes = 1024
+const (
+	MaxThreadNameBytes = 1024
+	MaxOperationBytes  = 128
+)
 
-type ThreadNamed struct{ Name string }
+type ThreadNamed struct {
+	Name      string
+	Operation string
+}
 
 func (ThreadNamed) Type() string { return TypeThreadNamed }
 func (e ThreadNamed) Validate() error {
 	if len(e.Name) > MaxThreadNameBytes {
 		return errors.New("thread name exceeds 1 KiB")
 	}
+	return validateOperation(e.Operation)
+}
+
+func validateOperation(id string) error {
+	if len(id) > MaxOperationBytes {
+		return fmt.Errorf("operation_id exceeds %d bytes", MaxOperationBytes)
+	}
 	return nil
 }
 
-type ThreadArchived struct{ Archived bool }
+type ThreadArchived struct {
+	Archived  bool
+	Operation string
+}
 
 func (ThreadArchived) Type() string { return TypeThreadArchived }
-func (ThreadArchived) Validate() error {
-	return nil
+func (e ThreadArchived) Validate() error {
+	return validateOperation(e.Operation)
+}
+
+func OperationOf(e Event) string {
+	switch value := e.(type) {
+	case SessionCreated:
+		return value.Operation
+	case UserMessage:
+		return value.Operation
+	case TurnCompleted:
+		return value.Operation
+	case ThreadNamed:
+		return value.Operation
+	case Compaction:
+		return value.Operation
+	case Branch:
+		return value.Operation
+	case ThreadArchived:
+		return value.Operation
+	}
+	return ""
 }
 
 const (

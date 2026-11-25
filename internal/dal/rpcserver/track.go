@@ -23,7 +23,12 @@ const (
 	methodTurnCompleted = "turn/completed"
 	methodItemStarted   = "item/started"
 	methodItemCompleted = "item/completed"
+	fieldText           = "text"
+	fieldContent        = "content"
+	fieldArguments      = "arguments"
 )
+
+type fieldBlobs map[string]*event.BlobRef
 
 type sink interface {
 	turn(method string, turn rpc.Turn)
@@ -55,6 +60,8 @@ type tracker struct {
 	cost       costTally
 	seq        uint64
 	statusSeq  uint64
+	deferred   bool
+	blobs      map[string]fieldBlobs
 }
 
 type costTally struct {
@@ -68,7 +75,7 @@ func newTracker(threadID string, load func(*event.BlobRef) ([]byte, error), chil
 		threadID: threadID, load: load, childCwd: childCwd, keywords: keywords, log: log,
 		items: map[string]*rpc.Item{}, calls: map[string]event.ToolCall{}, classes: map[string]string{},
 		approvals: map[string]string{}, declined: map[string]bool{},
-		callAt: map[string]time.Time{},
+		callAt: map[string]time.Time{}, blobs: map[string]fieldBlobs{},
 	}
 }
 
@@ -104,6 +111,28 @@ func (t *tracker) apply(seq uint64, ev event.Event) {
 	}
 }
 
+type sourcedCollector struct {
+	*collector
+	tracker *tracker
+	kept    map[string]fieldBlobs
+}
+
+func (c sourcedCollector) item(method, turnID string, it *rpc.Item) {
+	if refs := c.tracker.blobs[it.ID]; refs != nil {
+		c.kept[it.ID] = refs
+	}
+	c.collector.item(method, turnID, it)
+}
+
+func (t *tracker) collectSourced(events []event.Seqd) ([]rpc.Turn, map[string]fieldBlobs) {
+	c := sourcedCollector{collector: &collector{}, tracker: t, kept: map[string]fieldBlobs{}}
+	t.sink = c
+	for _, e := range events {
+		t.apply(e.Seq, e.Event)
+	}
+	return c.result(), c.kept
+}
+
 func (t *tracker) currentTurn() string { return cmp.Or(t.turn, t.lastTurn) }
 
 func (t *tracker) text(text string, blob *event.BlobRef) string {
@@ -125,6 +154,31 @@ func (t *tracker) args(args jsontext.Value, blob *event.BlobRef) jsontext.Value 
 	return jsontext.Value(t.text(string(args), blob))
 }
 
+func (t *tracker) itemText(itemID, field, text string, blob *event.BlobRef) string {
+	if blob == nil || !t.deferred {
+		return t.text(text, blob)
+	}
+	t.keepBlob(itemID, field, blob)
+	return text
+}
+
+func (t *tracker) itemArgs(call event.ToolCall) jsontext.Value {
+	if call.ArgsBlob == nil || !t.deferred {
+		return t.args(call.Args, call.ArgsBlob)
+	}
+	t.keepBlob(call.ID, fieldArguments, call.ArgsBlob)
+	return call.Args
+}
+
+func (t *tracker) keepBlob(itemID, field string, blob *event.BlobRef) {
+	refs := t.blobs[itemID]
+	if refs == nil {
+		refs = fieldBlobs{}
+		t.blobs[itemID] = refs
+	}
+	refs[field] = blob
+}
+
 func (t *tracker) setStatus(kind string, flags ...string) {
 	seq := t.seq
 	if seq <= t.statusSeq {
@@ -139,7 +193,12 @@ func (t *tracker) setStatus(kind string, flags ...string) {
 
 func (t *tracker) startComplete(turnID string, it *rpc.Item) {
 	t.sink.item(methodItemStarted, turnID, it)
+	t.complete(turnID, it)
+}
+
+func (t *tracker) complete(turnID string, it *rpc.Item) {
 	t.sink.item(methodItemCompleted, turnID, it)
+	delete(t.blobs, it.ID)
 }
 
 func (t *tracker) turnStarted(_ uint64, ev event.Event) {
@@ -184,17 +243,24 @@ func (t *tracker) endTurn() {
 	t.turnEffort = nil
 	t.turnAt = time.Time{}
 	clear(t.items)
+	clear(t.blobs)
 }
 
 func (t *tracker) userMessage(_ uint64, ev event.Event) {
 	e, _ := ev.(event.UserMessage)
 	t.modelID = cmp.Or(e.Model, t.modelID)
-	text := t.text(e.Text, e.TextBlob)
+	text := t.itemText(e.ItemID, fieldText, e.Text, e.TextBlob)
 	item := &rpc.Item{Type: rpc.KindUser, ID: e.ItemID, Text: text, Keywords: t.noticeMatches(e, text), Images: itemImages(e.Images)}
 	t.startComplete(e.TurnID, item)
 }
 
 func (t *tracker) noticeMatches(e event.UserMessage, text string) []rpc.KeywordMatch {
+	if len(e.Notices) == 0 {
+		return nil
+	}
+	if e.TextBlob != nil && t.deferred {
+		text = t.text(e.Text, e.TextBlob)
+	}
 	kind := agent.InputKind(cmp.Or(e.Kind, string(agent.InputPrompt)))
 	journaled := make(map[string]bool, len(e.Notices))
 	for _, notice := range e.Notices {
@@ -211,10 +277,9 @@ func (t *tracker) noticeMatches(e event.UserMessage, text string) []rpc.KeywordM
 
 func (t *tracker) assistantMessage(_ uint64, ev event.Event) {
 	e, _ := ev.(event.AssistantMessage)
-	t.finishStream(e.TurnID, rpc.KindReasoning, e.ItemID+reasoningSuffix, t.text(e.Reasoning, e.ReasoningBlob))
-	t.finishStream(e.TurnID, rpc.KindAgent, e.ItemID, t.text(e.Text, e.TextBlob))
+	t.finishStream(e.TurnID, rpc.KindReasoning, e.ItemID+reasoningSuffix, e.Reasoning, e.ReasoningBlob)
+	t.finishStream(e.TurnID, rpc.KindAgent, e.ItemID, e.Text, e.TextBlob)
 	for _, call := range e.ToolCalls {
-		call.Args = t.args(call.Args, call.ArgsBlob)
 		t.calls[call.ID] = call
 	}
 	if !t.addUsage(e) {
@@ -292,10 +357,11 @@ func (t *tracker) usageSnapshot() *rpc.ThreadTokenUsage {
 	return &usage
 }
 
-func (t *tracker) finishStream(turnID, kind, id, text string) {
+func (t *tracker) finishStream(turnID, kind, id, text string, blob *event.BlobRef) {
+	text = t.itemText(id, activeField(kind), text, blob)
 	it, open := t.items[id]
 	if !open {
-		if text == "" {
+		if text == "" && t.blobs[id] == nil {
 			return
 		}
 		it = &rpc.Item{Type: kind, ID: id}
@@ -303,7 +369,7 @@ func (t *tracker) finishStream(turnID, kind, id, text string) {
 	}
 	delete(t.items, id)
 	it.Text = text
-	t.sink.item(methodItemCompleted, turnID, it)
+	t.complete(turnID, it)
 }
 
 func (t *tracker) stream(kind, id string) {
@@ -360,17 +426,20 @@ func (t *tracker) sandboxChosen(_ uint64, ev event.Event) {
 	})
 }
 
-func (t *tracker) toolItem(callID, tool, class string, args jsontext.Value, files []event.FileChange) *rpc.Item {
-	it := &rpc.Item{Type: toolKind(tool, class), ID: callID, Tool: tool, Arguments: args, Status: rpc.StatusInProgress}
+func (t *tracker) toolItem(call event.ToolCall, class string, files []event.FileChange) *rpc.Item {
+	it := &rpc.Item{Type: toolKind(call.Name, class), ID: call.ID, Tool: call.Name, Status: rpc.StatusInProgress}
 	switch it.Type {
 	case rpc.KindCommand:
-		it.Command = argString(args, "command")
-		it.Cwd = cmp.Or(argString(args, "cwd"), t.created.Cwd)
+		it.Arguments = t.args(call.Args, call.ArgsBlob)
+		it.Command = argString(it.Arguments, "command")
+		it.Cwd = cmp.Or(argString(it.Arguments, "cwd"), t.created.Cwd)
+		return it
 	case rpc.KindFileChange:
 		it.Changes = t.fileChanges(files)
 	case rpc.KindMCP:
-		it.Server, it.Tool, _ = strings.Cut(tool, "__")
+		it.Server, it.Tool, _ = strings.Cut(call.Name, "__")
 	}
+	it.Arguments = t.itemArgs(call)
 	return it
 }
 
@@ -418,7 +487,8 @@ func (t *tracker) openCall(callID string) *rpc.Item {
 		return it
 	}
 	call := t.calls[callID]
-	it := t.toolItem(callID, call.Name, t.classes[callID], call.Args, nil)
+	call.ID = callID
+	it := t.toolItem(call, t.classes[callID], nil)
 	if call.Name == "" {
 		return it
 	}
@@ -429,7 +499,8 @@ func (t *tracker) openCall(callID string) *rpc.Item {
 
 func (t *tracker) toolStarted(_ uint64, ev event.Event) {
 	e, _ := ev.(event.ToolStarted)
-	fresh := t.toolItem(e.CallID, e.Tool, e.Class, t.args(e.Args, e.ArgsBlob), e.Files)
+	call := event.ToolCall{ID: e.CallID, Name: e.Tool, Args: e.Args, ArgsBlob: e.ArgsBlob}
+	fresh := t.toolItem(call, e.Class, e.Files)
 	if !e.StartedAt.IsZero() {
 		t.callAt[e.CallID] = e.StartedAt
 	}
@@ -437,7 +508,7 @@ func (t *tracker) toolStarted(_ uint64, ev event.Event) {
 		*it = *fresh
 		return
 	}
-	t.calls[e.CallID] = event.ToolCall{ID: e.CallID, Name: e.Tool, Args: fresh.Arguments}
+	t.calls[e.CallID] = call
 	t.items[e.CallID] = fresh
 	t.sink.item(methodItemStarted, e.TurnID, fresh)
 }
@@ -457,9 +528,10 @@ func (t *tracker) toolCompleted(_ uint64, ev event.Event) {
 	it.Spill = outputSpill(e.Spill)
 	t.finishDuration(it, e.CallID, e.CompletedAt)
 	turnID := t.currentTurn()
-	t.sink.item(methodItemCompleted, turnID, it)
+	argsBlob := t.blobs[e.CallID][fieldArguments]
+	t.complete(turnID, it)
 	if it.Tool == "todo" && e.OK {
-		t.plan(turnID, it.Arguments)
+		t.plan(turnID, t.args(it.Arguments, argsBlob))
 	}
 	delete(t.items, e.CallID)
 	delete(t.calls, e.CallID)

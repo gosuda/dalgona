@@ -23,6 +23,8 @@ A connection MUST run one writer. The writer queue MUST hold at most 4096 messag
 
 The wire supports concurrent requests in both directions. Request identifiers MUST route responses to the waiting caller. The transport MUST close when its stream closes. Calls that wait at that time MUST return a closed-pipe error. Cancellation of a caller context MUST remove the pending request.
 
+A read that fails for another reason MUST log `rpc: read failure`. A transport that this side closed MUST NOT log a read failure, because a terminal client shows a log line on its screen.
+
 ## Schema
 
 Every response and notification in the Codex subset MUST validate against the vendored schema in `internal/dal/rpc/testdata/codex-schema` (Codex commit `c9b4267c370a755da12ec1c8648c2451163212b7`). Extension methods and notifications under `dalgona/` MUST validate against `internal/dal/rpc/testdata/dalgona-schema`. The server encodes every message with `encoding/json/jsontext` or `encoding/json/v2`.
@@ -30,7 +32,13 @@ Every response and notification in the Codex subset MUST validate against the ve
 ## Text inputs
 
 [Input text](input-text.md) defines the shared input contract for GUI, TUI, web, and daemon callers.
-Its new validation and preservation requirements are planned changes, not claims that the inspected runtime already implements them.
+The daemon applies the field checks of `internal/dal/textinput` before any effect of the request.
+`turn/start` and `turn/steer` check every `text` item and the `path` of every `mention`, `skill`, and `localImage` item.
+They finish these checks before they read an image or touch the thread.
+Their field reads `input[<index>].<member>`, where `<index>` counts every input item from zero.
+`review/start` checks `target.title` and `target.instructions`, `thread/name/set` checks `name`, and `account/login/start` checks `apiKey`.
+`dalgona/keywords/match` checks `text` against its byte limit.
+`Thread.Submit` repeats the check on its whole input for callers outside the protocol.
 
 The daemon MUST reject malformed UTF-8 and unpaired JSON surrogate escapes before dispatching a message.
 It MUST NOT enable replacement decoding for user input.
@@ -48,6 +56,28 @@ Malformed JSON MUST use `-32700` instead.
 Method-specific grammar and schema failures retain their declared errors, including invalid paths, unsupported enums, and rejected provider syntax.
 They MUST NOT invent another shared text reason or misclassify a grammar failure as an encoding failure.
 Unknown members retain the schema rule above, but their encoding MUST still be valid JSON text.
+
+The daemon checks text parameters at dispatch, before the method handler and before a receipt reservation.
+The table lists the checked locations. `[i]` is the zero-based index of an array element.
+A string anywhere inside an object or array location reports the field of that location.
+
+|Method|Checked locations|
+|---|---|
+|`thread/start`|`cwd`, `model`, `modelProvider`|
+|`thread/name/set`|`name`|
+|`turn/start`, `turn/steer`|`input[i].text` of a `text` item, `input[i].path` of a `mention`, `skill`, or `localImage` item, `input[i].url` of an `image` item, `model`|
+|`review/start`|`target.title`, `target.instructions`|
+|`config/value/write`|`value`|
+|`config/batchWrite`|`edits[i].value`|
+|`account/login/start`|`apiKey`|
+|`dalgona/keywords/match`|`text`|
+|`dalgona/script/run`|`entry`, `source`, `cwd`, `args`|
+|`dalgona/daltoki/draft/edit`|`title`, `body`|
+|`fs/readFile`, `fs/writeFile`, `fs/createDirectory`, `fs/getMetadata`, `fs/readDirectory`, `fs/remove`, `fs/copy`, `fs/watch`|`path`, `sourcePath`, `destinationPath`, `dataBase64`|
+
+Each location rejects NUL with `disallowed_control`.
+`apiKey` also rejects a line break with `line_break_not_allowed`.
+The `dalgona/keywords/match` `text` limit is 64 KiB. Every other location uses the 16 MiB line limit.
 
 Accepted free text MUST preserve its decoded Unicode scalar sequence.
 The daemon MUST NOT trim, normalize, case-fold, or strip it as a general input cleanup step.
@@ -244,7 +274,7 @@ Any other OS failure MUST give `-32603` with the cause.
 
 ## Server requests
 
-The server sends approval requests only for threads in approval mode `ask`, plus one workspace trust prompt per untrusted workspace. An exec call uses `item/commandExecution/requestApproval`. An edit call uses `item/fileChange/requestApproval`. A workspace trust prompt reuses `item/commandExecution/requestApproval`. It sets `cwd` to the workspace path. It sets `command` to the server commands and env, joined by newlines. It sets `reason` to the full workspace prompt. The request `id` is the approval request id of the journal. `itemId` is the tool call id, empty for workspace trust.
+The server sends approval requests only for threads in approval mode `ask`, plus one workspace trust prompt per untrusted workspace. An exec call uses `item/commandExecution/requestApproval`. An escalated exec call MUST set the extension member `escalated` to `true`, and a sandboxed exec call MUST omit it. An edit call uses `item/fileChange/requestApproval`. A workspace trust prompt reuses `item/commandExecution/requestApproval`. It sets `cwd` to the workspace path. It sets `command` to the server commands and env, joined by newlines. It sets `reason` to the full workspace prompt. The request `id` is the approval request id of the journal. `itemId` is the tool call id, empty for workspace trust.
 
 The server MUST send `item/fileChange/patchUpdated` for the item before an edit approval request. Its `changes` carry the unified diff and the line counts of each file that the call would change. A file over the diff limit has `diffOmitted` set and no counts.
 
@@ -269,6 +299,10 @@ The last three members are optional extensions for other warning uses.
 The message and reason MUST follow the text error contract above.
 The `requestId` MUST name the same pending question.
 The field MUST identify the invalid answer, such as `answers.q1.answers[0]`, without exposing its text.
+The field has the form `answers.<questionId>.answers[<index>]`. The index counts from zero.
+All five members are strings. The `reason` is an input-text reason such as `disallowed_control` or `text_too_large`.
+The `message` is `invalid text: <field>: <reason>`. The `requestId` is the string id of the original `item/tool/requestUserInput` request.
+An exact offered option label skips text validation.
 This warning MUST NOT carry `serverRequest/resolved` or create a journal event.
 
 First-party clients MUST retain the draft and question card until `serverRequest/resolved`, including after sending an answer.
@@ -289,9 +323,13 @@ The existing last-subscriber, interruption, and timeout rules remain unchanged.
 Reconnecting or reopening MUST NOT be promised as recovery, because losing the last subscriber can resolve the question.
 The server MUST NOT accept invalid answer text to preserve that older behavior.
 
-These rules require typed response validation before the current response dispatcher consumes its waiter.
-Retaining the server waiter alone does not provide the required client correction lifecycle.
-They are planned transport work, not a new request method or a new question id scheme.
+The transport validates a typed response before its response dispatcher consumes the waiter.
+`rpc.Conn.CallIDChecked` keeps the waiter, the request id, and the original deadline after a rejected answer.
+`rpc.Conn.CallIDChecked` runs that validation before it removes the waiter. It adds no request method or question id scheme.
+The warning reaches only the connection whose response failed the check.
+`rpc.ClientResponder` gives a client request handler that retained sender.
+A handler that answers through it returns `rpc.ErrResponded`, and the connection then sends nothing more for that request.
+The handler's context ends when `serverRequest/resolved` names its request.
 
 A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
 
@@ -367,6 +405,8 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
   Stdin has no read deadline and accepts at most 1048576 bytes.
   Use `</dev/null` or `ssh -n` to avoid unintended stdin input.
   The client MUST reject malformed UTF-8 before submission, replacing the previous U+FFFD repair behavior.
+  It MUST also reject NUL before submission.
+  Either refusal prints `invalid text: stdin: <reason>; pipe UTF-8 text without NUL`, exits 1, and dials no daemon.
   This is an explicit compatibility tightening under [Input text](input-text.md).
   The existing headless adapter removes trailing CR and LF characters as a documented CLI convenience.
   That transformation MUST NOT apply to GUI, TUI, web, or direct daemon text inputs.

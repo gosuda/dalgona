@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -25,7 +26,7 @@ var (
 )
 
 func (s *server) rpc(w http.ResponseWriter, r *http.Request) {
-	if !s.authorized(r.URL.Query().Get("token")) {
+	if !s.authorized(requestToken(r)) {
 		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
@@ -37,6 +38,10 @@ func (s *server) rpc(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "daemon unavailable", http.StatusBadGateway)
 		return
 	}
+	s.serveRelay(w, r, daemon)
+}
+
+func (s *server) serveRelay(w http.ResponseWriter, r *http.Request, daemon net.Conn) {
 	browser, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		_ = daemon.Close()
@@ -44,6 +49,18 @@ func (s *server) rpc(w http.ResponseWriter, r *http.Request) {
 	}
 	browser.SetReadLimit(maxMessageBytes)
 	s.relay(r.Context(), browser, daemon)
+}
+
+func requestToken(r *http.Request) string {
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return r.URL.Query().Get("token")
+	}
+	scheme, token, found := strings.Cut(header, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return token
 }
 
 func (s *server) dialDaemon(ctx context.Context) (net.Conn, error) {
@@ -97,6 +114,9 @@ func toDaemon(ctx context.Context, browser *websocket.Conn, daemon io.Writer) er
 		}
 		if bytes.IndexByte(line.Bytes(), '\n') >= 0 {
 			return errMessageNewline
+		}
+		if bytes.IndexByte(line.Bytes(), 0) >= 0 {
+			return errBinaryMessage
 		}
 		line.WriteByte('\n')
 		if _, err := daemon.Write(line.Bytes()); err != nil {

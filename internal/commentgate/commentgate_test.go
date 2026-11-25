@@ -28,6 +28,8 @@ var legalNotices []legalRecord
 
 var goAllowed = regexp.MustCompile(`^//(go:(build|embed|generate) [^ ]|nolint:[a-z][a-z0-9,-]* // [^ ])`)
 
+var cgoPreambleLine = regexp.MustCompile(`^// #(cgo [^ ].*|include (<[^<> ]+>|"[^" ]+"))$`)
+
 var skipAnywhere = map[string]bool{
 	".git": true, ".references": true, ".outline": true, ".omp": true, "node_modules": true, ".svelte-kit": true,
 }
@@ -37,30 +39,76 @@ var skipAtRoot = map[string]bool{
 	".build-target": true, ".ruff_cache": true, "bin": true, "dist": true,
 }
 
-var skipPaths = []string{"internal/dal/tui/nomnomljs", "internal/dalgona/webui/dist", "web/src/lib/codex"}
+var skipPaths = []string{"internal/dal/tui/nomnomljs", "internal/dalgona/gui/figure/js", "internal/dalgona/webui/dist", "web/src/lib/codex"}
 
 var scanned = map[string]bool{
 	".go": true, ".ts": true, ".svelte": true, ".py": true,
 	".js": true, ".mjs": true, ".cjs": true, ".jsx": true, ".tsx": true,
 }
 
+type goToken struct {
+	line int
+	tok  token.Token
+	lit  string
+}
+
 func scanGo(path string, src []byte, notices []legalRecord) []finding {
+	tokens := goTokens(path, src)
+	preamble := cgoPreamble(tokens)
+	legal := legalLineSet(path, src, notices)
+	var out []finding
+	for i, t := range tokens {
+		if t.tok != token.COMMENT {
+			continue
+		}
+		allowed := goAllowed.MatchString(t.lit) || legalGoComment(path, t.lit, t.line, legal, notices)
+		if preamble[i] {
+			allowed = cgoPreambleLine.MatchString(t.lit)
+		}
+		if !allowed {
+			out = append(out, finding{path, t.line, t.lit})
+		}
+	}
+	return out
+}
+
+func goTokens(path string, src []byte) []goToken {
 	fset := token.NewFileSet()
 	file := fset.AddFile(path, -1, len(src))
 	var s scanner.Scanner
 	s.Init(file, src, nil, scanner.ScanComments)
-	legal := legalLineSet(path, src, notices)
-	var out []finding
+	var tokens []goToken
 	for {
 		pos, tok, lit := s.Scan()
 		if tok == token.EOF {
-			return out
+			return tokens
 		}
-		line := fset.Position(pos).Line
-		if tok == token.COMMENT && !goAllowed.MatchString(lit) && !legalGoComment(path, lit, line, legal, notices) {
-			out = append(out, finding{path, line, lit})
+		tokens = append(tokens, goToken{fset.Position(pos).Line, tok, lit})
+	}
+}
+
+func cgoPreamble(tokens []goToken) map[int]bool {
+	block := make(map[int]bool)
+	for i := range tokens {
+		if !importsC(tokens, i) {
+			continue
+		}
+		line := tokens[i].line - 1
+		for j := i - 1; j >= 0 && ownLineComment(tokens, j, line); j-- {
+			block[j] = true
+			line--
 		}
 	}
+	return block
+}
+
+func importsC(tokens []goToken, i int) bool {
+	return i+1 < len(tokens) && tokens[i].tok == token.IMPORT && tokens[i+1].tok == token.STRING && tokens[i+1].lit == `"C"`
+}
+
+func ownLineComment(tokens []goToken, j, line int) bool {
+	alone := j == 0 || tokens[j-1].line < tokens[j].line
+	return tokens[j].tok == token.COMMENT && tokens[j].line == line && alone
 }
 
 func legalGoComment(path, lit string, line int, legal map[int]bool, notices []legalRecord) bool {
@@ -487,6 +535,46 @@ func TestScanGo(t *testing.T) {
 				{"otherm.go", 3, "// Copyright 2026 Example Corp."},
 				{"otherm.go", 4, "// Licensed under the MIT License."},
 			},
+		},
+		{
+			name: "cgo preamble",
+			file: "c.go",
+			source: []string{
+				"package c", "", "// #cgo darwin LDFLAGS: -framework AppKit", `// #include "bridge.h"`,
+				"// #include <stdlib.h>", `import "C"`,
+			},
+		},
+		{
+			name: "prose inside a cgo preamble",
+			file: "c.go",
+			source: []string{
+				"package c", "", `// #include "bridge.h"`, "// bridges the AppKit view", "// #include <stdlib.h>", `import "C"`,
+			},
+			want: []finding{{"c.go", 4, "// bridges the AppKit view"}},
+		},
+		{
+			name:   "cgo directive separated from import C",
+			file:   "c.go",
+			source: []string{"package c", "", `// #include "bridge.h"`, "", `import "C"`},
+			want:   []finding{{"c.go", 3, `// #include "bridge.h"`}},
+		},
+		{
+			name:   "cgo directive above another import",
+			file:   "c.go",
+			source: []string{"package c", "", `// #include "bridge.h"`, `import "fmt"`},
+			want:   []finding{{"c.go", 3, `// #include "bridge.h"`}},
+		},
+		{
+			name:   "block comment cgo preamble",
+			file:   "c.go",
+			source: []string{"package c", "", `/* #include "bridge.h" */`, `import "C"`},
+			want:   []finding{{"c.go", 3, `/* #include "bridge.h" */`}},
+		},
+		{
+			name:   "inline C code in a cgo preamble",
+			file:   "c.go",
+			source: []string{"package c", "", "// static int twice(int x) { return 2 * x; }", `import "C"`},
+			want:   []finding{{"c.go", 3, "// static int twice(int x) { return 2 * x; }"}},
 		},
 	}
 	for _, tt := range tests {

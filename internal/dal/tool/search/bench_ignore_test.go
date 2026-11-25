@@ -44,15 +44,15 @@ func BenchmarkIgnoredFileDirOnlyRules(b *testing.B) {
 	paths := ignoreBenchPaths(root, 200000)
 	p50 := benchSamples(b, nil, func() {
 		for _, p := range paths {
-			_ = stack.ignored(p, false)
+			_ = stack.Ignored(p, false)
 		}
 	})
 	b.ReportMetric(p50/float64(len(paths)), "ns/path")
 }
 
-func ignoreStackOf(b *testing.B, root string, rules int) ignoreStack {
+func ignoreStackOf(b *testing.B, root string, rules int) IgnoreRules {
 	b.Helper()
-	var stack ignoreStack
+	var stack IgnoreRules
 	for d := range rules / 5 {
 		dir := filepath.Join(root, fmt.Sprintf("sub%04d", d))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -82,7 +82,7 @@ func BenchmarkIgnoredRuleStack(b *testing.B) {
 			}
 			p50 := benchSamples(b, nil, func() {
 				for _, p := range paths {
-					_ = stack.ignored(p, false)
+					_ = stack.Ignored(p, false)
 				}
 			})
 			b.ReportMetric(p50/float64(len(paths)), "ns/path")

@@ -68,7 +68,7 @@ func (m *model) openHelp() {
 }
 
 func (m *model) questionKey(msg tea.KeyPressMsg, key string) tea.Cmd {
-	if m.input.mode == inputPrompt && m.input.composer.Value() == "" {
+	if m.input.mode == inputPrompt && m.input.composer.empty() {
 		m.openHelp()
 		return nil
 	}
@@ -116,6 +116,10 @@ func (m *model) helpBody() []string {
 		}
 		body = append(body, th.paint(roleDim, fmt.Sprintf("  %-24s", row.keys))+" "+th.paint(roleText, row.action))
 	}
+	if m.conn.machine != "" {
+		body = append(body, "", th.paint(roleDim, "Machines"),
+			th.paint(roleText, "  ctrl+g opens Machines, even during a pending decision"))
+	}
 	body = append(body, "", th.paint(roleDim, "Status"))
 	return append(body, m.statusLegend()...)
 }
@@ -137,7 +141,7 @@ func (m *model) legendLine(seg segment) string {
 func (m *model) legendIconValue(seg segment) (string, string) {
 	icons := m.iconSet()
 	switch seg.id {
-	case "model", "mark", "cost":
+	case "machine", "model", "mark", "cost":
 		return "", strings.TrimSpace(seg.text)
 	case "effort":
 		return seg.text, m.thread.effort

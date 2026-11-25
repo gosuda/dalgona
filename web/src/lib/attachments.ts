@@ -67,7 +67,7 @@ export function messageInput(
 		items.push({ type: "text", text: parts.join("\n\n"), text_elements: [] });
 	}
 	for (const image of attachments.images) {
-		items.push({ type: "image", url: image.dataUrl });
+		items.push({ type: "image", url: image.dataUrl, name: image.name });
 	}
 	return items;
 }

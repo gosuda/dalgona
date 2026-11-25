@@ -1,15 +1,12 @@
 package remote
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -291,32 +288,6 @@ func TestBoxPathMapsThreadCwdToWorkspace(t *testing.T) {
 		if got := l.boxPath(in); got != want {
 			t.Errorf("boxPath(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-func TestCloudMainRefusesCloudflareUp(t *testing.T) {
-	cfg := config.Config{
-		Home:    t.TempDir(),
-		Runners: map[string]config.RunnerSpec{"edge": {Service: "cloudflare", URL: "https://worker.example"}},
-	}
-	var stdout, stderr bytes.Buffer
-	created := 0
-	code := CloudMain(t.Context(), Options{
-		Config: cfg,
-		Services: registryOf(func(context.Context, config.RunnerSpec) (sandboxsvc.Service, error) {
-			created++
-			return nil, errors.New("service factory reached")
-		}),
-	}, []string{"up", "edge"}, IO{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr})
-	if code != 1 {
-		t.Fatalf("CloudMain exit = %d, want 1", code)
-	}
-	wantErr := "cloudflare boxes lose their files when the container stops; use sandbox0, modal, sprites, or docker for fully cloud mode\n"
-	if stderr.String() != wantErr {
-		t.Fatalf("stderr = %q, want %q", stderr.String(), wantErr)
-	}
-	if created != 0 {
-		t.Fatalf("service factory called %d times, want 0", created)
 	}
 }
 

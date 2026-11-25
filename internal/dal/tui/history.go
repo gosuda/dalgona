@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"slices"
 	"strings"
+
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const maxHistory = 200
@@ -40,11 +42,10 @@ func (h *history) saveDraft(draft editor, text string) {
 }
 
 func (h *history) record(text, turnID string, verbatim, replace bool) {
-	text = strings.TrimSpace(sanitizeText(text))
-	if text == "" || strings.Fields(text)[0] == "/login" {
+	verbatim = verbatim && slashStart([]rune(text)) >= 0
+	if textinput.Blank(text) || strings.FieldsFunc(text, textinput.IsWhiteSpace)[0] == "/login" {
 		return
 	}
-	verbatim = verbatim && strings.HasPrefix(text, "/")
 	if n := len(h.entries); n > 0 && h.entries[n-1].text == text {
 		h.repeat(&h.entries[n-1], turnID, verbatim, replace)
 		return
@@ -131,6 +132,7 @@ func (h *history) newer(into *editor) bool {
 		into.text, into.chips = slices.Clone(h.draft.text), slices.Clone(h.draft.chips)
 		into.verbatimText = h.draft.verbatimText
 		into.cursor = len(into.text)
+		into.lead = into.chipsAt(into.cursor)
 		return true
 	}
 	h.recall(into)

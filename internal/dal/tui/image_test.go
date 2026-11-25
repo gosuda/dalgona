@@ -80,8 +80,8 @@ func TestImagePathPasteEndingInCRLeavesOnlyTheChip(t *testing.T) {
 	if got := len(m.input.composer.chips); got != 1 {
 		t.Fatalf("composer holds %d chips, want the image chip", got)
 	}
-	if got := []rune(m.input.composer.Value()); len(got) != 1 {
-		t.Fatalf("composer holds %q, want the chip alone", string(got))
+	if got := draftShown(m); got != "[Image #1 3x2]" {
+		t.Fatalf("composer shows %q, want the image chip alone", got)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestImagePathPasteEndingInLFOrCRLFLeavesOnlyTheChip(t *testing.T) {
 		if got := len(m.input.composer.chips); got != 1 {
 			t.Fatalf("tail %q: composer holds %d chips, want the image chip", tail, got)
 		}
-		if got := []rune(m.input.composer.Value()); len(got) != 1 {
-			t.Fatalf("tail %q: composer holds %q, want the chip alone", tail, string(got))
+		if got := draftShown(m); got != "[Image #1 3x2]" {
+			t.Fatalf("tail %q: composer shows %q, want the image chip alone", tail, got)
 		}
 	}
 }
@@ -358,19 +358,16 @@ func pasteDraft(t *testing.T, m model, content string) model {
 }
 
 func draftShown(m model) string {
-	return m.input.composer.display(m.input.composer.text)
+	return m.input.composer.display()
 }
 
-func assertDraftAndCaret(t *testing.T, m model, want string, caret int) {
+func assertDraftAndCaret(t *testing.T, m model, before, after string) {
 	t.Helper()
-	if got := draftShown(m); got != want {
-		t.Fatalf("composer holds %q, want %q", got, want)
-	}
-	if got := m.input.composer.cursor; got != caret {
-		t.Fatalf("caret at rune %d, want %d", got, caret)
-	}
 	if got := len(m.input.composer.images()); got != 1 {
 		t.Fatalf("composer holds %d image chips, want 1", got)
+	}
+	if got, want := caretShown(t, m), before+"|"+after; got != want {
+		t.Fatalf("draft with the caret typed as | = %q, want %q", got, want)
 	}
 }
 
@@ -403,7 +400,7 @@ func TestImagePathPasteReplacesOnlyThePastedRange(t *testing.T) {
 			m, command := drive(t, m, tea.PasteMsg{Content: strings.ReplaceAll(test.pasted, "%s", path)})
 			m = runCommand(t, m, command, "pasting an image path started no read")
 			before := strings.ReplaceAll(test.before, "%s", path)
-			assertDraftAndCaret(t, m, before+label+test.after, len([]rune(before))+1)
+			assertDraftAndCaret(t, m, before+label, test.after)
 		})
 	}
 }
@@ -417,7 +414,7 @@ func TestImageChipKeepsTextTypedAfterThePasteWhileTheReadRuns(t *testing.T) {
 	m = typeText(t, m, "ok")
 	m = runCommand(t, m, command, "pasting an image path started no read")
 	before := "Reference: " + path + "\nCompare with: "
-	assertDraftAndCaret(t, m, before+"[Image #1 3x2]ok", len([]rune(before))+1+len("ok"))
+	assertDraftAndCaret(t, m, before+"[Image #1 3x2]ok", "")
 }
 
 func TestImageChipGoesToTheCaretWhenTheDraftShiftedBeforeTheRead(t *testing.T) {
@@ -431,7 +428,7 @@ func TestImageChipGoesToTheCaretWhenTheDraftShiftedBeforeTheRead(t *testing.T) {
 	}
 	m = typeText(t, m, "X")
 	m = runCommand(t, m, command, "pasting an image path started no read")
-	assertDraftAndCaret(t, m, "X[Image #1 3x2]Reference: "+path+"\nCompare with: "+path+"\n", 2)
+	assertDraftAndCaret(t, m, "X[Image #1 3x2]", "Reference: "+path+"\nCompare with: "+path+"\n")
 }
 
 func TestImageChipGoesToTheCaretWhenThePastedTextWasEditedBeforeTheRead(t *testing.T) {
@@ -444,7 +441,7 @@ func TestImageChipGoesToTheCaretWhenThePastedTextWasEditedBeforeTheRead(t *testi
 	m = typeText(t, m, "Z")
 	m = runCommand(t, m, command, "pasting an image path started no read")
 	text := "Reference: " + path + "\nCompare with: " + path[:len(path)-1] + "Z"
-	assertDraftAndCaret(t, m, text+"[Image #1 3x2]", len([]rune(text))+1)
+	assertDraftAndCaret(t, m, text+"[Image #1 3x2]", "")
 }
 
 func TestImageSendsTextBeforeImage(t *testing.T) {

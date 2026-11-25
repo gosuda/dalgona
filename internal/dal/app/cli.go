@@ -19,6 +19,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type CLIEnv struct {
@@ -42,6 +43,8 @@ func (env CLIEnv) providerLookup() func(string) (oauth.Provider, bool) {
 }
 
 type Status struct {
+	Endpoint string
+	Remote   string
 	State    string
 	Seq      uint64
 	ThreadID string
@@ -53,13 +56,15 @@ type TUIOptions struct {
 	Stdin          io.Reader
 	Stdout         io.Writer
 	ThreadID       string
+	Latest         bool
 	Model          string
 	Approval       string
 	Sandbox        string
 	Cwd            string
+	ExplicitCwd    bool
 }
 
-type TUIBackend func(ctx context.Context, conn io.ReadWriteCloser, opts TUIOptions) error
+type TUIBackend func(ctx context.Context, opts TUIOptions) error
 
 type cliFlags struct {
 	prompt   string
@@ -200,7 +205,10 @@ func (env CLIEnv) pipedInput() (string, error) {
 	if len(data) > pipedInputLimit {
 		return "", fmt.Errorf("piped input is larger than %d bytes; write it to a file and ask the agent to read it", pipedInputLimit)
 	}
-	return strings.TrimRight(strings.ToValidUTF8(string(data), "\uFFFD"), "\r\n"), nil
+	if err := (textinput.Field{Name: "stdin"}).CheckBytes(data); err != nil {
+		return "", fmt.Errorf("%w; pipe UTF-8 text without NUL", err)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func isTerminal(in io.Reader) bool {
@@ -477,30 +485,17 @@ func (env CLIEnv) models(ctx context.Context) error {
 }
 
 func (env CLIEnv) interactive(ctx context.Context, f cliFlags) error {
-	threadID := f.resume
-	if f.latest {
-		id, err := env.latestThread(ctx)
-		if err != nil {
-			return err
-		}
-		threadID = id
-	}
-	conn, err := env.Dial(ctx)
-	if err != nil {
-		return err
-	}
 	if env.TUI == nil {
-		return errors.Join(errors.New("app: interactive terminal is not wired"), closeQuiet(conn))
+		return errors.New("app: interactive terminal is not wired")
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return errors.Join(err, closeQuiet(conn))
+		return err
 	}
-	runErr := env.TUI(ctx, conn, TUIOptions{
+	return env.TUI(ctx, TUIOptions{
 		OnStatus: env.OnStatus, OnChildSpawned: env.OnChildSpawned, Stdin: env.Stdin, Stdout: env.Stdout,
-		ThreadID: threadID, Model: f.model, Approval: f.approval, Sandbox: f.sandbox, Cwd: cwd,
+		ThreadID: f.resume, Latest: f.latest, Model: f.model, Approval: f.approval, Sandbox: f.sandbox, Cwd: cwd, ExplicitCwd: f.dir != "",
 	})
-	return errors.Join(runErr, closeQuiet(conn))
 }
 
 func closeQuiet(conn io.Closer) error {
@@ -508,15 +503,6 @@ func closeQuiet(conn io.Closer) error {
 		return err
 	}
 	return nil
-}
-
-func (env CLIEnv) latestThread(ctx context.Context) (string, error) {
-	session, err := env.connect(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer session.close(env)
-	return session.latest(ctx)
 }
 
 type cliSession struct {

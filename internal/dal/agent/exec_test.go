@@ -10,6 +10,8 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/runner"
@@ -44,6 +46,63 @@ func TestCollectExecKillsWhenReadFailsWhileAlive(t *testing.T) {
 	defer run.mu.Unlock()
 	if !slices.Contains(run.signals, runner.SignalKill) {
 		t.Fatalf("signals %v after a failed read of a live process, want a KILL", run.signals)
+	}
+}
+
+type stalledExecRunner struct {
+	runner.Runner
+	stop       context.Context
+	signals    []runner.Signal
+	stallReads bool
+}
+
+func (r *stalledExecRunner) Read(ctx context.Context, _ string, _ int64) (runner.Output, error) {
+	if !r.stallReads {
+		return runner.Output{Alive: true}, nil
+	}
+	return runner.Output{}, r.await(ctx)
+}
+
+func (r *stalledExecRunner) Signal(ctx context.Context, _ string, signal runner.Signal) error {
+	r.signals = append(r.signals, signal)
+	return r.await(ctx)
+}
+
+func (r *stalledExecRunner) await(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.stop.Done():
+		return errors.New("the runner never replied")
+	}
+}
+
+func TestCollectExecBoundsUnresponsiveRunner(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		stallReads bool
+	}{
+		{name: "read and signal", stallReads: true},
+		{name: "signal only"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				stop, release := context.WithTimeout(t.Context(), 20*time.Second)
+				defer release()
+				ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+				defer cancel()
+				run := &stalledExecRunner{stop: stop, stallReads: test.stallReads}
+				started := time.Now()
+				result, err := collectExec(ctx, run, "exec-1", ExecSpec{Timeout: time.Second})
+				if elapsed := time.Since(started); err == nil || elapsed > 6*time.Second {
+					t.Fatalf("no confirmed exit: result = %+v, err = %v, elapsed %v; want error by the request deadline", result, err, elapsed)
+				}
+				synctest.Wait()
+				if !slices.Equal(run.signals, []runner.Signal{runner.SignalTerm, runner.SignalKill}) {
+					t.Fatalf("signals = %v; want TERM then KILL", run.signals)
+				}
+			})
+		})
 	}
 }
 

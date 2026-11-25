@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/exec result",
+  "type": "object",
+  "required": [
+    "exitCode",
+    "durationMs",
+    "outputBase64",
+    "outputTruncated",
+    "termination"
+  ],
+  "properties": {
+    "exitCode": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "signal": {
+      "type": "string"
+    },
+    "durationMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "outputBase64": {
+      "type": "string"
+    },
+    "outputTruncated": {
+      "type": "boolean"
+    },
+    "termination": {
+      "enum": [
+        "exited",
+        "timedOut",
+        "cancelled"
+      ]
+    }
+  }
+}

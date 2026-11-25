@@ -294,7 +294,7 @@ describe("thread command panels", () => {
 		await user.click(screen.getByRole("radio", { name: "Base branch" }));
 		await user.type(
 			screen.getByRole("textbox", { name: "Base branch name" }),
-			"main",
+			" main ",
 		);
 		await user.click(screen.getByRole("button", { name: "Start review" }));
 		await tick();
@@ -302,9 +302,101 @@ describe("thread command panels", () => {
 			method: "review/start",
 			params: {
 				threadId: "thread-1",
-				target: { type: "baseBranch", branch: "main" },
+				target: { type: "baseBranch", branch: " main " },
 			},
 		});
+	});
+
+	test("a review target paste with a line break inserts nothing", async () => {
+		const { session } = activeSession({});
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+
+		await fireEvent.click(screen.getByRole("radio", { name: "Commit" }));
+		const field = screen.getByRole("textbox", {
+			name: "Commit id",
+		}) as HTMLInputElement;
+		await fireEvent.input(field, { target: { value: "abc" } });
+		const clipboardData = {
+			getData: (type: string) => (type === "text/plain" ? "def\r\n" : ""),
+		};
+		expect(await fireEvent.paste(field, { clipboardData })).toBe(false);
+		expect(field.value).toBe("abc");
+		expect(screen.getByRole("alert").textContent).toBe(
+			"This field takes one line. Nothing was pasted.",
+		);
+	});
+
+	test("review/start sends typed instructions exactly and refuses blank ones", async () => {
+		const { session, calls } = activeSession({
+			"review/start": () => ({ reviewThreadId: "thread-1", turn: {} }),
+		});
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+
+		await fireEvent.click(screen.getByRole("radio", { name: "Custom" }));
+		const field = screen.getByRole("textbox", { name: "Review instructions" });
+		await fireEvent.input(field, { target: { value: " \u3000\n" } });
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Enter review instructions.",
+		);
+		expect(calls.map((call) => call.method)).not.toContain("review/start");
+
+		await fireEvent.input(field, { target: { value: "  check the parser\n" } });
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		expect(calls).toContainEqual({
+			method: "review/start",
+			params: {
+				threadId: "thread-1",
+				target: { type: "custom", instructions: "  check the parser\n" },
+			},
+		});
+	});
+
+	test("review/start keeps a typed branch and commit id exactly", async () => {
+		const answers: Record<string, Answer> = {
+			"review/start": () => ({ reviewThreadId: "thread-1", turn: {} }),
+		};
+		const { session, calls } = activeSession(answers);
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Base branch" }));
+		await fireEvent.input(
+			screen.getByRole("textbox", { name: "Base branch name" }),
+			{ target: { value: " main\u00a0" } },
+		);
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Commit" }));
+		await fireEvent.input(screen.getByRole("textbox", { name: "Commit id" }), {
+			target: { value: "abc123 " },
+		});
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		expect(calls.filter((call) => call.method === "review/start")).toEqual([
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "baseBranch", branch: " main\u00a0" },
+				},
+			},
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "commit", sha: "abc123 " },
+				},
+			},
+		]);
 	});
 
 	test("fork clears a stale turn selection when the panel reopens", async () => {
@@ -415,6 +507,61 @@ test("searches conversation text after a pause and ignores cancelled results", a
 	expect(close).toHaveBeenCalledOnce();
 });
 
+test("conversation search sends the unchanged filter once every term has three scalars", async () => {
+	vi.useFakeTimers();
+	const search = vi.fn().mockResolvedValue([]);
+	const session = {
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
+		searchThreads: search,
+		closePanel: vi.fn(),
+		openedPanel: 1,
+		closePanelIf: vi.fn(),
+	} as unknown as Session;
+	render(ResumePanel, { session, open: true });
+	const input = screen.getByRole("searchbox", { name: "Filter threads" });
+	for (const value of ["ab ", "abc de", " \u3000 ", "\u{1F600}\u{1F600}"]) {
+		await fireEvent.input(input, { target: { value } });
+		await vi.advanceTimersByTimeAsync(300);
+		expect(
+			screen.queryByRole("region", { name: "Matches in conversations" }),
+		).toBeNull();
+	}
+	expect(search).not.toHaveBeenCalled();
+	await fireEvent.input(input, { target: { value: " abc " } });
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenCalledTimes(1);
+	expect(search.mock.calls[0]?.[0]).toBe(" abc ");
+	await fireEvent.input(input, { target: { value: "\u{1F600}\u{1F600}x" } });
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenCalledTimes(2);
+	expect(search.mock.calls[1]?.[0]).toBe("\u{1F600}\u{1F600}x");
+});
+
+test("a filter paste with a line break inserts nothing", async () => {
+	const session = {
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
+		searchThreads: vi.fn().mockResolvedValue([]),
+		closePanel: vi.fn(),
+		openedPanel: 1,
+		closePanelIf: vi.fn(),
+	} as unknown as Session;
+	render(ResumePanel, { session, open: true });
+	const input = screen.getByRole("searchbox", {
+		name: "Filter threads",
+	}) as HTMLInputElement;
+	await fireEvent.input(input, { target: { value: "abc" } });
+	const clipboardData = {
+		getData: (type: string) => (type === "text/plain" ? "x\u0085y" : ""),
+	};
+	expect(await fireEvent.paste(input, { clipboardData })).toBe(false);
+	expect(input.value).toBe("abc");
+	expect(screen.getByRole("alert").textContent).toBe(
+		"This field takes one line. Nothing was pasted.",
+	);
+	await fireEvent.input(input, { target: { value: "abcd" } });
+	expect(screen.queryByRole("alert")).toBeNull();
+});
+
 test("conversation search offers retry and distinguishes no matches", async () => {
 	vi.useFakeTimers();
 	const search = vi
@@ -439,6 +586,42 @@ test("conversation search offers retry and distinguishes no matches", async () =
 	await vi.advanceTimersByTimeAsync(300);
 	await tick();
 	expect(screen.getByText("No conversation mentions this text.")).toBeTruthy();
+});
+
+function searchSession(search: ReturnType<typeof vi.fn>): Session {
+	return {
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
+		searchThreads: search,
+		closePanel: vi.fn(),
+		openedPanel: 1,
+		closePanelIf: vi.fn(),
+	} as unknown as Session;
+}
+
+test("conversation search needs three scalars in every term and sends the filter unchanged", async () => {
+	vi.useFakeTimers();
+	const search = vi.fn().mockResolvedValue([]);
+	render(ResumePanel, { session: searchSession(search), open: true });
+	const input = screen.getByRole("searchbox", { name: "Filter threads" });
+	for (const local of ["ab ", "abc de", " \u3000 ", "ab\u00a0cde"]) {
+		await fireEvent.input(input, { target: { value: local } });
+		await vi.advanceTimersByTimeAsync(300);
+		expect(search, JSON.stringify(local)).not.toHaveBeenCalled();
+		expect(
+			screen.queryByRole("region", { name: "Matches in conversations" }),
+		).toBeNull();
+	}
+	await fireEvent.input(input, { target: { value: " abc " } });
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenCalledExactlyOnceWith(" abc ", expect.anything());
+	await fireEvent.input(input, {
+		target: { value: "\u3000\uac00\ub098\ub2e4 e\u0301e\t" },
+	});
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenLastCalledWith(
+		"\u3000\uac00\ub098\ub2e4 e\u0301e\t",
+		expect.anything(),
+	);
 });
 
 test("resume closes after the thread loads and focus lands in the enabled message field", async () => {

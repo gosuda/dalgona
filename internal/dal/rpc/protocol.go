@@ -12,23 +12,25 @@ type (
 		Version string `json:"version"`
 	}
 	InitializeCapabilities struct {
-		ExperimentalAPI                bool           `json:"experimentalApi,omitzero"`
-		ExplicitGatewayOAuth           bool           `json:"explicitGatewayOauth,omitzero"`
-		Extensions                     jsontext.Value `json:"extensions,omitzero"`
-		MCPServerOpenAIFormElicitation bool           `json:"mcpServerOpenaiFormElicitation,omitzero"`
-		OptOutNotificationMethods      []string       `json:"optOutNotificationMethods,omitzero"`
-		RequestAttestation             bool           `json:"requestAttestation,omitzero"`
-		RequiredHumanApproval          bool           `json:"requiredHumanApproval,omitzero"`
+		ExperimentalAPI                bool              `json:"experimentalApi,omitzero"`
+		ExplicitGatewayOAuth           bool              `json:"explicitGatewayOauth,omitzero"`
+		Extensions                     jsontext.Value    `json:"extensions,omitzero"`
+		MCPServerOpenAIFormElicitation bool              `json:"mcpServerOpenaiFormElicitation,omitzero"`
+		OptOutNotificationMethods      []string          `json:"optOutNotificationMethods,omitzero"`
+		RequestAttestation             bool              `json:"requestAttestation,omitzero"`
+		RequiredHumanApproval          bool              `json:"requiredHumanApproval,omitzero"`
+		DalgonaNative                  *NativeCapability `json:"dalgonaNative,omitzero"`
 	}
 	InitializeParams struct {
 		ClientInfo   ClientInfo              `json:"clientInfo"`
 		Capabilities *InitializeCapabilities `json:"capabilities,omitzero"`
 	}
 	InitializeResult struct {
-		UserAgent      string `json:"userAgent"`
-		CodexHome      string `json:"codexHome"`
-		PlatformFamily string `json:"platformFamily"`
-		PlatformOS     string `json:"platformOs"`
+		UserAgent      string         `json:"userAgent"`
+		CodexHome      string         `json:"codexHome"`
+		PlatformFamily string         `json:"platformFamily"`
+		PlatformOS     string         `json:"platformOs"`
+		DalgonaNative  *NativeSession `json:"dalgonaNative,omitzero"`
 	}
 	ThreadID struct {
 		ID string `json:"id"`

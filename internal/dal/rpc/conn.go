@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +37,7 @@ type Conn struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	handler        Handler
+	admit          func() bool
 	clientHandler  ClientHandler
 	clientMessages chan envelope
 	pending        map[string]*pendingCall
@@ -48,12 +51,26 @@ type Conn struct {
 	remote         string
 	clientReqMu    sync.Mutex
 	clientReqs     map[string]*clientReq
+	stream         atomic.Pointer[orderedStream]
+	cancelAccepted atomic.Bool
+	cancelRemote   atomic.Bool
+	serverReqMu    sync.Mutex
+	serverReqs     map[string]*serverReq
 }
 
 type pendingCall struct {
 	ch        chan response
 	abandoned <-chan struct{}
 	done      chan struct{}
+	check     ResponseCheck
+}
+
+type ResponseCheck func(jsontext.Value) error
+
+type CheckedCall struct {
+	Method string
+	Params any
+	Check  ResponseCheck
 }
 
 type (
@@ -92,7 +109,8 @@ func newConnection(ctx context.Context, rwc io.ReadWriteCloser, handler Handler)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Conn{ReadWriteCloser: rwc, ctx: ctx, handler: handler, pending: make(map[string]*pendingCall), queue: newOutQueue(), closed: make(chan struct{}), remote: peerName(rwc)}
+	admit, _ := ctx.Value(deviceAdmissionKey{}).(func() bool)
+	return &Conn{ReadWriteCloser: rwc, ctx: ctx, handler: handler, admit: admit, pending: make(map[string]*pendingCall), queue: newOutQueue(), closed: make(chan struct{}), remote: peerName(rwc)}
 }
 
 func (c *Conn) start() {
@@ -115,19 +133,51 @@ func Dial(ctx context.Context, rwc io.ReadWriteCloser, h ClientHandler) *Conn {
 
 func (c *Conn) Call(ctx context.Context, method string, params any, result any) error {
 	idv := jsontext.Value(strconv.AppendUint(nil, c.nextID(), 10))
-	return c.call(ctx, idv, method, params, result)
+	return c.call(ctx, idv, CheckedCall{Method: method, Params: params}, result)
+}
+
+const FrameLimit = 16 << 20
+
+func ValidateCallFrame(method string, params any) error {
+	pv, err := marshalParams(params)
+	if err != nil {
+		return err
+	}
+	_, err = marshalFrame(requestEnvelope(jsontext.Value("18446744073709551615"), method, pv))
+	return err
+}
+
+func requestEnvelope(id jsontext.Value, method string, params jsontext.Value) envelope {
+	return envelope{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 }
 
 func (c *Conn) CallID(ctx context.Context, id string, method string, params any, result any) error {
+	return c.CallIDChecked(ctx, id, CheckedCall{Method: method, Params: params}, result)
+}
+
+func (c *Conn) CallIDChecked(ctx context.Context, id string, req CheckedCall, result any) error {
 	idv, err := json.Marshal(id)
 	if err != nil {
 		return fmt.Errorf("encode request id: %w", err)
 	}
-	return c.call(ctx, idv, method, params, result)
+	return c.call(ctx, idv, req, result)
 }
 
-func (c *Conn) call(ctx context.Context, idv jsontext.Value, method string, params any, result any) error {
-	pc := &pendingCall{ch: make(chan response, 1), abandoned: ctx.Done(), done: make(chan struct{})}
+func (c *Conn) call(ctx context.Context, idv jsontext.Value, req CheckedCall, result any) error {
+	_, err := c.roundTrip(ctx, outgoing{id: idv, method: req.Method, params: req.Params, check: req.Check}, result)
+	return err
+}
+
+type outgoing struct {
+	id     jsontext.Value
+	method string
+	params any
+	check  ResponseCheck
+}
+
+func (c *Conn) roundTrip(ctx context.Context, out outgoing, result any) (bool, error) {
+	idv, method, params := out.id, out.method, out.params
+	pc := &pendingCall{ch: make(chan response, 1), abandoned: ctx.Done(), done: make(chan struct{}), check: out.check}
 	key := string(idv)
 	c.mu.Lock()
 	c.pending[key] = pc
@@ -135,28 +185,49 @@ func (c *Conn) call(ctx context.Context, idv jsontext.Value, method string, para
 	pv, err := marshalParams(params)
 	if err != nil {
 		c.removePending(key)
-		return err
+		return false, err
 	}
-	if err := c.enqueue(envelope{JSONRPC: "2.0", ID: idv, Method: method, Params: pv}, false); err != nil {
+	release, err := c.dispatchCall(idv, method, pv)
+	if err != nil {
 		c.removePending(key)
-		return err
+		return false, err
 	}
+	defer release()
 	select {
 	case <-ctx.Done():
 		c.removePending(key)
-		return ctx.Err()
+		c.cancelRemotely(idv)
+		return true, ctx.Err()
 	case <-c.closed:
 		c.removePending(key)
-		return io.ErrClosedPipe
+		return true, io.ErrClosedPipe
 	case r := <-pc.ch:
 		defer close(pc.done)
 		if r.err != nil {
-			return fmt.Errorf("rpc error %d: %w", r.err.Code, &RPCError{Code: r.err.Code, Message: r.err.Message, Data: r.err.Data})
+			return true, fmt.Errorf("rpc error %d: %w", r.err.Code, &RPCError{Code: r.err.Code, Message: r.err.Message, Data: r.err.Data})
 		}
 		if result == nil {
-			return nil
+			return true, nil
 		}
-		return json.Unmarshal(r.result, result)
+		return true, json.Unmarshal(r.result, result)
+	}
+}
+
+func (c *Conn) dispatchCall(idv jsontext.Value, method string, pv jsontext.Value) (func(), error) {
+	if stream := c.stream.Load(); stream != nil {
+		if threadID := threadOf(method, pv); threadID != "" {
+			return stream.request(c, idv, threadID, method, pv)
+		}
+	}
+	return func() {}, c.enqueue(requestEnvelope(idv, method, pv), false)
+}
+
+func (c *Conn) cancelRemotely(idv jsontext.Value) {
+	if !c.cancelRemote.Load() {
+		return
+	}
+	if err := c.Notify(MethodCancelRequest, cancelRequestParams{ID: idv}); err != nil {
+		slog.Debug("rpc: send request cancellation", "error", err)
 	}
 }
 
@@ -164,6 +235,12 @@ func (c *Conn) Notify(method string, params any) error {
 	pv, err := marshalParams(params)
 	if err != nil {
 		return err
+	}
+	if stream := c.stream.Load(); stream != nil {
+		if threadID := threadOf(method, pv); threadID != "" {
+			_, err := stream.publish(c, threadID, method, pv)
+			return err
+		}
 	}
 	return c.enqueue(envelope{JSONRPC: "2.0", Method: method, Params: pv}, true)
 }
@@ -197,7 +274,7 @@ func marshalParams(v any) (jsontext.Value, error) {
 
 func (c *Conn) readLoop() {
 	s := bufio.NewScanner(c)
-	s.Buffer(make([]byte, 4096), 16<<20)
+	s.Buffer(make([]byte, 4096), FrameLimit)
 	for s.Scan() {
 		raw := s.Bytes()
 		if len(bytes.TrimSpace(raw)) == 0 {
@@ -225,7 +302,8 @@ func (c *Conn) readLoop() {
 }
 
 func (c *Conn) logReadFailure(err error) {
-	if err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, net.ErrClosed) {
+	closedLocally := errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) || errors.Is(err, fs.ErrClosed)
+	if err != nil && !closedLocally {
 		slog.Error("rpc: read failure", "error", err, "remote", c.remote)
 	}
 }
@@ -252,28 +330,46 @@ func (c *Conn) replyInvalidRequest(raw []byte) {
 }
 
 func (c *Conn) dispatch(e envelope) {
+	if !c.admitted() {
+		return
+	}
 	if e.Method == "" {
 		c.dispatchResponse(e)
 		return
 	}
-	if c.clientMessages != nil {
-		select {
-		case c.clientMessages <- e:
-		case <-c.closed:
-		}
+	if c.forwardClientEnvelope(e) {
+		return
+	}
+	if c.absorbCancelNotification(e) {
 		return
 	}
 	c.dispatchRequest(e)
+}
+
+func (c *Conn) forwardClientEnvelope(e envelope) bool {
+	if c.clientMessages == nil {
+		return false
+	}
+	select {
+	case c.clientMessages <- e:
+	case <-c.closed:
+	}
+	return true
+}
+
+func (c *Conn) absorbCancelNotification(e envelope) bool {
+	if e.Method != MethodCancelRequest || len(e.ID) != 0 || !c.cancelAccepted.Load() {
+		return false
+	}
+	c.cancelServerRequest(e.Params)
+	return true
 }
 
 func (c *Conn) dispatchResponse(e envelope) {
 	if len(e.ID) == 0 {
 		return
 	}
-	c.mu.Lock()
-	pc := c.pending[string(e.ID)]
-	delete(c.pending, string(e.ID))
-	c.mu.Unlock()
+	pc := c.claim(string(e.ID), e)
 	if pc == nil {
 		return
 	}
@@ -285,6 +381,22 @@ func (c *Conn) dispatchResponse(e envelope) {
 	}
 }
 
+func (c *Conn) claim(key string, e envelope) *pendingCall {
+	c.mu.Lock()
+	pc := c.pending[key]
+	c.mu.Unlock()
+	if pc == nil || pc.check != nil && e.Error == nil && pc.check(e.Result) != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending[key] != pc {
+		return nil
+	}
+	delete(c.pending, key)
+	return pc
+}
+
 func (c *Conn) dispatchRequest(e envelope) {
 	if c.handler == nil {
 		if len(e.ID) > 0 {
@@ -292,24 +404,51 @@ func (c *Conn) dispatchRequest(e envelope) {
 		}
 		return
 	}
-	c.handlers.Go(func() { c.handleRequest(e) })
+	ctx, tracked := c.trackServerRequest(e.ID)
+	c.handlers.Go(func() {
+		defer tracked.finish()
+		c.handleRequest(ctx, e)
+	})
 }
 
-func (c *Conn) handleRequest(e envelope) {
-	result, handlerErr := c.handler(c.ctx, e.Method, e.Params)
-	if len(e.ID) == 0 {
+func (c *Conn) admitted() bool {
+	return c.admit == nil || c.admit()
+}
+
+func (c *Conn) handleRequest(ctx context.Context, e envelope) {
+	if !c.admitted() {
 		return
 	}
+	result, handlerErr := c.handler(ctx, e.Method, e.Params)
+	if len(e.ID) > 0 && c.mayReply() {
+		c.reply(e.ID, result, handlerErr)
+	}
+}
+
+func (c *Conn) mayReply() bool {
+	if !c.admitted() {
+		_ = c.Close()
+		return false
+	}
+	select {
+	case <-c.closed:
+		return false
+	default:
+		return true
+	}
+}
+
+func (c *Conn) reply(id, result jsontext.Value, handlerErr error) {
+	response := envelope{JSONRPC: "2.0", ID: id, Result: result}
 	if handlerErr != nil {
-		code, message := -32603, handlerErr.Error()
+		failure := &wireError{Code: CodeInternal, Message: handlerErr.Error()}
 		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {
-			code, message = coded.Code, coded.Message
+			failure = &wireError{Code: coded.Code, Message: coded.Message, Data: coded.Data}
 		}
-		c.replyError(e.ID, code, message)
-		return
+		response = envelope{JSONRPC: "2.0", ID: id, Error: failure}
 	}
-	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: e.ID, Result: result}, false); enqueueErr != nil {
-		c.abort(enqueueErr)
+	if err := c.enqueue(response, false); err != nil {
+		c.abort(err)
 	}
 }
 
@@ -336,6 +475,7 @@ type clientReq struct {
 func (c *Conn) dispatchClientRequest(e envelope) {
 	ctx, cancel := context.WithCancel(c.ctx)
 	ctx = context.WithValue(ctx, requestIDKey{}, e.ID)
+	ctx = context.WithValue(ctx, responderKey{}, func(result any) error { return c.respond(e.ID, result) })
 	key := string(e.ID)
 	entry := &clientReq{cancel: cancel}
 	c.clientReqMu.Lock()
@@ -398,6 +538,9 @@ func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 		return
 	}
 	result, handlerErr := c.clientHandler.Request(ctx, e.Method, e.Params)
+	if errors.Is(handlerErr, ErrResponded) {
+		return
+	}
 	if handlerErr != nil {
 		code, message := -32603, handlerErr.Error()
 		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {
@@ -406,14 +549,21 @@ func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 		c.replyError(e.ID, code, message)
 		return
 	}
+	if err := c.respond(e.ID, result); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		c.replyError(e.ID, -32603, err.Error())
+	}
+}
+
+func (c *Conn) respond(id jsontext.Value, result any) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
-		c.replyError(e.ID, -32603, err.Error())
-		return
+		return err
 	}
-	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: e.ID, Result: raw}, false); enqueueErr != nil {
+	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: id, Result: raw}, false); enqueueErr != nil {
 		c.abort(enqueueErr)
+		return io.ErrClosedPipe
 	}
+	return nil
 }
 
 func (c *Conn) replyError(id jsontext.Value, code int, msg string) {
@@ -436,11 +586,22 @@ func (c *Conn) enqueue(e envelope, delta bool) error {
 			return c.queue.pushStreamed(e.Method, stream, c.slowClose)
 		}
 	}
-	b, err := json.Marshal(e)
+	b, err := marshalFrame(e)
 	if err != nil {
 		return err
 	}
 	return c.queue.push(b, e.Method, e.Params, delta, c.slowClose)
+}
+
+func marshalFrame(e envelope) ([]byte, error) {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) >= FrameLimit {
+		return nil, NativeKind(ErrorLimitExceeded)
+	}
+	return b, nil
 }
 
 func (c *Conn) slowClose() error {
@@ -521,6 +682,8 @@ type (
 		method  string
 		delta   bool
 		stream  *queuedDelta
+		event   *queuedEvent
+		size    int
 		flushed chan struct{}
 	}
 	queuedDelta struct {
@@ -531,10 +694,12 @@ type (
 		hasText   bool
 	}
 	outQueue struct {
-		mu    sync.Mutex
-		items []queued
-		last  map[string]*queuedDelta
-		wake  chan struct{}
+		mu        sync.Mutex
+		items     []queued
+		last      map[string]*queuedDelta
+		wake      chan struct{}
+		bytes     int
+		byteLimit int
 	}
 )
 
@@ -547,7 +712,8 @@ func (q *outQueue) push(b []byte, method string, params jsontext.Value, delta bo
 }
 
 func (q *outQueue) pushStreamed(method string, stream queuedDelta, closeFn func() error) error {
-	return q.finish(queued{method: method, delta: true, stream: &stream}, closeFn)
+	item := queued{method: method, delta: true, stream: &stream, size: len(stream.text)}
+	return q.finish(item, closeFn)
 }
 
 func (q *outQueue) finish(item queued, closeFn func() error) error {
@@ -588,7 +754,18 @@ func (q *outQueue) merge(item queued) bool {
 	if !ok {
 		return false
 	}
+	growth := len(item.stream.text)
+	if q.byteLimit > 0 && q.bytes+growth > q.byteLimit {
+		return false
+	}
 	prev.text = append(prev.text, item.stream.text...)
+	q.bytes += growth
+	for i := len(q.items) - 1; i >= 0; i-- {
+		if q.items[i].stream == prev {
+			q.items[i].size += growth
+			break
+		}
+	}
 	return true
 }
 
@@ -603,9 +780,13 @@ func (q *outQueue) forget(item queued) {
 }
 
 func (q *outQueue) append(item queued) bool {
-	if len(q.items) >= 4096 {
+	if item.size == 0 {
+		item.size = len(item.b)
+	}
+	if len(q.items) >= 4096 || q.byteLimit > 0 && q.bytes+item.size > q.byteLimit {
 		return false
 	}
+	q.bytes += item.size
 	q.items = append(q.items, item)
 	select {
 	case q.wake <- struct{}{}:
@@ -621,6 +802,7 @@ func (q *outQueue) pop(closed <-chan struct{}) (queued, bool) {
 			item := q.items[0]
 			q.items[0] = queued{}
 			q.items = q.items[1:]
+			q.bytes -= item.size
 			q.forget(item)
 			q.mu.Unlock()
 			return item, true
@@ -703,6 +885,9 @@ func readJSONString(decoder *jsontext.Decoder) (string, error) {
 }
 
 func (q *queued) line() ([]byte, error) {
+	if q.event != nil {
+		return q.event.line()
+	}
 	if q.stream == nil {
 		return q.b, nil
 	}
@@ -785,6 +970,17 @@ func writeJSONToken(encoder *jsontext.Encoder, token jsontext.Token) error {
 }
 
 type requestIDKey struct{}
+
+type responderKey struct{}
+
+var ErrResponded = errors.New("rpc: the request handler sent its own responses")
+
+func ClientResponder(ctx context.Context) func(result any) error {
+	if respond, ok := ctx.Value(responderKey{}).(func(any) error); ok {
+		return respond
+	}
+	return func(any) error { return errors.New("rpc: no server request to answer") }
+}
 
 func ClientRequestID(ctx context.Context) (string, error) {
 	raw, _ := ctx.Value(requestIDKey{}).(jsontext.Value)

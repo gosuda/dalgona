@@ -15,14 +15,27 @@ The pane ID MUST come from `HERDR_PANE_ID`.
 ## Agent state
 
 `State` MUST be one of `working`, `idle`, or `blocked`.
-`Report` MUST run this command:
+A report for the local endpoint MUST run this command:
 
 ```text
-herdr pane report-agent <pane> --source dalgona --agent dalgona --state <state> --seq <seq> --agent-session-id <thread> -- dalgona --resume <thread>
+herdr pane report-agent <pane> --source dalgona --agent dalgona --state <state> --seq <seq> --agent-session-id <thread> -- dalgona --local --resume <thread>
 ```
 
 `seq` MUST be the journal head sequence. A status update MUST include the thread ID.
 The command after `--` MUST let herdr resume the reported thread.
+
+A report for a remote endpoint MUST include its configured name in the restore command:
+
+```text
+herdr pane report-agent <pane> --source dalgona --agent dalgona --state <state> --seq <seq> --agent-session-id <remote-thread> -- dalgona --remote <name> --resume <thread>
+```
+
+The remote session identity MUST encode the remote name and thread ID without collisions.
+Reports MUST follow only the focused endpoint.
+The report sequence MUST belong to that endpoint and thread.
+The caller MUST pass restore arguments separately, never forming a shell command from the remote name or thread ID.
+Replacing a queued endpoint-and-thread report MUST move that key to the end of the queue.
+The last delivered queued report MUST describe the latest focused endpoint.
 
 `Release` MUST run this command when the client exits:
 
@@ -31,6 +44,9 @@ herdr pane release-agent <pane> --source dalgona --agent dalgona
 ```
 
 ## Subagent panes
+
+Automatic subagent panes MUST run only for the local endpoint.
+A remote workspace path MUST NOT become the working directory of a local pane.
 
 `SubagentPane` MUST first run:
 
@@ -42,7 +58,7 @@ The command result MUST contain the string field `.result.pane.pane_id`.
 The reporter MUST then run:
 
 ```text
-herdr pane run <subagent-pane> "dalgona --resume <subagent-thread>"
+herdr pane run <subagent-pane> "dalgona --local --resume <subagent-thread>"
 ```
 
 The subagent command MUST be one argument after the pane ID.

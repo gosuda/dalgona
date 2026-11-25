@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
@@ -62,29 +63,13 @@ func startServe(t *testing.T, parent context.Context, home string, serve func(co
 	return cancel, done
 }
 
-func TestCheckBuildRejectsOtherBuild(t *testing.T) {
-	home := shortHome(t)
-	other := "00112233445566ff"
-	cancel, done := startServe(t, t.Context(), home, identityServe(other, os.Getpid(), nil))
-	defer stopRun(t, cancel, done)
-	_, err := client.CheckBuild(t.Context(), home, client.Build())
-	mismatch, ok := errors.AsType[*client.BuildMismatchError](err)
-	if !ok {
-		t.Fatalf("client.CheckBuild error = %v, want client.BuildMismatchError", err)
-	}
-	if mismatch.Running != other || mismatch.Own != client.Build() {
-		t.Fatalf("mismatch = %q vs %q, want %q vs %q", mismatch.Running, mismatch.Own, other, client.Build())
-	}
-	if _, err := client.CheckBuild(t.Context(), home, other); err != nil {
-		t.Fatalf("client.CheckBuild with the running build = %v, want nil", err)
-	}
-}
-
 func TestCheckBuildTreatsMethodNotFoundAsUnknownBuild(t *testing.T) {
 	home := shortHome(t)
-	cancel, done := startServe(t, t.Context(), home, identityServe("", 0, nil))
+	cancel, done := startServe(t, t.Context(), home, func(ctx context.Context, conn io.ReadWriteCloser, host *agent.Host) error {
+		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{})
+	})
 	defer stopRun(t, cancel, done)
-	_, err := client.CheckBuild(t.Context(), home, client.Build())
+	_, err := client.CheckBuild(t.Context(), home, config.Build())
 	mismatch, ok := errors.AsType[*client.BuildMismatchError](err)
 	if !ok {
 		t.Fatalf("client.CheckBuild error = %v, want client.BuildMismatchError", err)
@@ -99,7 +84,7 @@ func TestRetireCancelsDaemonContext(t *testing.T) {
 	retired := make(chan struct{})
 	ctx, cancelDaemon := context.WithCancel(t.Context())
 	defer cancelDaemon()
-	cancel, done := startServe(t, ctx, home, identityServe(client.Build(), os.Getpid(), func() {
+	cancel, done := startServe(t, ctx, home, identityServe(config.Build(), os.Getpid(), func() {
 		close(retired)
 		cancelDaemon()
 	}))

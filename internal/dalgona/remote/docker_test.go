@@ -120,6 +120,15 @@ func gitWorkspace(t *testing.T) string {
 	return dir
 }
 
+func pinLF(t *testing.T, dir string) {
+	t.Helper()
+	for _, kv := range [][2]string{{"core.autocrlf", "false"}, {"core.eol", "lf"}} {
+		cmd := exec.Command("git", "config", kv[0], kv[1])
+		cmd.Dir = dir
+		must(t, cmd.Run())
+	}
+}
+
 func requireLinuxBinary(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "linux" {

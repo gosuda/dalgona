@@ -107,7 +107,7 @@ type walker struct {
 	cwd     string
 	scope   string
 	root    string
-	ignores ignoreStack
+	ignores IgnoreRules
 	entries []fileEntry
 	limit   int
 }
@@ -188,7 +188,7 @@ func (w *walker) excluded(path string, entry fs.DirEntry) bool {
 	if entry.IsDir() {
 		w.ignores.loadDir(w.cwd, path)
 	}
-	return w.ignores.ignored(path, entry.IsDir())
+	return w.ignores.Ignored(path, entry.IsDir())
 }
 
 func skipEntry(entry fs.DirEntry) error {

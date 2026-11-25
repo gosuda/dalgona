@@ -707,7 +707,7 @@ func retireDir(dir, path string) (string, error) {
 		return "", fmt.Errorf("journal: check stale backup: %w", err)
 	}
 	retired := nextBackupPath(dir, "trash")
-	if err := os.Rename(path, retired); err != nil { //nolint:gosec // backup path is validated
+	if err := renameBackupDir(path, retired); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
@@ -813,10 +813,10 @@ func swapStagedBackup(dir, staging, tmp, retiredOld string, dirSync func(string)
 	old := filepath.Join(dir, "state.db.bak.old")
 	restore := func() {
 		if retiredOld != "" {
-			_ = os.Rename(retiredOld, old)
+			_ = renameBackupDir(retiredOld, old)
 		}
 	}
-	if rerr := os.Rename(staging, tmp); rerr != nil { //nolint:gosec // backup path is validated
+	if rerr := renameBackupDir(staging, tmp); rerr != nil {
 		restore()
 		return trash, fmt.Errorf("journal: stage backup: %w", rerr)
 	}
@@ -842,10 +842,10 @@ func swapStagedBackup(dir, staging, tmp, retiredOld string, dirSync func(string)
 }
 
 func swapBackup(tmp, final, old string) (string, error) {
-	if err := os.Rename(final, old); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := renameBackupDir(final, old); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("journal: swap old backup: %w", err)
 	}
-	if err := os.Rename(tmp, final); err != nil { //nolint:gosec // backup path is validated
+	if err := renameBackupDir(tmp, final); err != nil {
 		return "", fmt.Errorf("journal: install state.db.bak: %w", err)
 	}
 	return old, nil

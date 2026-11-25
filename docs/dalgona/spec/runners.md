@@ -91,7 +91,11 @@ Pull MUST NOT move the baseline. A second pull MUST diff against the same baseli
 
 ## Mode B: the daemon in a box
 
-`[remotes.<name>]` in `settings.toml` MUST hold `service`, `box_id`, and the optional `image`, `template`, and `url`. `client.Remotes` owns this table for the binder and for remote sessions. It MUST write the whole table in one `config.WriteSettings` call. A name without `[remotes.<name>]` MUST fall back to `[runners.<name>]`.
+`[remotes.<name>]` in `settings.toml` selects a box daemon when `kind` is `box` or absent.
+A box entry MUST hold `service`, `box_id`, and the optional `image`, `template`, and `url`.
+`client.Remotes` owns this table for the binder and for remote sessions.
+It MUST write the whole table in one `config.WriteSettings` call.
+A name without `[remotes.<name>]` MUST fall back to `[runners.<name>]`.
 
 `cloudflare` MUST be refused by `cloud up`, `cloud down`, `cloud pull`, and `--remote` with:
 
@@ -111,6 +115,29 @@ cloudflare boxes lose their files when the container stops; use sandbox0, modal,
 remote: remote <name> has no box; run `dalgona cloud up <name>`
 ```
 
+## Daemon remote through the web relay
+
+`kind = "daemon"` in `[remotes.<name>]` selects an existing daemon through its web relay.
+This remote kind MUST set `url` and `token_file`.
+It MUST NOT set `service`, `image`, `template`, or `box_id`.
+
+The `url` MUST use `https` or `wss`, include a host, and exclude user information, a query, and a fragment.
+The client MUST join `/rpc` to the configured URL path.
+Both schemes use the same TLS-protected relay transport.
+The connection MUST use TLS 1.3 as its minimum version and MUST NOT follow redirects.
+Trust MUST come from the system root pool plus the configured `tls_ca_file` when set.
+The client MUST read the token from a regular file with private permissions equivalent to mode 0600.
+It MUST send `Authorization: Bearer <token>` and MUST NOT place the token in the URL.
+The token and header precedence MUST follow [relay authentication](web.md#rpc-relay).
+Tokens MUST NOT enter logs or native GUI restore state.
+Without an `Authorization` header, the browser query-token route MUST remain available under [web.md](web.md).
+
+`CloudUp`, `CloudDown`, `CloudPull`, and `--remote` on a daemon remote MUST fail with:
+
+```text
+remote: <name> is a daemon remote and has no box; connect to it from the desktop client
+```
+
 ## Entry points
 
 ```go
@@ -120,18 +147,46 @@ func (b *Binder) Runner(ctx context.Context, threadID, runnerName string) (runne
 func (b *Binder) Archive(ctx context.Context, threadID string) error
 func (b *Binder) Pull(ctx context.Context, threadID string) error
 func (b *Binder) GC(ctx context.Context) ([]Box, error)
-func (b *Binder) CloudUp(ctx context.Context, name string, copyAuth bool) error
-func (b *Binder) CloudDown(ctx context.Context, name string, yes bool) error
-func (b *Binder) CloudPull(ctx context.Context, name string) error
-func (b *Binder) Bridge(ctx context.Context, name string) (io.ReadWriteCloser, error)
+func (r *client.Remotes) Bridge(ctx context.Context, name string) (net.Conn, error)
+func (r *client.Remotes) CloudUp(ctx context.Context, request client.CloudUpRequest) (client.CloudBox, error)
+func (r *client.Remotes) CloudPull(ctx context.Context, request client.CloudPullRequest) (changed bool, error)
+func (r *client.Remotes) CloudDown(ctx context.Context, request client.CloudDownRequest) error
+func (r *client.Remotes) SaveRemote(name string, spec config.RemoteSpec) error
+func (s *client.EndpointSet) Endpoints() []client.EndpointStatus
+func (s *client.EndpointSet) SaveRemote(name string, spec config.RemoteSpec) error
 
 type IO struct { Stdin io.Reader; Stdout, Stderr io.Writer }
 
 func PullMain(ctx context.Context, opts Options, args []string, stdio IO) int
 func RunnerMain(ctx context.Context, opts Options, args []string, stdio IO) int
-func CloudMain(ctx context.Context, opts Options, args []string, stdio IO) int
+```
+`dalgona cloud` lives in `cmd/dalgona/cloud.go`.
+Its output, prompts, and exit codes MUST retain the existing behavior.
+Success MUST exit 0, failure MUST exit 1, and a usage error MUST exit 2.
+Questions MUST use `Stdout`, and answers MUST come from `Stdin`.
+`PullMain` and `RunnerMain` MUST return the same codes and use their existing prompts.
+
+`SaveRemote` MUST accept only names matching `[A-Za-z0-9_-]+`.
+An invalid name MUST fail with:
+
+```text
+remote: name %q must use only letters, digits, - and _
 ```
 
-The `Main` functions MUST return 0 on success, 1 on failure, and 2 on a usage error. They MUST ask questions on `Stdout` and read answers from `Stdin`.
+The implementation MUST validate fields through `config.CheckRemote` and use the errors in [configuration](../../dal/spec/config.md).
+It MUST resolve a relative `token_file` against the product home.
+It MUST write the whole remote table in one `WriteSettings` call.
+`EndpointSet.SaveRemote` MUST add or edit an endpoint and refuse a 33rd endpoint before any write.
 
-Without `Options.Journal`, `Pull`, `Archive`, `GC`, and runner binding MUST fail. `CloudUp`, `CloudDown`, and `CloudPull` MUST NOT need `Options.Journal`.
+`CloudUp` binds the configured remote, confirms any credential copy separately, and returns the box identity.
+`CloudPull` merges remote workspace changes and reports whether any change applied.
+`CloudDown` compares the confirmed box with the recorded `box_id` and destroys only a matching box.
+A mismatch MUST fail before destruction with:
+
+```text
+remote: the box changed after confirmation; confirm the new box
+```
+
+`PullMain` and `RunnerMain` return 0 on success, 1 on failure, and 2 on a usage error.
+
+Without `Options.Journal`, `Pull`, `Archive`, `GC`, and runner binding MUST fail.

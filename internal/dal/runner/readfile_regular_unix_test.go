@@ -116,7 +116,7 @@ func TestLocalPagedReadAcceptsOnlyRegularFiles(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			path := test.path(t)
 			data, err := regularReadWithin(t, path, func() ([]byte, error) {
-				page, _, err := local.readFileAt(t.Context(), path, 0, readPageSize)
+				page, _, err := local.ReadFilePage(t.Context(), path, 0, readPageSize)
 				return page, err
 			})
 			requireRegularRead(t, test, path, data, err)

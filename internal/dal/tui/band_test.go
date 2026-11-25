@@ -32,6 +32,30 @@ func bandRowOf(m model) string {
 	return stripANSI(m.bandRow())
 }
 
+func TestStatusBandDistinguishesLocalFromRemoteNamedLocal(t *testing.T) {
+	t.Parallel()
+	m := bandModel("/work/ws")
+	m.screen.width = 100
+	m.conn.machine, m.conn.machinePhase = "local", "connected"
+	m.conn.link.Endpoint = "/private/home"
+	if local := stripANSI(m.View().Content); !strings.Contains(local, "\nlocal [connected] ") || strings.Contains(local, "/private/home") {
+		t.Fatalf("local view = %q; want local label without home path", local)
+	}
+	m.conn.link.Endpoint, m.conn.remote = "local", "local"
+	if remote := stripANSI(m.View().Content); !strings.Contains(remote, "\n@local [connected] ") {
+		t.Fatalf("remote view = %q; want @local label", remote)
+	}
+}
+
+func TestStatusBandKeepsRemoteIdentityAtTwentyColumns(t *testing.T) {
+	t.Parallel()
+	m := bandModel("/work/ws")
+	m.screen.width = 20
+	m.conn.machine, m.conn.machinePhase = "Proof machine", "connected"
+	m.conn.link.Endpoint, m.conn.remote = "proof", "proof"
+	assertContains(t, stripANSI(m.View().Content), "\n@proof [connected]")
+}
+
 func TestStatusBandDropsWholeItems(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

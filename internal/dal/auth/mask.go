@@ -69,18 +69,28 @@ func (s *Store) maskLocked(text string) string {
 	}
 	replacements := s.credentialReplacements()
 	hits := s.collectHits(text, replacements)
-	if len(hits) > 0 || s.secretsDirty {
-		if err := s.syncPatternSecrets(hits); err != nil {
-			s.secretsDirty = true
-			s.maskErr = fmt.Errorf("persist pattern secrets: %w", err)
-			return maskPersistenceFailure
-		}
-		s.secretsDirty = false
-		s.maskErr = nil
+	if err := s.persistMaskHits(hits); err != nil {
+		return maskPersistenceFailure
 	}
 	replacements = append(replacements, s.lookupPatternReplacements(text)...)
-	replacements = append(replacements, s.recordedBuiltinReplacements(text)...)
+	replacements = append(replacements, s.recordedBuiltinReplacements(func(value string) bool {
+		return strings.Contains(text, value)
+	})...)
 	return applyReplacements(text, replacements)
+}
+
+func (s *Store) persistMaskHits(hits []patternHit) error {
+	if len(hits) == 0 && !s.secretsDirty {
+		return nil
+	}
+	if err := s.syncPatternSecrets(hits); err != nil {
+		s.secretsDirty = true
+		s.maskErr = fmt.Errorf("persist pattern secrets: %w", err)
+		return s.maskErr
+	}
+	s.secretsDirty = false
+	s.maskErr = nil
+	return nil
 }
 
 func (s *Store) Unmask(text string) string {
@@ -429,11 +439,11 @@ func (s *Store) lookupPatternReplacements(text string) []replacement {
 	return items
 }
 
-func (s *Store) recordedBuiltinReplacements(text string) []replacement {
+func (s *Store) recordedBuiltinReplacements(include func(string) bool) []replacement {
 	var items []replacement
 	for placeholder, value := range s.secrets {
 		prefix, ok := placeholderPrefix(placeholder)
-		if ok && strings.HasPrefix(prefix, "{{secret:"+familyBuiltin) && strings.Contains(text, value) {
+		if ok && strings.HasPrefix(prefix, "{{secret:"+familyBuiltin) && (include == nil || include(value)) {
 			items = appendSecret(items, replacement{from: value, to: placeholder})
 		}
 	}
@@ -619,15 +629,7 @@ func SecretEnvironmentName(name string) bool {
 }
 
 func applyReplacements(text string, items []replacement) string {
-	slices.SortFunc(items, func(a, b replacement) int {
-		if len(a.from) != len(b.from) {
-			return len(b.from) - len(a.from)
-		}
-		if a.from != b.from {
-			return strings.Compare(a.from, b.from)
-		}
-		return strings.Compare(a.to, b.to)
-	})
+	slices.SortFunc(items, compareReplacements)
 	var output strings.Builder
 	position, written := 0, 0
 	for position < len(text) {
@@ -646,6 +648,16 @@ func applyReplacements(text string, items []replacement) string {
 	}
 	output.WriteString(text[written:])
 	return output.String()
+}
+
+func compareReplacements(a, b replacement) int {
+	if len(a.from) != len(b.from) {
+		return len(b.from) - len(a.from)
+	}
+	if a.from != b.from {
+		return strings.Compare(a.from, b.from)
+	}
+	return strings.Compare(a.to, b.to)
 }
 
 func replacementAt(text string, items []replacement) (replacement, bool) {

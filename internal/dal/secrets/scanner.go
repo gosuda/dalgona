@@ -68,7 +68,10 @@ func disjoint(hits []Hit) []Hit {
 	end := 0
 	for _, hit := range hits {
 		if hit.Start < end {
-			continue
+			if hit.End <= end {
+				continue
+			}
+			hit.Start = end
 		}
 		kept = append(kept, hit)
 		end = hit.End

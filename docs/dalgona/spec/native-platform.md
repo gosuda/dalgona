@@ -5,6 +5,7 @@
 This document specifies required desktop implementation work.
 It does not claim that Gio already supplies every capability or that platform acceptance has passed.
 All platform contracts below are required for the complete native release.
+The [implementation status](#implementation-status) section records the owned platform work and each missing behavior.
 
 Read this with [the client specification](native.md), [documents](native-documents.md), [protocol](native-protocol.md), and [verification](native-verification.md).
 The [design specification](native-design.md) owns visual tokens.
@@ -27,7 +28,7 @@ No platform MAY load an embedded browser, WebView, WebKit, Chromium, or Electron
 | Window and GPU rendering | Gio `app.Window` | Lifecycle, scaling, restoration, diagnostics, and adapter attachment. |
 | Text entry | Gio `widget.Editor` | Composition-aware actions and platform acceptance fixes. |
 | Text clipboard | Gio clipboard commands | Multiple formats, image clipboard, file references, and clipboard ownership. |
-| File open and save | Gio explorer and native APIs | Folder selection, parent ownership, cancellation, and complete platform behavior. |
+| File open and save | Native dialog APIs and the XDG portal | Folder selection, parent ownership, cancellation, and complete platform behavior. |
 | Desktop accessibility | Gio semantic operations | Complete AppKit, UI Automation, and AT-SPI bridges. |
 | Menus and notifications | Platform APIs | Native command routing, permissions, activation, and lifecycle. |
 | Interactive terminal | Native PTY and ConPTY APIs | The daemon protocol and runner implementation specified separately. |
@@ -140,6 +141,11 @@ A composition commit MUST insert its text exactly once.
 The same key event MUST not also send the message, choose an option, or activate a panel action.
 Cancellation MUST restore committed text and selection. Rejected commits MUST retain a recoverable unsent candidate without inserting a prefix.
 Each accepted composition commit MUST form one undoable transaction.
+Undo history MUST stay bounded in steps and bytes.
+The editor keeps the newest 1000 undo steps within 32 MiB, and it always keeps the newest step.
+Gio's private widget history MUST stay bounded too.
+Outside composition, the editor replaces the Gio widget after 1000 widget edits or 32 MiB of widget history.
+The replacement keeps the shown text, the selection with its direction, and focus.
 
 The adapter MUST provide a reliable composition-active signal when the pinned Gio API does not expose it publicly.
 This is required bridge or upstream patch work.
@@ -185,6 +191,11 @@ The build MUST record each font's source, license, version, and digest.
 Variable-font support MUST be verified against the pinned Gio font path.
 If that path cannot select the required axes, the build MUST generate static instances at the exact registered weights.
 The packaged client MUST not require a font-conversion tool.
+Gio v0.10.3 selects no variable font axis.
+`just desktop-fonts` therefore makes static Bricolage Grotesque instances at 600, 650, and 700 and Hanken Grotesk instances at 400, 600, and 700.
+The Bricolage Grotesque instances use optical size 14 and width 100.
+Pretendard ships unmodified static faces at 400, 600, and 700, so a 650 request uses the nearest Pretendard face.
+`internal/dalgona/gui/platform/fontfaces/SHA256SUMS` records the digest of each bundled face, and `THIRD_PARTY_NOTICES.md` records each source, license, and version.
 Changing the font catalog MUST invalidate shaped geometry without moving the document's logical anchor.
 
 Fallback MUST operate on complete grapheme clusters.
@@ -240,8 +251,15 @@ Changed target text or selection MUST prevent stale replacement. Active preedit 
 Rejected candidates MUST remain recoverable without changing committed text, selection, or undo history.
 
 The adapter MUST bound transferred bytes before decoding and close every transfer stream.
-One native clipboard or drop transfer MUST contain at most 32 MiB before image conversion.
+One incoming native clipboard or drop transfer MUST contain at most 32 MiB before image conversion.
 Converted image files MUST still meet the five MiB individual and ten MiB aggregate attachment limits.
+An outgoing image copy MUST preserve the complete authorized image within the D10 geometry limits.
+The renderer child MUST validate and encode the image before the platform publishes it.
+The combined outgoing PNG and Windows CF_DIB bytes MUST NOT exceed the D11 raster-export limit of 256 MiB.
+The platform MUST check each declared format length and the combined length before it allocates transfer storage.
+Encoded output MUST stream into unpublished transfer storage through bounded buffers.
+The GUI MUST NOT decode the image or assemble a separate full-image bitmap for clipboard publication.
+A failed or cancelled preparation MUST preserve the previous clipboard.
 X11 selection ownership MUST remain valid until the replacement owner or window closure ends it.
 Wayland paste MUST respect compositor serial and focus requirements.
 Unsupported platform formats MUST produce a clear paste error without modifying the draft.
@@ -257,10 +275,6 @@ They MUST not block the Gio frame owner.
 | macOS | `NSOpenPanel` and `NSSavePanel`, with folder selection enabled for workspace choice. |
 | Windows | `IFileOpenDialog` and `IFileSaveDialog`, including `FOS_PICKFOLDERS`. |
 | Linux | XDG FileChooser portal with file, directory, multiple-selection, and save options. |
-
-Gio's [explorer package](https://pkg.go.dev/gioui.org/x/explorer) MAY supply compatible file-open and save operations.
-Its documented inability to select folders requires the platform adapter's own folder path.
-The complete dialog contract MUST not rely on Explorer alone.
 
 Cancellation MUST be a distinct result and MUST not create an error notice.
 Selection MUST return validated local file references or the portal-provided file access handle.
@@ -322,6 +336,8 @@ Notification activation MUST focus the correct window and thread without answeri
 
 macOS MUST use UserNotifications.
 Windows MUST use its application-identified desktop notification API.
+A Windows click MUST reach dalgona through its registered COM activator, also after dalgona exits.
+The activator MUST report each click once, with the thread tag from the notification's `launch` argument.
 Linux MUST use the notification portal or its declared freedesktop desktop service.
 The adapter MUST expose granted, denied, unavailable, and undecided states accurately.
 
@@ -359,11 +375,27 @@ The adapter MUST preserve Gio's existing window message handling.
 The macOS adapter MUST attach semantic elements to the current Gio view.
 It MUST implement text range, string, line, selection, and coordinate queries for document and editor roles.
 The Linux adapter MUST register and unregister its objects with the accessibility bus across connection changes.
+It MUST register with each registry once, and again only when another registry announces that it is available.
 
 Native coordinate and character-offset conventions MUST be converted at the adapter boundary.
 Queries MUST use immutable snapshots with a known revision.
 Actions MUST revalidate their target revision before changing state.
 Stale node identifiers MUST return an unavailable-element result rather than act on a reused identifier.
+
+The semantic model in `internal/dalgona/gui/platform` maps each role to one Gio semantic class.
+
+| Semantic role | Gio class |
+|---|---|
+| Button, link, and menu item | `Button` |
+| Check box | `CheckBox` |
+| Radio button | `RadioButton` |
+| Switch | `Switch` |
+| Text field and secure field | `Editor` |
+| Document, heading, list, list item, table, row, column header, row header, cell, code, math, figure, image, terminal, dialog, menu, status, and error | `Unknown` |
+
+Only check boxes, radio buttons, and switches send a checked state to Gio.
+A disabled control adds its reason to the Gio description.
+A secure field sends its name to Gio and never its value.
 
 ## P12. Make accessibility behavior complete
 
@@ -436,7 +468,9 @@ An output gap MUST trigger a fresh atomic attachment snapshot.
 The snapshot adapter MUST preserve both screens, scrollback, cursor, modes, margins, tabs, attributes, links, and parser continuation.
 The public VT emulator API MUST not be assumed to provide that complete serialization.
 Required checkpoint support MUST live outside the GUI package so the daemon does not import presentation code.
-Snapshot version mismatches MUST fail explicitly and request a compatible attachment.
+A mismatch of the snapshot version or the engine version MUST fail explicitly and request a compatible attachment.
+If the complete scrollback does not fit in the 8 MiB checkpoint body, the checkpoint MUST drop the oldest scrollback rows. It MUST report the number dropped in `droppedScrollbackRows`.
+The GUI MUST show that number at the retained-history boundary.
 
 Closing a window with active terminals MUST explain which terminal sessions will close and obtain the component's close decision.
 Closing the Terminal panel only detaches its view, as the [component contract](native-components.md) specifies.
@@ -521,9 +555,46 @@ Desktop CI MUST run the tagged checks for every target in the initial release ma
 Linux smoke evidence MUST include separate X11 and Wayland runs.
 The CI record MUST distinguish a native execution result from a cross-compilation result.
 
+The `justfile` declares the four targets.
+On Linux they drop a window backend or the Vulkan renderer only when its development files are absent, and they print that choice.
+With `CI=true`, a missing backend or renderer fails the target.
+`desktop-smoke` takes the backend name `wayland` or `x11` and fails without a matching display session.
+`desktop-package` dispatches on the host OS.
+macOS runs `deploy/desktop/package-macos.sh`.
+Windows runs `deploy/desktop/package-windows.ps1`.
+Linux builds the `.deb` for the host architecture only and requires both window backends.
+The Linux package builds only for amd64 or arm64 and needs both window backends. It takes its version from the exact `v` tag with the `v` removed or from `0.0.0~gitYYYYMMDD.<12-character commit>`.
+The macOS recipe builds a universal app and DMG, signs both with `DALGONA_MACOS_SIGN_IDENTITY`, notarizes and staples with `DALGONA_MACOS_NOTARY_PROFILE`, and refuses when either input is absent.
+The Windows recipe builds natively on matching x64 or Arm64 hardware.
+It signs binaries and the per-machine MSI with `DALGONA_WINDOWS_SIGN_SHA1` plus `DALGONA_WINDOWS_TIMESTAMP_URL`.
+It refuses when either input is absent.
+The Linux `.deb` is unsigned and its install, upgrade, launch, and uninstall tests need a clean Ubuntu 24.04 system and did not run.
+CI `desktop-macos` and `desktop-windows` jobs validate manifests without signing or publishing and run `desktop-check` plus `desktop-build`.
 Installation MUST not overwrite another running daemon's data or change its credentials.
 Uninstall MUST remove application files while preserving user data unless the user explicitly chooses data removal.
 An upgrade MUST preserve drafts, preferences, daemon state, and valid file associations.
+
+### Windows notification registration
+
+Windows shows dalgona notifications only for an installed application identity.
+The MSI MUST install one Start menu shortcut that starts `dalgona-gui.exe`.
+The shortcut MUST have the two properties in this table.
+
+| Shortcut property | Value |
+|---|---|
+| `System.AppUserModel.ID` | `Gosuda.Dalgona` |
+| `System.AppUserModel.ToastActivatorCLSID` | `{4C824C81-04CD-4609-A755-D11526E6CDFE}` |
+
+The MSI MUST also register the activator class.
+Write the quoted full path of the installed `dalgona-gui.exe` as the default value of this key:
+`Software\Classes\CLSID\{4C824C81-04CD-4609-A755-D11526E6CDFE}\LocalServer32`.
+Use `HKEY_LOCAL_MACHINE` for a per-machine installation.
+Use `HKEY_CURRENT_USER` for a per-user installation.
+When dalgona does not run, a click starts this path with the `-Embedding` argument.
+Then dalgona registers the activator and gets the thread tag from Windows.
+Without the shortcut, Windows does not show the notifications.
+Without the key, a click after dalgona exits does not start dalgona.
+The uninstaller MUST remove the shortcut and the key.
 
 ## P15. Verify platform completion
 
@@ -551,6 +622,66 @@ The implementation MUST record each missing bridge behavior against its owning p
 Any missing required behavior blocks a complete desktop release.
 An implementation stage MAY be reviewed before that release, but MUST retain its incomplete status accurately.
 
+### Platform evidence record
+
+The `EvidenceRecord` type in `internal/dalgona/gui/platform` defines the JSON record of one smoke run.
+The encoder and the decoder refuse a record that breaks one of these rules.
+
+| Member | Rule |
+|---|---|
+| `commit` | The full lowercase commit hash with 40 or 64 digits. |
+| `pins` | Each module once with its exact version. The `go` and `gioui.org` pins are required. |
+| `host.os` and `host.arch` | One target from the P14 baseline table. |
+| `host.display.backend` | `x11` or `wayland` on Linux, `appkit` on macOS, and `win32` on Windows. |
+| `host.display.virtual` | The name and version of a virtual display. It stays empty for a physical display session. |
+| `host.execution` | `native`, `emulated`, or `cross-compiled`. Only a `native` run can pass a check. |
+| `host.edition`, `host.build`, and `host.updates` | The edition, the OS build, and each installed update. |
+| `host.image_digest` | The installation image as `sha256:` and 64 lowercase hex digits. |
+| `host.gpu`, `host.driver`, `host.locale`, and `host.input_method` | Each value is required. |
+| `host.linux` | The kernel, compositor, desktop packages, and portal backend. It is required on Linux and absent on other systems. |
+| `checks` | The gate, kind, exact procedure, expected result, actual result, and outcome. A pass or a failure also names its artifact. |
+| `missing` | A P01 to P15 identifier, the owning package path, and the missing behavior. |
+
+The check kinds are `automated`, `inspection`, `manual-native`, and `live-service`.
+The outcomes are `passed`, `failed`, and `skipped`.
+An IME, accessibility, or text accessibility pass MUST be a `manual-native` check.
+Its `software` member MUST name the real input engine or assistive software and its version.
+
+The `gui,guiintegration` tests in `internal/dalgona/gui/platform` write this record when `DALGONA_EVIDENCE_RECORD` names an output file.
+They read the host facts from the record that `DALGONA_EVIDENCE_HOST` names and add one automated check for each smoke test.
+Each check names the log file from `DALGONA_EVIDENCE_LOG` as its artifact.
+`just desktop-smoke <backend>` writes the host description and sets these three variables.
+It reads the OS edition, OS build, kernel, desktop packages, portal backend, and locale from the host.
+It takes the installation image digest from `DALGONA_IMAGE_DIGEST` and the installed updates from `DALGONA_HOST_UPDATES`, one update on each line.
+It takes each fact that it cannot detect from an environment variable.
+These are `DALGONA_HOST_GPU`, `DALGONA_HOST_DRIVER`, `DALGONA_COMPOSITOR`, `DALGONA_PORTAL_BACKEND`, `DALGONA_INPUT_METHOD`, and `DALGONA_DISPLAY_VIRTUAL`.
+`DALGONA_EXECUTION` records an `emulated` or `cross-compiled` run.
+When a fact is missing, the target still writes the text log, names each missing fact, and fails.
+The record is `dist/desktop-smoke-<os>-<arch>-<backend>.json`.
+
+## Implementation status
+
+This section records the owned work in `internal/dalgona/gui/platform` and `internal/dalgona/gui/platform/desktop`, and each missing behavior.
+It records no passed release gate.
+Nothing in this table has run on Windows, macOS, or a Linux desktop session with real assistive software or input methods.
+It does not report P01, P02, P04, P06, P09, or P13.
+
+| Requirement | Implemented | Missing behavior and owner |
+|---|---|---|
+| P03 | `Lifetime` starts a new generation for each valid view event. Ending it cancels pending work, then releases each attached adapter once. `desktop.Window` attaches the accessibility bridge and the clipboard reader to that generation. Each window loop in `cmd/dalgona-gui` sends every event to `desktop.Window.Handle`. A new view generation ends the open dialog of the earlier generation with an error. | Wayland exposes no screen origin to the accessibility bridge. |
+| P05 | `platform.Editor` wraps `widget.Editor`. It takes the IME events before the widget and reports `Composing()`. Preedit stays out of `Draft()`. Each commit passes the field policy once and is one undo step. The editor keeps the newest 1000 undo steps within 32 MiB. Outside composition, it replaces the Gio widget after 1000 widget edits or 32 MiB, and it keeps the text, selection, and focus. It asks its `Clipboard` function for a reader at each paste. | A widget replacement scrolls to the caret, so a field scrolled away from the caret moves once. The composer and panel fields do not use `platform.Editor` yet. |
+| P05 | Every key belongs to the IME during composition. A Return, Enter, or Escape in the same frame as the end of a composition also belongs to it. A rejected commit restores the text and keeps the candidate. | No real IME matrix result exists. Windows may deliver the Return that ends a Korean composition in a later frame. |
+| P07 | Owned readers replace the Gio text read. Windows reads `CF_UNICODETEXT` strictly, the registered `PNG` format, `CF_DIBV5` and `CF_DIB` as PNG, and `CF_HDROP`. A pure Go X11 client reads text, PNG, JPEG, and URI lists with incremental transfer. macOS reads text, PNG, TIFF as PNG, and file URLs. On a Wayland view, a pure Go client on its own connection reads text, PNG, JPEG, and URI lists through `ext-data-control-v1`, else `wlr-data-control`. It binds the first announced seat and negotiates the offered MIME spelling. Data control needs no input serial, and the reader runs only for a paste in the focused window. | Mutter offers neither data-control protocol, so GNOME without XWayland falls back to the unbounded Gio text read. The data-control reader has not run against a real compositor. Gio v0.10.3 has no external drops. The macOS reader has not compiled against the Apple SDK. |
+| P07 | Each reader bounds a transfer at 32 MiB before decoding. `ChoosePaste` prefers files, then text, then an image for Paste, and an image first for Paste image. `PasteTarget` and the editor discard a paste when the target changed. | The X11 path through XWayland on GNOME has not run. |
+| P08 | Linux uses the XDG FileChooser portal directly. It supports several files, folders, save names, filters, cancellation, and the X11 parent window. It closes the request when the window generation ends. Windows uses its own COM thread, and the Gio window owns its dialogs. `IFileOpenDialog` uses `FOS_ALLOWMULTISELECT` or `FOS_PICKFOLDERS`. `IFileSaveDialog` uses `FOS_OVERWRITEPROMPT`, `FOS_STRICTFILETYPES`, and `FOS_NOTESTFILECREATE`. macOS runs `NSOpenPanel` and `NSSavePanel` as sheets on the Gio window. Both return paths without creating the file. Both accept only file-system paths and close the dialog when the window generation ends. | The Windows and macOS dialogs have not run on their release targets. The macOS bridge has not compiled against the Apple SDK. Wayland has no parent handle. |
+| P11 | `AttachATSPI` exports a frame and the semantic tree on the accessibility bus. It exports Accessible, Application, Component, Action, Text, EditableText, Selection, Table, TableCell, and Cache. Its Text interface reads character, word, sentence, line, and paragraph segments from the shared semantic text model. `GetCharacterExtents`, `GetRangeExtents`, and `GetOffsetAtPoint` use line geometry. `AttachUIA` registers UI Automation providers on the Gio window. Its word unit follows Unicode word boundaries. `GetBoundingRectangles` and `RangeFromPoint` use line geometry. `AttachAppKitAccessibility` adds elements to the Gio view. It answers line, frame, and position queries from the same lines. A `SemanticNode` carries `Lines`. Each line has a byte range, a line box, and one horizontal span for each grapheme cluster. Visible transcript rows supply these lines. If text has no lines, a range reports the node box. Characters and points report no geometry in this case. Table cells carry row and column spans. Row headers expose their cells on all three bridges. The frame dispatches accepted accessibility intents on the next frame after publication, not in the frame that queued them. | UI Automation has no sentence unit. Its line unit still breaks only at hard line breaks. The AppKit bridge has not compiled against the Apple SDK. |
+| P12 | The window publishes semantic snapshots and Gio key focus to the native bridges. The composer exposes canonical text and selection. Protected fields do not expose their values. Decision cards expose each action and its details. The transcript exposes nested lists, tables with column headers, figure captions and labels, and math expressions. Figure source and image preview controls report their visible bounds. Native ranges span ordered text objects. Native selection uses the same document positions and copy rules as keyboard selection. Native queries report missing text as unavailable and share one read per missing object. The client publishes the result before it resumes navigation for the same revision. Failed reads expose an error and a retry action. The terminal exposes separate screen and scrollback regions. The daemon sends attachment names and caller-provided alternative text on image entries as name and altText, with Path-basename then Image-N fallback when empty. | Full-source pages are outside the keyboard selection scope and support reading only. The AppKit bridge has not compiled against the Apple SDK. All three release targets still need live screen-reader checks. |
+| P12 | `ReducedMotion`, `HighContrast`, and `PrefersDark` read the settings portal on Linux, `SystemParametersInfoW` and the `AppsUseLightTheme` value on Windows, and `NSWorkspace` and the global `AppleInterfaceStyle` on macOS. `WatchAppearance` reports changes through the portal `SettingChanged` signal, `WM_SETTINGCHANGE` on a hidden window, and appearance observation on macOS. The application rereads all three after each change and when a window gains focus. | The Windows and macOS watchers have not compiled against their SDKs. |
+| P15 | `EvidenceRecord` defines and validates the record format. `desktop-smoke` writes it. The `guiintegration` tests check the handle lifecycle and an exact clipboard round trip on a real display. | No other gate has a check. The smoke tests have not run on a release target. |
+| P10 | `Notifier` uses the freedesktop notification service on Linux, WinRT toasts with the `Gosuda.Dalgona` application identity on Windows, and UserNotifications on macOS. A notice with the same tag replaces the older one, and each click reports its tag. On Windows, each toast carries its tag as the `launch` argument. The notification thread registers the COM activator `{4C824C81-04CD-4609-A755-D11526E6CDFE}`, and a click that reaches both the activator and the toast event reports once. `OpenLink` opens only `https`, `http`, and `mailto`. `OpenURL`, `OpenPath`, and `RevealPath` use the OpenURI portal, `ShellExecuteW`, and `NSWorkspace`. | No Windows click has run, with or without a running dalgona. The macOS notifier has not compiled against the Apple SDK. |
+| P14 | `just desktop-package` dispatches per host OS. On macOS, `deploy/desktop/package-macos.sh` and `Info.plist` assemble a signed and notarized universal app and DMG. On Windows, `deploy/desktop/package-windows.ps1` and `dalgona.wxs` assemble signed native x64 and Arm64 per-machine MSIs. They include the Start menu AUMID and quoted `HKLM` toast activator registration. The Linux `.deb` recipe is unchanged. | Native DMG/MSI assembly, signing, and notarization did not run. The T24 install, upgrade, launch, uninstall, and retention matrix did not run. Neither native package assembly nor that matrix is proven. Only Linux static checks ran: `bash -n`, `xmllint`, `actionlint`, `just --show desktop-package`, and missing-input refusal. No artifact was signed or published. Owner: NativePackaging recipes. This table records status only. |
+Each missing behavior in this table belongs to `internal/dalgona/gui/platform` unless the row names another owner.
+
 ## Primary sources
 
 - [Gio project](https://gioui.org/).
@@ -558,7 +689,6 @@ An implementation stage MAY be reviewed before that release, but MUST retain its
 - [Current Gio application API](https://pkg.go.dev/gioui.org/app).
 - [Current Gio text widgets](https://pkg.go.dev/gioui.org/widget).
 - [Gio text clipboard API](https://pkg.go.dev/gioui.org/io/clipboard).
-- [Gio explorer capabilities and limits](https://pkg.go.dev/gioui.org/x/explorer).
 - [Gio Linux IME changes](https://gioui.org/news/2026-09).
 - [Gio semantic operations](https://github.com/gioui/gio/blob/main/io/semantic/semantic.go).
 - [AppKit accessibility protocol](https://developer.apple.com/documentation/appkit/nsaccessibilityprotocol).

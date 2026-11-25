@@ -10,11 +10,19 @@ import (
 var osc9Terminals = []string{"iTerm.app", "WezTerm", "ghostty"}
 
 func (m *model) windowTitle() string {
-	return sanitizeText(m.conn.product + " · " + m.thread.title + " · " + stateWord(m.thread.state, m.thread.lastTurn))
+	name := m.conn.product
+	if m.conn.machine != "" {
+		name += " · " + m.conn.machine
+	}
+	return sanitizeText(name + " · " + m.thread.title + " · " + stateWord(m.thread.state, m.thread.lastTurn))
 }
 
 func (m *model) notifyLine(what string) string {
-	return m.conn.product + ": " + what + " · " + m.thread.title
+	name := m.conn.product
+	if m.conn.machine != "" {
+		name = m.conn.machine
+	}
+	return name + ": " + what + " · " + m.thread.title
 }
 
 func (m *model) notify(text string) tea.Cmd {

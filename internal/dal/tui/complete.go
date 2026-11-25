@@ -6,11 +6,11 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -96,39 +96,40 @@ func commandNamed(name string) command {
 	return commands[slices.IndexFunc(commands, func(c command) bool { return c.name == name })]
 }
 
-func (c editor) tokenBreak(r rune) bool {
-	_, isChip := c.chipOf(r)
-	return isChip || unicode.IsSpace(r)
-}
-
-func (c editor) commandEnd() int {
-	end := slices.IndexFunc(c.text, c.tokenBreak)
-	if end < 0 {
-		return len(c.text)
+func (c editor) slashEnd(start int) int {
+	for i, r := range c.text[start:] {
+		if r == ' ' || c.hasChipsAt(start+i) {
+			return start + i
+		}
 	}
-	return end
+	return len(c.text)
 }
 
 func (m *model) commandQuery() (string, bool) {
 	e := &m.input.composer
-	text := e.Value()
-	if m.panelOpen() || m.review != nil || m.textMode() != inputPrompt || !strings.HasPrefix(text, "/") || strings.HasPrefix(text, "//") {
+	start := e.slashStart()
+	if m.panelOpen() || m.review != nil || m.textMode() != inputPrompt || !e.readsSlash() {
 		return "", false
 	}
-	end := e.commandEnd()
-	if e.cursor > end {
+	end := e.slashEnd(start)
+	if e.cursor < start || e.cursor > end || e.lead > 0 {
 		return "", false
 	}
-	return strings.TrimPrefix(string(e.text[:end]), "/"), true
+	query := string(e.text[start+1 : end])
+	return query, !strings.HasPrefix(query, "/")
 }
 
-func (c *editor) tokenAt() (start, end int) {
+func (c editor) tokenAt() (start, end int) {
 	start, end = c.cursor, c.cursor
-	for start > 0 && !c.tokenBreak(c.text[start-1]) {
+	blocked := c.lead > 0
+	for start > 0 && !blocked && !textinput.IsWhiteSpace(c.text[start-1]) {
 		start--
+		blocked = c.hasChipsAt(start)
 	}
-	for end < len(c.text) && !c.tokenBreak(c.text[end]) {
+	blocked = c.lead < c.chipsAt(c.cursor)
+	for end < len(c.text) && !blocked && !textinput.IsWhiteSpace(c.text[end]) {
 		end++
+		blocked = c.hasChipsAt(end)
 	}
 	return start, end
 }
@@ -188,7 +189,7 @@ func (m *model) refreshFilePopup(query string) tea.Cmd {
 }
 
 func (m *model) debounceFile(seq int) tea.Cmd {
-	return tea.Tick(fileDebounce, func(time.Time) tea.Msg { return debounceMsg{seq: seq} })
+	return m.conn.link.scope(tea.Tick(fileDebounce, func(time.Time) tea.Msg { return debounceMsg{seq: seq} }))
 }
 
 func (m *model) applyDebounce(msg debounceMsg) tea.Cmd {
@@ -202,7 +203,7 @@ func (m *model) applyDebounce(msg debounceMsg) tea.Cmd {
 func (m *model) searchFiles(seq int, query string) tea.Cmd {
 	client, done := m.conn.client, m.conn.done
 	params := fileSearchParams{Query: query, Roots: []string{m.workDir()}}
-	return func() tea.Msg {
+	return m.conn.link.scope(func() tea.Msg {
 		if client == nil {
 			return searchResultMsg{seq: seq, err: errors.New("rpc client is not connected")}
 		}
@@ -211,7 +212,7 @@ func (m *model) searchFiles(seq int, query string) tea.Cmd {
 		var reply fileSearchReply
 		err := client.Call(ctx, "fuzzyFileSearch", params, &reply)
 		return searchResultMsg{seq: seq, files: reply.Files, err: err}
-	}
+	})
 }
 
 func (m *model) applySearch(msg searchResultMsg) {
@@ -286,13 +287,21 @@ func (m *model) completePopup() {
 	name := m.input.popup.selected()
 	m.input.popup = nil
 	e := &m.input.composer
-	head := []rune("/" + name)
-	tail := e.text[e.commandEnd():]
-	if len(tail) == 0 || !unicode.IsSpace(tail[0]) {
-		tail = slices.Concat([]rune{' '}, tail)
+	end := e.slashEnd(e.slashStart())
+	head := []rune("/" + name + " ")
+	tail := e.text[end:]
+	if len(tail) > 0 && tail[0] == ' ' && !e.hasChipsAt(end) {
+		tail = tail[1:]
 	}
+	shift := len(head) + len(tail) - len(e.text)
+	for i := range e.chips {
+		e.chips[i].at = max(e.chips[i].at+shift, len(head))
+	}
+
 	e.text = slices.Concat(head, tail)
-	e.cursor = len(head) + 1
+	e.cursor, e.lead = len(head), 0
+	e.verbatimText = nil
+	e.repairCaret()
 }
 
 func (m *model) completeFile() {
@@ -301,8 +310,13 @@ func (m *model) completeFile() {
 	e := &m.input.composer
 	start, end := e.tokenAt()
 	insert := []rune("@" + popup.selected() + " ")
+	first := e.chipIndex(end)
+	for i := range e.chips[first:] {
+		e.chips[first+i].at += len(insert) - (end - start)
+	}
 	e.text = slices.Concat(e.text[:start], insert, e.text[end:])
-	e.cursor = start + len(insert)
+	e.cursor, e.lead = start+len(insert), 0
+	e.repairCaret()
 }
 
 func (m *model) runPopup() tea.Cmd {
@@ -312,7 +326,7 @@ func (m *model) runPopup() tea.Cmd {
 	}
 	name := m.input.popup.selected()
 	e := &m.input.composer
-	if commandNamed(name).args != "" || e.commandEnd() < len(e.text) {
+	if commandNamed(name).args != "" || e.slashEnd(e.slashStart()) < len(e.text) || len(e.chips) > 0 {
 		m.completePopup()
 		return nil
 	}

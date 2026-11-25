@@ -99,7 +99,7 @@ func (t Tool) Run(ctx context.Context, call tool.Call, _ tool.Env) (tool.Result,
 	}
 	reply, err := t.asker.Ask(ctx, call.ID, questions)
 	if err != nil {
-		return tool.Result{}, err
+		return tool.Result{Failure: tool.MachineryFailure(ctx, err)}, err
 	}
 	return Format(questions, reply), nil
 }

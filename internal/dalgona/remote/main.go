@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
 
 type IO struct {
@@ -32,56 +34,6 @@ func RunnerMain(ctx context.Context, opts Options, args []string, stdio IO) int 
 		_, _ = fmt.Fprintln(stdio.Stdout, "no unbound boxes")
 	}
 	return report(stdio.Stderr, err)
-}
-
-func CloudMain(ctx context.Context, opts Options, args []string, stdio IO) int {
-	command, ok := parseCloud(args)
-	if !ok {
-		_, _ = fmt.Fprintln(stdio.Stderr, "usage: dalgona cloud up <name> [--copy-auth] | down <name> [--yes] | pull <name>")
-		return 2
-	}
-	b := cliBinder(opts, stdio)
-	switch command.verb {
-	case "up":
-		if command.flag == "" {
-			_, _ = fmt.Fprintf(stdio.Stdout, "sign in inside the box with `dalgona --remote %s login`\n", command.name)
-		}
-		return report(stdio.Stderr, b.CloudUp(ctx, command.name, command.flag != ""))
-	case "down":
-		return report(stdio.Stderr, b.CloudDown(ctx, command.name, command.flag != ""))
-	default:
-		return report(stdio.Stderr, b.CloudPull(ctx, command.name))
-	}
-}
-
-type cloudCommand struct{ verb, name, flag string }
-
-var cloudFlags = map[string]string{"up": "--copy-auth", "down": "--yes", "pull": ""}
-
-func parseCloud(args []string) (cloudCommand, bool) {
-	if len(args) < 2 {
-		return cloudCommand{}, false
-	}
-	allowed, known := cloudFlags[args[0]]
-	command := cloudCommand{verb: args[0]}
-	for _, arg := range args[1:] {
-		if !command.take(arg, allowed) {
-			return cloudCommand{}, false
-		}
-	}
-	return command, known && command.name != ""
-}
-
-func (c *cloudCommand) take(arg, allowedFlag string) bool {
-	switch {
-	case allowedFlag != "" && arg == allowedFlag && c.flag == "":
-		c.flag = arg
-	case c.name == "" && !strings.HasPrefix(arg, "-"):
-		c.name = arg
-	default:
-		return false
-	}
-	return true
 }
 
 func cliBinder(opts Options, stdio IO) *Binder {
@@ -111,11 +63,8 @@ func report(stderr io.Writer, err error) int {
 	if err == nil {
 		return 0
 	}
-	if conflict, ok := errors.AsType[*ConflictError](err); ok {
-		_, _ = fmt.Fprintln(stderr, "remote: pull left conflict markers in:")
-		for _, file := range conflict.Files {
-			_, _ = fmt.Fprintln(stderr, "  "+file)
-		}
+	if conflict, ok := errors.AsType[*client.ConflictError](err); ok {
+		_, _ = fmt.Fprint(stderr, conflict.Report())
 		return 1
 	}
 	_, _ = fmt.Fprintln(stderr, err)

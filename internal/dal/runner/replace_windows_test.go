@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -58,6 +59,12 @@ func releaseReplaceAfter(held *os.File, delay time.Duration) <-chan struct{} {
 		_ = held.Close()
 	}()
 	return done
+}
+
+func useReplaceRename(t *testing.T, rename func(oldpath, newpath string) error) {
+	t.Helper()
+	replaceRename = rename
+	t.Cleanup(func() { replaceRename = os.Rename })
 }
 
 func readReplaceTarget(t *testing.T, path string) []byte {
@@ -121,6 +128,50 @@ func TestPublishReplaceHeldPastDeadlineKeepsOriginalError(t *testing.T) {
 	}
 	if actual := readReplaceTarget(t, dst); !bytes.Equal(actual, before) {
 		t.Fatalf("held file content %q, want %q", actual, before)
+	}
+}
+
+func TestRetryReplaceRenameStopsAtDeadline(t *testing.T) {
+	cases := []struct {
+		name      string
+		secondEnd time.Duration
+		wantFail  time.Duration
+	}{
+		{"second attempt ends before the deadline", replaceRetryDeadline - replaceRetryInterval/2, replaceRetryDeadline},
+		{"second attempt ends after the deadline", replaceRetryDeadline + replaceRetryInterval/2, replaceRetryDeadline + replaceRetryInterval/2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) { checkReplaceStopsAtDeadline(t, tc.secondEnd, tc.wantFail) })
+		})
+	}
+}
+
+func checkReplaceStopsAtDeadline(t *testing.T, secondEnd, wantFail time.Duration) {
+	t.Helper()
+	held := &os.LinkError{Op: "rename", Old: "staged", New: "pid", Err: windows.ERROR_SHARING_VIOLATION}
+	attempts := 0
+	var firstDone time.Time
+	useReplaceRename(t, func(string, string) error {
+		attempts++
+		switch attempts {
+		case 1:
+			firstDone = time.Now()
+		case 2:
+			time.Sleep(time.Until(firstDone.Add(secondEnd)))
+		}
+		return held
+	})
+	err := retryReplaceRename("staged", "pid")
+	failedAt := time.Since(firstDone)
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("replace held past the deadline: %v, want sharing violation", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("rename attempts = %d, want 2: no attempt may start after the deadline", attempts)
+	}
+	if failedAt != wantFail {
+		t.Fatalf("replace failed %v after the first attempt, want %v", failedAt, wantFail)
 	}
 }
 

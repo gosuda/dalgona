@@ -41,7 +41,7 @@ func (s *server) ask(ctx context.Context, w *watch, ch <-chan agent.Update, upda
 	a := approvalAsk{thread: w.thread, requestID: prompt.RequestID, method: method, params: params, watch: w}
 	note := approvalNotice(prompt, threadID, turnID)
 	askCtx, cancel := context.WithCancel(ctx)
-	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
+	started, dup := s.spawnRequest(prompt.RequestID, threadID, cancel, func() {
 		defer s.settle(prompt.RequestID)
 		if note != nil {
 			s.send("item/fileChange/patchUpdated", *note)
@@ -77,7 +77,7 @@ func approvalParams(prompt agent.ApprovalPrompt, threadID, turnID, cwd string) (
 	}
 	return "item/commandExecution/requestApproval", rpc.CommandExecutionRequestApprovalParams{
 		ThreadID: threadID, TurnID: turnID, ItemID: prompt.CallID, StartedAtMs: nowMillis(),
-		Command: cmdText(prompt), Cwd: cwd, Reason: prompt.Reason,
+		Command: cmdText(prompt), Cwd: cwd, Reason: prompt.Reason, Escalated: prompt.Escalated,
 	}
 }
 
@@ -102,7 +102,7 @@ func (s *server) spawn(register, task func()) bool {
 	return true
 }
 
-func (s *server) spawnRequest(requestID string, cancel context.CancelFunc, task func()) (started, dup bool) {
+func (s *server) spawnRequest(requestID, threadID string, cancel context.CancelFunc, task func()) (started, dup bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {
@@ -112,6 +112,7 @@ func (s *server) spawnRequest(requestID string, cancel context.CancelFunc, task 
 		return true, true
 	}
 	s.pending[requestID] = cancel
+	s.threads[requestID] = threadID
 	s.tasks.Go(task)
 	return true, false
 }
@@ -122,12 +123,18 @@ func cmdText(prompt agent.ApprovalPrompt) string {
 
 func (s *server) settle(requestID string) {
 	s.mu.Lock()
-	cancel := s.pending[requestID]
-	delete(s.pending, requestID)
+	cancel := s.takeRequestLocked(requestID)
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+}
+
+func (s *server) takeRequestLocked(requestID string) context.CancelFunc {
+	cancel := s.pending[requestID]
+	delete(s.pending, requestID)
+	delete(s.threads, requestID)
+	return cancel
 }
 
 func (s *server) resolved(threadID, requestID, resolution string) {

@@ -15,8 +15,8 @@ import (
 const MaxRequestImageBytes = 10 << 20
 
 type Image struct {
-	Path, Mime string
-	Data       []byte
+	Path, Mime, Name, AltText string
+	Data                      []byte
 }
 
 func ImageMIME(data []byte) (string, error) {
@@ -38,6 +38,12 @@ func CheckImages(images []Image) error {
 		if size > event.MaxImageBytes {
 			return fmt.Errorf("image %d is %d bytes; the limit is %d bytes (5 MiB)", i+1, size, event.MaxImageBytes)
 		}
+		if len(image.Name) > event.MaxImageNameBytes {
+			return fmt.Errorf("image %d name exceeds %d bytes", i+1, event.MaxImageNameBytes)
+		}
+		if len(image.AltText) > event.MaxImageAltBytes {
+			return fmt.Errorf("image %d alt_text exceeds %d bytes", i+1, event.MaxImageAltBytes)
+		}
 		total += size
 	}
 	if total > MaxRequestImageBytes {
@@ -52,26 +58,54 @@ func (t *Thread) prepareImages(images []Image) ([]event.Image, error) {
 	}
 	var out []event.Image
 	for _, image := range images {
-		mime, err := ImageMIME(image.Data)
+		prepared, err := t.prepareImage(image)
 		if err != nil {
 			return nil, err
 		}
-		if mime != image.Mime {
-			return nil, fmt.Errorf("image type %s does not match its declared type %s", mime, image.Mime)
-		}
-		path := ""
-		if image.Path != "" {
-			if path, err = t.host.mask(image.Path); err != nil {
-				return nil, err
-			}
-		}
-		blob, err := t.PutBlob(image.Data)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, event.Image{Mime: image.Mime, Path: path, Blob: blob})
+		out = append(out, prepared)
 	}
 	return out, nil
+}
+
+func (t *Thread) prepareImage(image Image) (event.Image, error) {
+	if err := checkImageType(image); err != nil {
+		return event.Image{}, err
+	}
+	path, err := t.maskImageField(image.Path)
+	if err != nil {
+		return event.Image{}, err
+	}
+	name, err := t.maskImageField(image.Name)
+	if err != nil {
+		return event.Image{}, err
+	}
+	alt, err := t.maskImageField(image.AltText)
+	if err != nil {
+		return event.Image{}, err
+	}
+	blob, err := t.PutBlob(image.Data)
+	if err != nil {
+		return event.Image{}, err
+	}
+	return event.Image{Mime: image.Mime, Path: path, Name: name, AltText: alt, Blob: blob}, nil
+}
+
+func checkImageType(image Image) error {
+	mime, err := ImageMIME(image.Data)
+	if err != nil {
+		return err
+	}
+	if mime != image.Mime {
+		return fmt.Errorf("image type %s does not match its declared type %s", mime, image.Mime)
+	}
+	return nil
+}
+
+func (t *Thread) maskImageField(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	return t.host.mask(value)
 }
 
 type verifiedImages struct {

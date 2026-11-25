@@ -5,11 +5,11 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -83,7 +83,19 @@ func decodeReviewStart(params jsontext.Value) (reviewStartParams, error) {
 		}
 		return d.SkipValue()
 	})
-	return p, err
+	if err != nil {
+		return p, err
+	}
+	return p, p.target.checkText()
+}
+
+func (t reviewTarget) checkText() error {
+	for _, field := range []struct{ name, value string }{{"target.title", t.Title}, {"target.instructions", t.Instructions}} {
+		if err := (textinput.Field{Name: field.name}).Check(field.value); err != nil {
+			return invalidParams(err.Error())
+		}
+	}
+	return nil
 }
 
 func readNullableString(d *jsontext.Decoder) (string, error) {
@@ -122,7 +134,7 @@ func reviewPrompt(t reviewTarget) (string, error) {
 		}
 		return fmt.Sprintf("Review the changes introduced by %s. Use git show %s to see them.%s", subject, t.SHA, reviewFindingsSuffix), nil
 	case reviewTargetCustom:
-		if strings.TrimSpace(t.Instructions) == "" {
+		if textinput.Blank(t.Instructions) {
 			return "", invalidParams("instructions must not be empty")
 		}
 		return t.Instructions, nil

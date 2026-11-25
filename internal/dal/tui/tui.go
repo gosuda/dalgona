@@ -17,6 +17,8 @@ import (
 const framesPerSecond = 60
 
 type Status struct {
+	Endpoint string
+	Remote   string
 	State    string
 	Seq      uint64
 	ThreadID string
@@ -28,10 +30,13 @@ type Options struct {
 	Input          io.Reader
 	Output         io.Writer
 	ThreadID       string
+	Latest         bool
+	InitialMachine string
 	Model          string
 	Approval       string
 	Sandbox        string
 	Cwd            string
+	ExplicitCwd    bool
 	Width          int
 	Height         int
 }
@@ -42,39 +47,46 @@ type programHandler struct {
 	done    <-chan struct{}
 }
 
-func Run(ctx context.Context, conn io.ReadWriteCloser, opts Options) error {
+func Run(ctx context.Context, open OpenMachines, opts Options) (runErr error) {
+	input, err := openTerminalInput(opts.Input)
+	if err != nil {
+		return err
+	}
+	defer input.close()
 	ready := make(chan struct{})
 	done := make(chan struct{})
-	defer close(done)
 	handler := &programHandler{ready: ready, done: done}
-	client := rpc.Dial(ctx, watchedConn{ReadWriteCloser: conn, lost: handler.connectionLost}, handler)
+	set, err := open(MachineEvents{Phase: handler.phase, Notify: handler.notification, Request: handler.request})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		close(done)
+		if err = set.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close terminal machine connections: %w", err))
+		}
+	}()
 	output := cmp.Or[io.Writer](opts.Output, os.Stdout)
-	input := cmp.Or[io.Reader](opts.Input, os.Stdin)
-	opts.Output = newDockOutput(output, input, func(msg dockWrittenMsg) { handler.send(msg) })
-	program := tea.NewProgram(newModel(client, opts, done), programOptions(ctx, opts)...)
+	opts.Input = input.stream
+	opts.Output = newDockOutput(output, input.paste.source, func(msg dockWrittenMsg) { handler.send(msg) })
+	root, err := newMachineModel(set, opts, done)
+	if err != nil {
+		return err
+	}
+	program := tea.NewProgram(root, programOptions(ctx, opts, input.paste)...)
 	handler.program = program
 	close(ready)
-	_, runErr := program.Run()
-	closeErr := client.Close()
-	if runErr != nil && !errors.Is(runErr, tea.ErrProgramKilled) {
-		return fmt.Errorf("run tui: %w", runErr)
-	}
-	if runErr != nil && ctx.Err() == nil {
-		return fmt.Errorf("run tui: %w", runErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close tui rpc: %w", closeErr)
+	_, err = program.Run()
+	if err != nil && (!errors.Is(err, tea.ErrProgramKilled) || ctx.Err() == nil) {
+		return fmt.Errorf("run tui: %w", err)
 	}
 	return nil
 }
 
-func programOptions(ctx context.Context, opts Options) []tea.ProgramOption {
-	options := []tea.ProgramOption{tea.WithContext(ctx), tea.WithFPS(framesPerSecond)}
-	if opts.Input != nil {
-		options = append(options, tea.WithInput(opts.Input))
-	}
-	if opts.Output != nil {
-		options = append(options, tea.WithOutput(opts.Output))
+func programOptions(ctx context.Context, opts Options, paste *terminalPasteReader) []tea.ProgramOption {
+	options := []tea.ProgramOption{
+		tea.WithContext(ctx), tea.WithFPS(framesPerSecond),
+		tea.WithInput(opts.Input), tea.WithOutput(opts.Output), tea.WithFilter(paste.restore),
 	}
 	if opts.Width > 0 && opts.Height > 0 {
 		options = append(options, tea.WithWindowSize(opts.Width, opts.Height))
@@ -82,12 +94,12 @@ func programOptions(ctx context.Context, opts Options) []tea.ProgramOption {
 	return options
 }
 
-func (h *programHandler) Notification(method string, params jsontext.Value) {
-	h.send(notificationMsg{method: method, params: params.Clone()})
+func (h *programHandler) notification(link Link, method string, params jsontext.Value) {
+	h.send(machineMsg{link: link, body: notificationMsg{method: method, params: params.Clone()}})
 }
 
-func (h *programHandler) connectionLost(err error) {
-	h.send(disconnectedMsg{err: err})
+func (h *programHandler) phase(change MachinePhase) {
+	h.send(change)
 }
 
 func (h *programHandler) send(msg tea.Msg) {
@@ -99,7 +111,7 @@ func (h *programHandler) send(msg tea.Msg) {
 	h.program.Send(msg)
 }
 
-func (h *programHandler) Request(ctx context.Context, method string, params jsontext.Value) (any, error) {
+func (h *programHandler) request(ctx context.Context, link Link, method string, params jsontext.Value) (any, error) {
 	select {
 	case <-h.ready:
 	case <-h.done:
@@ -112,7 +124,10 @@ func (h *programHandler) Request(ctx context.Context, method string, params json
 	if err != nil {
 		return nil, fmt.Errorf("approval request id: %w", err)
 	}
-	h.program.Send(serverRequestMsg{method: method, requestID: requestID, params: params.Clone(), answer: answer})
+	h.program.Send(machineMsg{link: link, body: serverRequestMsg{method: method, requestID: requestID, params: params.Clone(), answer: answer}})
+	if method == "item/tool/requestUserInput" {
+		return h.answerQuestion(ctx, answer)
+	}
 	select {
 	case response := <-answer:
 		return response.value, response.err
@@ -123,15 +138,21 @@ func (h *programHandler) Request(ctx context.Context, method string, params json
 	}
 }
 
-type watchedConn struct {
-	io.ReadWriteCloser
-	lost func(error)
-}
-
-func (c watchedConn) Read(p []byte) (int, error) {
-	n, err := c.ReadWriteCloser.Read(p)
-	if err != nil {
-		c.lost(err)
+func (h *programHandler) answerQuestion(ctx context.Context, answer <-chan requestAnswer) (any, error) {
+	respond := rpc.ClientResponder(ctx)
+	for {
+		select {
+		case response := <-answer:
+			if response.err != nil {
+				return nil, response.err
+			}
+			if err := respond(response.value); err != nil {
+				return nil, fmt.Errorf("answer question: %w", err)
+			}
+		case <-h.done:
+			return nil, errors.New("tui closed before the question was answered")
+		case <-ctx.Done():
+			return nil, rpc.ErrResponded
+		}
 	}
-	return n, err
 }

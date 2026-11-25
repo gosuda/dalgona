@@ -1,5 +1,6 @@
 <script lang="ts">
 import type { Chip } from "#lib/attachments.ts";
+import EscapedText from "#lib/components/EscapedText.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 
 interface Props {
@@ -39,11 +40,11 @@ function promptField(): HTMLElement | undefined {
 				{:else if chip.kind === "shell"}
 					<span class="label">[Shell #{chip.n} exit {chip.exitCode}, {chip.lines} {chip.lines === 1 ? "line" : "lines"}]</span>
 				{:else}
-					<span class="label">Image · {chip.name} · {sizeLabel(chip.size)}</span>
+					<span class="label">Image · <EscapedText text={chip.name} /> · {sizeLabel(chip.size)}</span>
 				{/if}
 				<button type="button" {@attach handoffFocus(promptField)} onclick={() => onRemove(chip.id)}>Remove</button>
 				{#if chip.kind === "paste" && shown[chip.id]}
-					<pre>{chip.text}</pre>
+					<pre><EscapedText text={chip.text} /></pre>
 				{/if}
 			</li>
 		{/each}

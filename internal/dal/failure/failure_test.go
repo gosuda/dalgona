@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -483,36 +484,48 @@ func assertRequiresHome(t *testing.T) {
 	}
 }
 
-func TestRecoverCompletesOwner(t *testing.T) {
+func TestListOlderThanContinuesNewestFirst(t *testing.T) {
 	store := testStore(t, "dalgona", nil)
-	run := func() (err error) {
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	captured := []struct {
+		id string
+		at time.Time
+	}{
+		{strings.Repeat("1", 32), base},
+		{strings.Repeat("a", 32), base.Add(time.Minute)},
+		{strings.Repeat("b", 32), base.Add(time.Minute)},
+		{strings.Repeat("c", 32), base.Add(2 * time.Minute)},
+	}
+	for _, entry := range captured {
 		input := testInput()
-		defer store.Recover(context.Background(), input, &err)
-		panic("kaboom")
+		input.ID, input.Time = entry.id, entry.at
+		if _, err := store.Capture(context.Background(), input); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := func() (err error) {
-		defer func() {
-			_ = recover()
-		}()
-		_ = run()
-		return errors.New("resumed")
-	}(); err == nil || err.Error() != "resumed" {
-		t.Fatalf("panic must not propagate: %v", err)
-	}
-	records, err := store.List(context.Background(), Query{Limit: 1})
+	position := &Position{Time: base.Add(time.Minute), ID: strings.Repeat("b", 32)}
+	records, err := store.List(context.Background(), Query{OlderThan: position})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 1 || records[0].Class != ClassPanic {
-		t.Fatalf("records = %+v", records)
+	if got := recordIDs(records); !slices.Equal(got, []string{strings.Repeat("a", 32), strings.Repeat("1", 32)}) {
+		t.Fatalf("older than b = %v", got)
 	}
-	calm := func() (err error) {
-		defer store.Recover(context.Background(), testInput(), &err)
-		return nil
+	records, err = store.List(context.Background(), Query{OlderThan: position, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := calm(); err != nil {
-		t.Fatalf("no panic must mean no action: %v", err)
+	if got := recordIDs(records); !slices.Equal(got, []string{strings.Repeat("a", 32)}) {
+		t.Fatalf("one older than b = %v", got)
 	}
+}
+
+func recordIDs(records []Record) []string {
+	ids := make([]string, len(records))
+	for i, record := range records {
+		ids[i] = record.ID
+	}
+	return ids
 }
 
 func TestFailureWriteErrorHasNoRawFallback(t *testing.T) {

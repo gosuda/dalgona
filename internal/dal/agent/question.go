@@ -187,6 +187,9 @@ func (a *actor) sendUpdate(ch chan Update, update Update) {
 	select {
 	case ch <- update:
 	default:
+		if overflowed := a.seededSubs[ch]; overflowed != nil {
+			overflowed.Store(true)
+		}
 		a.drop(ch)
 		a.t.host.log.Warn("agent: closing slow subscriber", "thread", a.t.id)
 	}
@@ -195,6 +198,7 @@ func (a *actor) sendUpdate(ch chan Update, update Update) {
 func (a *actor) drop(ch chan Update) {
 	close(ch)
 	delete(a.subs, ch)
+	delete(a.seededSubs, ch)
 	for _, pending := range a.questions {
 		delete(pending.refused, ch)
 	}

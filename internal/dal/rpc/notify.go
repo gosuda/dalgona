@@ -302,6 +302,9 @@ func (p CommandExecutionRequestApprovalParams) Encode(o *Writer) {
 	o.OptStr("command", p.Command)
 	o.OptStr("cwd", p.Cwd)
 	o.OptStr("reason", p.Reason)
+	if p.Escalated {
+		o.Bool("escalated", true)
+	}
 	o.Close()
 }
 
@@ -342,6 +345,11 @@ func (n WarningNotification) Encode(o *Writer) {
 	o.Open()
 	o.Str("threadId", n.ThreadID)
 	o.Str("message", n.Message)
+	if n.RequestID != "" {
+		o.Str("requestId", n.RequestID)
+		o.Str("reason", n.Reason)
+		o.Str("field", n.Field)
+	}
 	o.Close()
 }
 

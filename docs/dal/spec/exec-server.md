@@ -46,6 +46,19 @@ An unstamped binary MUST use `(devel)` as its version.
 - `fs/getMetadata` takes `path` and returns `name`, `size`, `mode`, `modTimeMs`, `isDirectory`, and `isFile`.
 - `fs/readDirectory` takes `path` and returns `entries`. Each entry uses the metadata fields above.
 - `fs/remove` takes `path`.
+- `workspace/call` takes one runner `WorkspaceRequest` object and returns its `WorkspaceResult`. Byte fields use standard base64. The server MUST run the request through `Local.Workspace`.
+  Workspace errors use these codes:
+  - `-32003`: escaping path.
+  - `-32004`: wrong file kind.
+  - `-32005`: existing destination.
+  - `-32006`: root refused.
+  - `-32007`: list limit.
+  - `-32008`: stale revision. The message holds the current revision.
+  - `-32009`: staging offset.
+  - `-32010`: nonempty directory.
+  - `-32011`: malformed request.
+
+  The client MUST preserve each runner error through `errors.Is` or `errors.As`.
 
 The server MUST preserve the runner operation semantics. The client MUST preserve `ErrProcessNotFound` and `fs.ErrNotExist` through `errors.Is`.
 

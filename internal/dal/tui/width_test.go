@@ -381,3 +381,17 @@ func TestWrapKeepsTheMarkOfAWideSpaceInsideARow(t *testing.T) {
 		}
 	}
 }
+
+func TestWrapKeepsDisplayEscapeWhole(t *testing.T) {
+	t.Parallel()
+	screen := screenState{method: ansi.GraphemeWidth}
+	rows := screen.wrap("AA<U+0003>BBBB", 6)
+	if got := strings.Join(rows, "|"); got != "AA|<U+0003>|BBBB" {
+		t.Fatalf("wrap = %q, want the escape kept whole", rows)
+	}
+	for _, row := range rows {
+		if strings.Contains(row, "<U") && !strings.Contains(row, "<U+0003>") {
+			t.Fatalf("row splits a display escape: %q", row)
+		}
+	}
+}

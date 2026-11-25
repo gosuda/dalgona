@@ -1,13 +1,13 @@
 # Hashline v1: shared specification
 
-Status: implemented in `internal/dal/tool/patch` as the `hashline-light` and `hashline-enhanced` edit styles. Neither is a product default.
+Status: implemented in `internal/dal/tool/patch` as the `hashline-light` and `hashline-enhanced` edit styles. The invocation records and replay of C16 are implemented in `internal/dal/agent`. Neither style is a product default.
 Date: 2026-09-28.
 Applies to: `hashline-light` and `hashline-enhanced`, contract version 1.
 Companions: [Light](hashline-light-v1.md), [Enhanced](hashline-enhanced-v1.md),
 [Conformance](hashline-conformance-v1.md), [Review and source map](hashline-review.md).
 
 Adopted on 2026-11-08 as the contract for the Go `patch` tool's `hashline-light` and `hashline-enhanced` styles.
-This document defines the contract for these two styles. Some requirements in C13 to C16 are not yet implemented. The review separates source-derived requirements
+This document defines the contract for these two styles. Some requirements in C05, C12, C14, and C17 are not yet implemented. The review separates source-derived requirements
 from deliberate amendments. Source locators such as S-PROOF refer to that source map.
 
 ## C01. Decision and scope
@@ -339,13 +339,10 @@ Never hold partial pins or path locks while waiting for missing resources. Acqui
 locks in the existing total canonical order, including rename endpoints.
 
 Only the verified planner can construct the private `stagedBatch`.
-The struct holds staged files, a summary, profile/version, an immutable evidence cutoff, observer findings, and an invocation fingerprint.
+The struct holds staged files, a summary, profile/version, an immutable evidence cutoff, and observer findings.
 It MUST contain complete before/after bytes, full digests, actual footprints, and path/absence conditions.
 The planner validates every canonical file group's shape before it resolves evidence.
 Observers inspect the complete staged batch and retain findings without changing its bytes.
-The fingerprint hashes length-prefixed UTF-8 strings with SHA-256.
-Its tuple contains style, decimal contract version, workspace, consumer, and exact final payload, in that order.
-Each length is an unsigned 64-bit big-endian byte count.
 The writer accepts that value, not arbitrary spans and a public proof enum.
 
 Run existing staged observers before asking. They report or block, never rewrite.
@@ -462,9 +459,11 @@ paths and `before`, `after`, or `unknown` states. `changes` describes verified
 actual changes, never the whole proposed plan on partial failure. Display diffs
 are not proof.
 
-The object is attached to a call that reached planning, with two exceptions.
-A pre-plan decline carries none. Recovery and turn end write none for a decline
-or a skipped call. The object MUST stay under 48 KiB.
+The object is attached to a call that reached planning. A pre-plan decline
+carries none. Recovery and turn end write none for a decline or a skipped call.
+These C16 outcomes also carry the object: the `reference_expired` refusal of an
+invocation from an earlier open, `invocation_mismatch`, and a recovery replay
+or indeterminate outcome. The object MUST stay under 48 KiB.
 
 Recovery respects current read permission and reveals no foreign consumer data.
 A refusal shows no source rows. `ranges` names the whole current mapped span
@@ -507,34 +506,59 @@ that a bug must be elsewhere.
 
 ## C16. Invocation identity and replay
 
-The records and replay rules in this section are not implemented yet. Deduplicate before preparation. A bare provider CallId is not sufficient. Runtime
-invocation identity binds thread, originating open generation, turn/request,
-authenticated consumer, and final post-hook payload. Reconnecting clients replay
-that identity. A new model call has a new identity even with equal text.
+A bare provider call id is not sufficient. Each `hashline-light` and
+`hashline-enhanced` call has a runtime invocation identity:
+`<thread>/<generation>/<turn>/<request>/<consumer>/<call_id>`.
 
-Fingerprint exact final payload bytes, style, contract version, workspace, and
-consumer using full digests. Same identity with different fingerprint returns
-`invocation_mismatch` before effects. A duplicate still running joins the owner.
-Cancelling its waiter does not cancel that owner operation.
+- `generation` is the journal head when this host opened the thread.
+- `request` is the context sequence of the model request that returned the call.
+  An in-band call uses the context sequence of its streaming request.
+  A nested script call uses the journal head at dispatch.
+- `consumer` is the authenticated consumer. A model request uses `model`.
 
-After bounded syntax/envelope validation and deduplication, append an invocation
-start before preparation. Append its terminal outcome whenever the journal stays
-healthy, including no_change and pre-commit rejection. Use existing thread extension
-records, not a new journal. Kinds are `hashline.invocation_started` and
-`hashline.invocation_settled`, owned by dispatch/store integration. Start holds
-identity, fingerprint, profile/version, and parsed requested paths. Settled holds
-the terminal output. Records contain no credentials or private-plan citations.
+A new model call has a new identity even with equal text. A client that sends
+the same call again in the same request replays that identity.
 
-A matching settled record replays without execution, with `replayed=true`.
-Historical previews/references from replay create no fresh observation authority.
-They MAY be printed as historical, but the caller needs a new read for fresh
-executable evidence. Never mint a current reference while replaying an old result.
+The fingerprint is a lowercase hex SHA-256 digest of length-prefixed byte strings.
+The tuple contains style, decimal contract version, workspace, consumer, and the
+exact final post-hook payload bytes, in that order. Each length is an unsigned
+64-bit big-endian byte count.
 
-After recovery, started-but-unsettled is indeterminate, not safe to retry. An
-unstarted old-host/open invocation is not executable either: its evidence expired,
-so a new explicit edit is required. Ephemeral threads deduplicate only within
-live-host lifetime. This is recorded-result replay, not a claim of exactly-once
-filesystem effects across crashes.
+The dispatcher computes the identity and fingerprint after argument validation and before preparation, then deduplicates the call:
+
+- A `request` below `generation` comes from an earlier open, so its evidence expired.
+  The dispatcher MUST refuse the call with `reference_expired` and MUST NOT prepare it.
+  A new explicit edit is required.
+- A repeated identity with a different fingerprint MUST return `invocation_mismatch` before effects.
+- A repeated identity with the same fingerprint MUST join the first dispatch.
+  It waits for that result and does not execute.
+  Cancelling the waiter does not cancel the first dispatch.
+- A repeated identity after the first dispatch ended MUST replay that result with `replayed=true`.
+- A repeated identity appends no journal record. The records of the first dispatch hold the invocation.
+
+The fold rejects a repeated call id in one assistant message. Only an in-band re-dispatch in the same streaming request can repeat an identity in a live host. Live deduplication lasts as long as that streaming request.
+The host appends `hashline.invocation_started` in one batch with `tool.started`.
+This occurs after preparation and approval, because the start must name a call in flight.
+A call that preparation or approval refuses has no invocation records.
+The start holds the identity, fingerprint, style, contract version, and parsed requested paths.
+The host appends `hashline.invocation_settled` before `tool.completed` while the journal stays healthy.
+This includes `no_change` and a rejection after approval.
+The settled record holds the terminal `ok`, output, spill, and metadata.
+The records use the existing thread journal and contain no credentials or private-plan citations.
+
+A replay does not execute. It returns the recorded output with `replayed=true`.
+Historical previews and references from a replay create no fresh observation authority.
+The host does not bind a reference from replayed output.
+The caller needs a new read for fresh executable evidence.
+Never mint a current reference while replaying an old result.
+
+Recovery reads the invocation records of a call with `hashline.invocation_started` and no `tool.completed`.
+A settled invocation replays: recovery journals its settled result with `recovered=replayed` and `replayed=true`.
+An unsettled invocation is indeterminate and not safe to retry.
+Recovery journals `ok=false`, `recovered=interrupted`, status `indeterminate`, commit state `unknown`, and reason `commit_unknown`.
+Its `path_states` give the current state of each started file.
+Recovery does not run the call again and does not change a file.
+This is recorded-result replay, not a claim of exactly-once filesystem effects across crashes.
 
 ## C17. Implementation boundaries and invariants
 
@@ -569,7 +593,7 @@ converted into `stagedBatch` without a subsequent eligible decision.
 | INV-PREPARED | Commit effects are exactly the authorized immutable plan. |
 | INV-NOWRITE | Pre-commit rejection has no target effects. |
 | INV-OUTCOME | Reported effects never exceed what is known. |
-| INV-REPLAY | Settled invocations are not executed again by replay. Replay is not implemented yet. |
+| INV-REPLAY | Settled invocations are not executed again by replay. |
 | INV-BOUNDS | Accounted leases, buffers, and metadata stay within their budgets. Lease accounting is not implemented yet. |
 
 ## C18. Adoption

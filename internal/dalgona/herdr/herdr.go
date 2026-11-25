@@ -42,7 +42,7 @@ func FromEnv(env func(string) string) *Reporter {
 	return &Reporter{binary: binary, paneID: paneID}
 }
 
-func (r *Reporter) Report(ctx context.Context, state State, seq uint64, threadID string) {
+func (r *Reporter) Report(ctx context.Context, state State, seq uint64, remote, threadID string) {
 	if r == nil {
 		return
 	}
@@ -50,15 +50,25 @@ func (r *Reporter) Report(ctx context.Context, state State, seq uint64, threadID
 		r.recordFailure(fmt.Errorf("invalid state %q", state))
 		return
 	}
+	id := threadID
+	if remote != "" {
+		id = "remote:" + strconv.Itoa(len(remote)) + ":" + remote + threadID
+	}
 	args := []string{
 		"pane", "report-agent", r.paneID,
 		"--source", "dalgona",
 		"--agent", "dalgona",
 		"--state", string(state),
 		"--seq", strconv.FormatUint(seq, 10),
-		"--agent-session-id", threadID,
-		"--", "dalgona", "--resume", threadID,
+		"--agent-session-id", id,
+		"--", "dalgona",
 	}
+	if remote != "" {
+		args = append(args, "--remote", remote)
+	} else {
+		args = append(args, "--local")
+	}
+	args = append(args, "--resume", threadID)
 	if err := r.run(ctx, args); err != nil {
 		r.recordFailure(err)
 	}
@@ -93,7 +103,7 @@ func (r *Reporter) SubagentPane(ctx context.Context, childID, cwd string) {
 		r.recordFailure(err)
 		return
 	}
-	runArgs := []string{"pane", "run", paneID, "dalgona --resume " + childID}
+	runArgs := []string{"pane", "run", paneID, "dalgona --local --resume " + childID}
 	if err := r.run(ctx, runArgs); err != nil {
 		r.recordFailure(err)
 	}

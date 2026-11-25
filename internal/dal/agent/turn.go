@@ -100,8 +100,7 @@ func (a *actor) idle() {
 }
 
 func (w *worker) runTurn(ctx context.Context) {
-	w.turnCtx = ctx
-	if err := w.prime(ctx); err != nil {
+	if err := w.containedPrime(ctx); err != nil {
 		w.end(ctx, outcome{status: statusFailed, failure: err.Error()})
 		return
 	}
@@ -109,6 +108,7 @@ func (w *worker) runTurn(ctx context.Context) {
 }
 
 func (w *worker) prime(ctx context.Context) error {
+	w.turnCtx = ctx
 	if w.requestContext.baseGeneration == 0 {
 		if err := w.initializeContext(ctx); err != nil {
 			return err
@@ -126,7 +126,7 @@ func (w *worker) prime(ctx context.Context) error {
 
 func (w *worker) drive(ctx context.Context) {
 	for {
-		if w.end(ctx, w.loop(ctx)) {
+		if w.end(ctx, w.containedLoop(ctx)) {
 			return
 		}
 	}
@@ -161,7 +161,7 @@ func (w *worker) loop(ctx context.Context) outcome {
 		}
 		v, messages, err := w.context(ctx)
 		if err != nil {
-			return failure(ctx, err)
+			return failedOutcome(ctx, err)
 		}
 		if !needsModel(messages) {
 			if waited {
@@ -176,7 +176,8 @@ func (w *worker) loop(ctx context.Context) outcome {
 			return outcome{status: statusCompleted, final: true}
 		}
 		if err != nil {
-			return failure(ctx, err)
+			w.captureModelFailure(ctx, err)
+			return failedOutcome(ctx, err)
 		}
 	}
 }
@@ -202,7 +203,7 @@ func (w *worker) context(ctx context.Context) (view, []model.Message, error) {
 	return v, messages, err
 }
 
-func failure(ctx context.Context, err error) outcome {
+func failedOutcome(ctx context.Context, err error) outcome {
 	if errors.Is(err, ErrExternalTurnInterrupted) {
 		return outcome{status: statusInterrupted}
 	}
@@ -316,7 +317,8 @@ type endDecision struct {
 
 func (a *actor) settleTurn(turnID string, o outcome, head uint64) bool {
 	a.settle(o.status)
-	completed := event.TurnCompleted{TurnID: turnID, Status: o.status, Error: o.failure}
+	completed := event.TurnCompleted{TurnID: turnID, Status: o.status, Error: o.failure, Operation: a.interruptOperation}
+	a.interruptOperation = ""
 	if _, err := a.append(context.Background(), completed); err != nil {
 		a.t.host.log.Error("agent: journal turn.completed", "thread", a.t.id, "turn", turnID, "error", err)
 	}

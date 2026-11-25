@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/read params",
+  "type": "object",
+  "required": [
+    "workspaceId",
+    "path"
+  ],
+  "properties": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "expectedRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "offset": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1048576
+    }
+  }
+}

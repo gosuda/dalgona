@@ -21,7 +21,7 @@ const binary = "dalgona"
 type stdio struct {
 	in          io.Reader
 	out, errOut io.Writer
-	remote      string
+	machineSelection
 }
 
 func (s stdio) Read(p []byte) (int, error)  { return s.in.Read(p) }
@@ -44,11 +44,11 @@ func run(ctx context.Context, args []string, std stdio) int {
 			return command(args[1:], std)
 		}
 	}
-	name, args, err := splitRemoteFlag(args)
+	selection, args, err := splitMachineFlags(args)
 	if err != nil {
 		return fail(std, 2, err)
 	}
-	std.remote = name
+	std.machineSelection = selection
 	if len(args) == 1 && args[0] == "--version" {
 		fmt.Fprintf(std.out, "%s %s\n", binary, config.Version())
 		return 0
@@ -109,6 +109,8 @@ var commands = map[string]func(context.Context, []string, stdio) int{
 	"acp":         runACP,
 	"mcp":         runMCP,
 	"failures":    runFailures,
+	"onboard":     runOnboard,
+	"pair":        runPairing,
 }
 
 func fail(std stdio, code int, err error) int {

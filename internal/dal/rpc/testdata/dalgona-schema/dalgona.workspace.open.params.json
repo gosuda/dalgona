@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/open params",
+  "type": "object",
+  "required": [
+    "threadId",
+    "root",
+    "rights",
+    "operationId"
+  ],
+  "properties": {
+    "threadId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "root": {
+      "const": "cwd"
+    },
+    "rights": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "read",
+          "write",
+          "terminal"
+        ]
+      }
+    },
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

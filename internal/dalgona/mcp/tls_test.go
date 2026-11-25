@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 )
@@ -47,7 +46,7 @@ func TestPrivateCATrustsMCPTransport(t *testing.T) {
 	}
 	saved := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = saved })
-	if err := app.InstallTLSRoots(config.Config{TLSCAFile: caFile}); err != nil {
+	if err := config.InstallTLSRoots(caFile); err != nil {
 		t.Fatal(err)
 	}
 	if err := dial(); err != nil {

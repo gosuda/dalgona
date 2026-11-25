@@ -225,19 +225,19 @@ func TestRevertAndLeafMoveTheActivePath(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	thread, turns := h.twoTurns()
-	if err := thread.Revert("missing"); !errors.Is(err, ErrTurnNotOnPath) || err.Error() != "turn missing is not on the active path" {
+	if err := thread.Revert(t.Context(), "missing"); !errors.Is(err, ErrTurnNotOnPath) || err.Error() != "turn missing is not on the active path" {
 		t.Fatalf("revert missing = %v", err)
 	}
-	if err := thread.SetLeaf("missing"); !errors.Is(err, ErrUnknownTurn) {
+	if err := thread.SetLeaf(t.Context(), "missing"); !errors.Is(err, ErrUnknownTurn) {
 		t.Fatalf("leaf missing = %v", err)
 	}
-	if err := thread.Revert(turns[1]); err != nil {
+	if err := thread.Revert(t.Context(), turns[1]); err != nil {
 		t.Fatal(err)
 	}
 	if texts := h.promptTexts(thread, "third prompt"); strings.Join(texts, "|") != "first prompt|third prompt" {
 		t.Fatalf("after revert texts = %q", texts)
 	}
-	if err := thread.SetLeaf(turns[1]); err != nil {
+	if err := thread.SetLeaf(t.Context(), turns[1]); err != nil {
 		t.Fatal(err)
 	}
 	if texts := h.promptTexts(thread, "fourth prompt"); strings.Join(texts, "|") != "first prompt|second prompt|fourth prompt" {
@@ -280,7 +280,7 @@ func TestBranchingRefusesRunningThread(t *testing.T) {
 	thread := h.start()
 	h.submit(thread, "slow")
 	h.waitRequests(1)
-	err := thread.Revert("x")
+	err := thread.Revert(t.Context(), "x")
 	if !errors.Is(err, ErrThreadRunning) || err.Error() != "thread "+thread.ID()+" is running" {
 		t.Fatalf("revert while running = %v", err)
 	}

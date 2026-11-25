@@ -197,7 +197,7 @@ func (w *worker) compact(ctx context.Context, method string) error {
 		w.t.host.logOnce(fmt.Sprintf("%s\x00%s\x00%d", notSmallerText, w.t.id, cv.lastMarker), notSmallerText, "thread", w.t.id, "tokens_before", before, "tokens_after", after)
 		return fmt.Errorf("%w (%d tokens before, %d after)", ErrCompactionNotSmaller, before, after)
 	}
-	marker := event.Compaction{FirstKeptSeq: cv.entries[cut].Seq, Summary: summary, Method: method, TokensBefore: before, TokensAfter: after}
+	marker := event.Compaction{FirstKeptSeq: cv.entries[cut].Seq, Summary: summary, Method: method, TokensBefore: before, TokensAfter: after, Operation: operationOf(ctx)}
 	_, err = w.t.appendEvents(ctx, marker)
 	return err
 }

@@ -1,13 +1,11 @@
 package app
 
 import (
-	"context"
-	"io"
 	"net"
 	"testing"
 )
 
-func TestInteractiveEndsCleanlyWhenTUIClosedTheConnection(t *testing.T) {
+func TestCloseQuietAcceptsAlreadyClosedNetworkConnection(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -17,13 +15,10 @@ func TestInteractiveEndsCleanlyWhenTUIClosedTheConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := CLIEnv{
-		Dial: func(context.Context) (io.ReadWriteCloser, error) { return conn, nil },
-		TUI: func(_ context.Context, rwc io.ReadWriteCloser, _ TUIOptions) error {
-			return rwc.Close()
-		},
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if err := env.interactive(t.Context(), cliFlags{}); err != nil {
-		t.Fatalf("interactive after the TUI closed its connection: %v", err)
+	if err := closeQuiet(conn); err != nil {
+		t.Fatalf("close an already closed connection: %v", err)
 	}
 }

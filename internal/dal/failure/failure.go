@@ -772,8 +772,14 @@ type Options struct {
 }
 
 type Query struct {
-	ID    string
-	Limit int
+	ID        string
+	Limit     int
+	OlderThan *Position
+}
+
+type Position struct {
+	Time time.Time
+	ID   string
 }
 
 type Summary struct {
@@ -849,6 +855,8 @@ func ownedFile(dir, name string) bool {
 
 var errOccurrenceConflict = errors.New("failure: occurrence id conflict")
 
+var ErrRecordNotFound = errors.New("failure: record not found")
+
 func isStorageError(err error) bool {
 	return err != nil && strings.HasPrefix(err.Error(), "failure: write local record")
 }
@@ -914,37 +922,10 @@ func (s *Store) Capture(ctx context.Context, input Input) (Record, error) {
 	}
 	s.recordsMu.Lock()
 	defer s.recordsMu.Unlock()
-	return s.captureLocked(ctx, input, s.masker)
+	return s.captureLocked(ctx, input)
 }
 
-func (s *Store) Recover(ctx context.Context, input Input, errp *error) {
-	value := recover()
-	if value == nil {
-		return
-	}
-	formatted := ""
-	func() {
-		defer func() { _ = recover() }()
-		formatted = fmt.Sprint(value)
-	}()
-	input.Class = ClassPanic
-	input.Frames = CaptureFrames(2)
-	masker := s.masker
-	if formatted == "" {
-		input.Err = errors.New("panic value could not be formatted")
-		masker = nil
-	} else {
-		input.Err = errors.New(formatted)
-	}
-	s.recordsMu.Lock()
-	defer s.recordsMu.Unlock()
-	_, _ = s.captureLocked(ctx, input, masker)
-	if errp != nil {
-		*errp = errors.New("failure: recovered panic")
-	}
-}
-
-func (s *Store) captureLocked(ctx context.Context, input Input, masker Masker) (Record, error) {
+func (s *Store) captureLocked(ctx context.Context, input Input) (Record, error) {
 	id := input.ID
 	if id == "" {
 		generated, err := NewID()
@@ -957,7 +938,7 @@ func (s *Store) captureLocked(ctx context.Context, input Input, masker Masker) (
 		return s.replayFrozen(id, kept), nil
 	}
 	input.ID = id
-	built, err := s.build(ctx, input, masker)
+	built, err := s.build(ctx, input)
 	if err != nil {
 		if isStorageError(err) {
 			s.notify("failure log unavailable; details were not written")
@@ -1020,11 +1001,11 @@ type builtStoreRecord struct {
 	local   []byte
 }
 
-func (s *Store) build(ctx context.Context, input Input, masker Masker) (builtStoreRecord, error) {
+func (s *Store) build(ctx context.Context, input Input) (builtStoreRecord, error) {
 	if input.Time.IsZero() {
 		input.Time = s.now().UTC()
 	}
-	record, err := Build(ctx, input, masker)
+	record, err := Build(ctx, input, s.masker)
 	if err != nil {
 		return builtStoreRecord{}, err
 	}
@@ -1323,14 +1304,14 @@ func (s *Store) List(ctx context.Context, query Query) ([]Record, error) {
 	if query.ID != "" {
 		return s.findRecord(query.ID)
 	}
-	return s.listRecords(query.Limit)
+	return s.listRecords(query)
 }
 
 func (s *Store) findRecord(id string) ([]Record, error) {
 	raw, err := os.ReadFile(filepath.Join(s.dir, recordFilename(id)))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, errors.New("failure: record not found")
+			return nil, ErrRecordNotFound
 		}
 		return nil, fmt.Errorf("failure: invalid stored record: %w", err)
 	}
@@ -1341,7 +1322,7 @@ func (s *Store) findRecord(id string) ([]Record, error) {
 	return []Record{record}, nil
 }
 
-func (s *Store) listRecords(limit int) ([]Record, error) {
+func (s *Store) listRecords(query Query) ([]Record, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("failure: invalid stored record: %w", err)
@@ -1357,16 +1338,31 @@ func (s *Store) listRecords(limit int) ([]Record, error) {
 		}
 		records = append(records, record)
 	}
-	slices.SortFunc(records, func(a, b Record) int {
-		if a.Time.Equal(b.Time) {
-			return strings.Compare(b.ID, a.ID)
-		}
-		if a.Time.After(b.Time) {
-			return -1
-		}
-		return 1
-	})
-	return applyRecordLimit(records, limit), nil
+	slices.SortFunc(records, func(a, b Record) int { return newestFirst(a.position(), b.position()) })
+	return applyRecordLimit(olderThan(records, query.OlderThan), query.Limit), nil
+}
+
+func (r Record) position() Position { return Position{Time: r.Time, ID: r.ID} }
+
+func newestFirst(a, b Position) int {
+	if a.Time.Equal(b.Time) {
+		return strings.Compare(b.ID, a.ID)
+	}
+	if a.Time.After(b.Time) {
+		return -1
+	}
+	return 1
+}
+
+func olderThan(records []Record, boundary *Position) []Record {
+	if boundary == nil {
+		return records
+	}
+	start := slices.IndexFunc(records, func(record Record) bool { return newestFirst(record.position(), *boundary) > 0 })
+	if start < 0 {
+		return nil
+	}
+	return records[start:]
 }
 
 func (s *Store) readRecordEntry(name string) (Record, bool, error) {

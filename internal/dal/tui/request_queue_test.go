@@ -117,6 +117,7 @@ func dismissFirstOfTwoQuestions(t *testing.T, typedBefore bool) model {
 		m = typeText(t, m, "draft")
 	}
 	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	m, _ = drive(t, m, requestResolved("t1", "req-1", "cancelled"))
 	return m
 }
 
@@ -168,8 +169,13 @@ func TestChoiceQuestionKeepsTheAPIKey(t *testing.T) {
 	assertField(t, m, "sk-1234", "a choice question arrived")
 	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	if len(m.approvals) != 1 || !m.approvals[0].card.sent {
+		t.Fatalf("the sent question is not kept for correction: %#v", m.approvals)
+	}
+	assertField(t, m, "sk-1234", "the choice question was sent")
+	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t1","requestId":"req-1","resolution":"answered"}`)})
 	if len(m.approvals) != 0 {
-		t.Fatalf("the answered question is still open: %#v", m.approvals)
+		t.Fatalf("the resolved question is still open: %#v", m.approvals)
 	}
 	assertField(t, m, "sk-1234", "the choice question closed")
 	if m.login == nil || m.login.phase != loginAPIKey {
@@ -198,6 +204,7 @@ func TestClosedQuestionLeavesTheAPIKeyFieldEmpty(t *testing.T) {
 	m = typeText(t, m, "draft")
 	m, _ = drive(t, m, queuedApproval("req-2", "cmd-2", make(chan requestAnswer, 1)))
 	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	m, _ = drive(t, m, requestResolved("t1", "req-1", "cancelled"))
 	if len(m.approvals) != 1 || m.approvals[0].card != nil {
 		t.Fatalf("approval is not the open card: %#v", m.approvals)
 	}

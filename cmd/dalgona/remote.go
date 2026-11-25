@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/gosuda/dalgona/internal/dal/auth"
@@ -24,8 +24,12 @@ const (
 )
 
 type remoteCall struct {
-	ThreadID string `json:"threadId,omitzero"`
-	Yes      bool   `json:"yes,omitzero"`
+	ThreadID        string `json:"threadId,omitzero"`
+	Yes             bool   `json:"yes,omitzero"`
+	PreviewRevision string `json:"previewRevision,omitzero"`
+	OperationID     string `json:"dalgonaOperationId,omitzero"`
+	Cursor          string `json:"cursor,omitzero"`
+	Limit           int    `json:"limit,omitzero"`
 }
 
 type remoteResult struct {
@@ -33,49 +37,49 @@ type remoteResult struct {
 	Output   string `json:"output"`
 }
 
-func splitRemoteFlag(args []string) (string, []string, error) {
-	rest := make([]string, 0, len(args))
-	name := ""
-	for i := 0; i < len(args); i++ {
-		value, inline := strings.CutPrefix(args[i], "--remote=")
-		switch {
-		case inline:
-			name = value
-		case args[i] == "--remote" && i+1 < len(args):
-			name = args[i+1]
-			i++
-		case args[i] == "--remote":
-			return "", nil, errors.New("--remote needs a name")
-		default:
-			rest = append(rest, args[i])
-		}
+type machineSelection struct {
+	remote string
+	local  bool
+}
+
+func (s machineSelection) remoteName(configured string) string {
+	if s.local {
+		return ""
 	}
-	return name, rest, nil
+	return cmp.Or(s.remote, configured)
+}
+
+func splitMachineFlags(args []string) (machineSelection, []string, error) {
+	var selection machineSelection
+	var remoteSet bool
+	rest := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if value, ok := strings.CutPrefix(args[i], "--remote="); ok {
+			selection.remote, remoteSet = value, true
+			continue
+		}
+		if args[i] == "--remote" {
+			if i+1 == len(args) {
+				return machineSelection{}, nil, errors.New("--remote needs a name")
+			}
+			selection.remote, remoteSet = args[i+1], true
+			i++
+			continue
+		}
+		if args[i] == "--local" && len(rest) == 0 {
+			selection.local = true
+			continue
+		}
+		rest = append(rest, args[i])
+	}
+	if selection.local && remoteSet {
+		return machineSelection{}, nil, errors.New("--local cannot be combined with --remote")
+	}
+	return selection, rest, nil
 }
 
 func authStore(cfg config.Config) (*auth.Store, error) {
 	return auth.NewWithPatterns(cfg.Home, cfg.Secrets.Patterns, auth.WithBuiltinPatterns(cfg.Secrets.Builtin))
-}
-
-func remoteOptions(cfg config.Config, std stdio) (remote.Options, error) {
-	store, err := authStore(cfg)
-	if err != nil {
-		return remote.Options{}, err
-	}
-	return remote.Options{Config: cfg, Auth: store, Out: std.errOut, Logger: slog.New(slog.NewTextHandler(std.errOut, nil))}, nil
-}
-
-func runCloud(ctx context.Context, args []string, std stdio) int {
-	cfg, err := loadConfig()
-	if err != nil {
-		return fail(std, 1, err)
-	}
-	opts, err := remoteOptions(cfg, std)
-	if err != nil {
-		return fail(std, 1, err)
-	}
-	opts.Out = nil
-	return remote.CloudMain(ctx, opts, args, remote.IO{Stdin: std.in, Stdout: std.out, Stderr: std.errOut})
 }
 
 func runPull(ctx context.Context, args []string, std stdio) int {
@@ -130,23 +134,35 @@ func (quietClient) Request(context.Context, string, jsontext.Value) (any, error)
 
 func remoteExtensions(d *battery.Daemon) map[string]rpcserver.Extension {
 	return map[string]rpcserver.Extension{
-		methodRemotePull: func(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
-			call, err := decodeRemoteCall(params)
-			if err != nil {
-				return nil, err
-			}
-			return runCaptured(func(out remote.IO) int { return remote.PullMain(ctx, d.Remote, []string{call.ThreadID}, out) })
-		},
-		methodRemoteGC: func(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
-			call, err := decodeRemoteCall(params)
-			if err != nil {
-				return nil, err
-			}
-			opts := d.Remote
-			opts.Confirm = func(string) (bool, error) { return call.Yes, nil }
-			return runCaptured(func(out remote.IO) int { return remote.RunnerMain(ctx, opts, []string{"gc"}, out) })
-		},
+		methodRemotePull:   remoteExtension(d, remotePull),
+		methodRemoteGC:     remoteExtension(d, remoteGC),
+		methodRemoteStatus: rpcserver.WithDeadline(rpcserver.MetadataDeadline, remoteExtension(d, nativeStatus)),
 	}
+}
+
+func remoteExtension(d *battery.Daemon, run func(context.Context, remote.Options, remoteCall) (jsontext.Value, error)) rpcserver.Extension {
+	return func(ctx context.Context, params jsontext.Value) (jsontext.Value, error) {
+		call, err := decodeRemoteCall(params)
+		if err != nil {
+			return nil, err
+		}
+		return run(ctx, d.Remote, call)
+	}
+}
+
+func remotePull(ctx context.Context, opts remote.Options, call remoteCall) (jsontext.Value, error) {
+	if rpcserver.NativeFeature(ctx, "runnerManagement") == 1 {
+		return nativePull(ctx, opts, call)
+	}
+	return runCaptured(func(out remote.IO) int { return remote.PullMain(ctx, opts, []string{call.ThreadID}, out) })
+}
+
+func remoteGC(ctx context.Context, opts remote.Options, call remoteCall) (jsontext.Value, error) {
+	if rpcserver.NativeFeature(ctx, "runnerManagement") == 1 {
+		return nativeGC(ctx, opts, call)
+	}
+	opts.Confirm = func(string) (bool, error) { return call.Yes, nil }
+	return runCaptured(func(out remote.IO) int { return remote.RunnerMain(ctx, opts, []string{"gc"}, out) })
 }
 
 func decodeRemoteCall(params jsontext.Value) (remoteCall, error) {

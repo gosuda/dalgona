@@ -190,7 +190,7 @@ func TestReadAfterReportsResetOnRevert(t *testing.T) {
 	if delta.Reset || len(delta.Events) == 0 || delta.Events[0].Seq != first.Head+1 {
 		t.Fatalf("delta = %+v", delta)
 	}
-	if err := thread.Revert(lastTurn(h.events(thread.ID())).TurnID); err != nil {
+	if err := thread.Revert(t.Context(), lastTurn(h.events(thread.ID())).TurnID); err != nil {
 		t.Fatal(err)
 	}
 	if reset := mustRead(t, thread, delta.Head); !reset.Reset || len(reset.Events) != len(first.Events) {

@@ -18,7 +18,7 @@ Administrators and SYSTEM are inside the boundary. The check covers the home dir
 
 `Run` MUST call `Host.Recover` once, in the background. Recovery MUST NOT delay the accept loop. Each connection MUST get its own `serve` call, so a client gets its `initialize` answer while recovery runs. `Run` MUST log recovery errors. Recovery errors MUST NOT stop the daemon.
 
-When the context ends, `Run` MUST stop accepting, close every open connection, and wait for the connection and recovery work. It MUST then close the host and the journal, which releases the lock. Closing the listener removes the socket file. An accept failure that does not come from the context MUST stop `Run` with an error.
+When the context ends, `Run` MUST stop accepting, close every open connection, and wait for the connection and recovery work. It MUST then close the host and the journal, which releases the lock. `Run` MUST remove the socket file only after the host and the journal are closed, so a missing socket file means the home is released. An accept failure that does not come from the context MUST stop `Run` with an error.
 
 `Ensure` MUST tighten `<home>` to mode `0700`. `Ensure` MUST refuse a home that is not owned by the current uid. `Ensure` MUST refuse a home whose mode is not `0700`. `Ensure` MUST refuse a socket that is not owned by the current uid. `Ensure` MUST verify the peer uid of each dialed connection and MUST close a connection whose peer uid differs, without sending any request on it. A pre-bound socket from another user MUST be refused, never answered. On Windows `Ensure` MUST protect the home before it verifies the home. It MUST refuse a home that still grants access to any other principal. It MUST NOT apply uid checks. On other unix targets without a peer credential call, the peer check MUST fail closed and `Ensure` MUST refuse the socket.
 
@@ -100,7 +100,7 @@ Headless runs MUST read non-terminal stdin before any daemon request.
 The client MUST wait for EOF without a deadline.
 Use `</dev/null` or `ssh -n` when stdin is not prompt input.
 Input above 1048576 bytes MUST fail before any request.
-The client MUST replace invalid UTF-8 with U+FFFD.
+The client MUST reject malformed UTF-8 and NUL in stdin before any request, as the protocol specification requires.
 The client MUST remove trailing newlines from stdin.
 With both inputs present, the client MUST join stdin and the prompt with two newlines.
 With an empty prompt, stdin alone MUST supply the prompt.
@@ -137,7 +137,25 @@ cannot safely identify the old daemon; stop it manually and retry dalgona restar
 
 The dalgona host MUST bind `[runners.<name>]` runners through the remote binder and MUST use the local runner for every other runner name. `dalgona pull <thread>` and `dalgona runner gc [--yes]` MUST run inside the daemon through the protocol extensions `dalgona/remote/pull {threadId}` and `dalgona/remote/gc {yes}`, because the daemon holds the journal lock. Each extension MUST answer `{"exitCode":<int>,"output":<text>}`. Without `--yes`, `runner gc` MUST answer no to every destroy question. `dalgona cloud up|down|pull` MUST run in the client process.
 
-`dalgona bridge` MUST splice standard input and output to a local session connection. `dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path. The TUI, `models`, `dalgona app-server`, `dalgona web`, `dalgona acp`, `pull`, and `runner gc` MUST open one session per process and dial the local daemon through its `Connect`. When `--remote <name>` is given, or `remote` is set in configuration, the session MUST dial the remote box daemon through the `client.Remotes` bridge instead. The flag MUST win over the configuration. `bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
+`dalgona bridge` MUST splice standard input and output to a local session connection.
+`dalgona exec-server` MUST serve the exec protocol and MUST use the same splice for its `/bridge` path.
+`models`, `dalgona app-server`, `dalgona web`, `dalgona acp`, `pull`, and `runner gc` MUST open one session per process and dial the local daemon through its `Connect`.
+When `--remote <name>` is given, or `remote` is set in configuration, the session MUST select that configured endpoint through the shared client transport owner.
+The flag MUST win over the configuration.
+A leading `--local` MUST select the local endpoint for TUI and headless clients despite a configured default remote. It does so without removing the remote catalog or changing an existing thread's runner binding. It MUST conflict with every explicit `--remote` selector, including an empty `--remote=`.
+Without `--local`, an empty remote flag MUST retain its existing configuration fallback.
+A session MUST reject an unsupported headless transport before dialing it.
+Legacy daemon relays MUST retain their existing headless refusal.
+Paired-device remotes MUST direct the caller to the terminal machine selector.
+SSH sessions MUST retain write-side EOF and drain replies without stopping the shared daemon.
+`bridge` and `exec-server` MUST NOT redirect their local listener with `--remote`.
+
+The TUI MUST use one `EndpointSet` for simultaneous local and remote machines.
+Its machine controls MUST add, connect, select, disconnect, and report endpoints.
+Selection MUST NOT reconnect a machine.
+Threads, drafts, queues, approvals, workspace paths, and terminal operations MUST retain their endpoint identity.
+The TUI MUST support SSH onboarding and device pairing through the same client transport owner.
+Pairing and SSH MUST follow the trust and lifecycle requirements in [native architecture](native-architecture.md#a07-connection-ownership-and-backpressure).
 
 `--config <key>=<value>`, `--config=<key>=<value>`, and `-c <key>=<value>` pairs MAY come before the `app-server` subcommand, as the Codex clients send them. When the first argument after these pairs is `app-server`, the pairs MUST reach the app-server command unchanged. In every other case, `-c` keeps its client meaning.
 

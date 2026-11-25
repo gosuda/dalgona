@@ -231,6 +231,93 @@ func TestDeltaQueueLimitDistinctItems(t *testing.T) {
 	}
 }
 
+func TestStreamedMergeByteLimitRefusesOverLimit(t *testing.T) {
+	q := newOutQueue()
+	q.byteLimit = 1024
+	for range 1023 {
+		if !q.append(queued{}) {
+			t.Fatal("filler item rejected")
+		}
+	}
+	closed := false
+	closeFn := func() error {
+		closed = true
+		return nil
+	}
+	initial := strings.Repeat("a", 512)
+	if err := q.pushStreamed("item/agentMessage/delta", queuedDelta{itemID: "limited", text: []byte(initial)}, closeFn); err != nil {
+		t.Fatal(err)
+	}
+	over := strings.Repeat("b", 600)
+	err := q.pushStreamed("item/agentMessage/delta", queuedDelta{itemID: "limited", text: []byte(over)}, closeFn)
+	if err != nil {
+		if !errors.Is(err, io.ErrShortBuffer) {
+			t.Fatalf("merge over limit error=%v, want nil or io.ErrShortBuffer", err)
+		}
+		if !closed {
+			t.Fatal("over-limit merge did not close slow connection")
+		}
+	}
+	if q.bytes > q.byteLimit {
+		t.Fatalf("queued bytes=%d exceeds limit=%d", q.bytes, q.byteLimit)
+	}
+	if got := len(q.items[1023].stream.text); got != len(initial) {
+		t.Fatalf("merged text length=%d, want %d", got, len(initial))
+	}
+}
+
+func TestStreamedMergeBelowLimitAccepted(t *testing.T) {
+	q := newOutQueue()
+	q.byteLimit = 1024
+	for range 1023 {
+		if !q.append(queued{}) {
+			t.Fatal("filler item rejected")
+		}
+	}
+	closeFn := func() error { return nil }
+	initial := strings.Repeat("a", 512)
+	if err := q.pushStreamed("item/agentMessage/delta", queuedDelta{itemID: "limited", text: []byte(initial)}, closeFn); err != nil {
+		t.Fatal(err)
+	}
+	next := strings.Repeat("c", 400)
+	if err := q.pushStreamed("item/agentMessage/delta", queuedDelta{itemID: "limited", text: []byte(next)}, closeFn); err != nil {
+		t.Fatalf("merge below limit error=%v, want nil", err)
+	}
+	want := initial + next
+	if got := string(q.items[1023].stream.text); got != want {
+		t.Fatalf("merged text length=%d, want %d", len(got), len(want))
+	}
+	if q.bytes > q.byteLimit {
+		t.Fatalf("queued bytes=%d exceeds limit=%d", q.bytes, q.byteLimit)
+	}
+}
+
+func TestUnmergedByteLimitRefused(t *testing.T) {
+	q := newOutQueue()
+	q.byteLimit = 1024
+	params := jsontext.Value(`{"turnId":"turn"}`)
+	first := []byte(strings.Repeat("x", 600))
+	if err := q.push(first, "turn/started", params, false, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	closed := false
+	closeFn := func() error {
+		closed = true
+		return nil
+	}
+	second := []byte(strings.Repeat("y", 600))
+	err := q.push(second, "turn/started", params, false, closeFn)
+	if !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("push over limit error=%v, want io.ErrShortBuffer", err)
+	}
+	if !closed {
+		t.Fatal("over-limit push did not close slow connection")
+	}
+	if q.bytes > q.byteLimit {
+		t.Fatalf("queued bytes=%d exceeds limit=%d", q.bytes, q.byteLimit)
+	}
+}
+
 func TestResponseEncodeFailureClosesConnection(t *testing.T) {
 	left, right := net.Pipe()
 	c := NewConn(t.Context(), left, func(context.Context, string, jsontext.Value) (jsontext.Value, error) {
@@ -608,5 +695,17 @@ func requireMergedDeltaMembers(t *testing.T, line []byte) {
 	}
 	if got.Params.Delta != "a\n\"b\t" || !got.Params.Future.Keep {
 		t.Fatalf("merged params=%+v", got.Params)
+	}
+}
+
+func TestCallFramePreflightCountsEscapingAndTerminatingNewline(t *testing.T) {
+	const fixed = len(`{"jsonrpc":"2.0","id":18446744073709551615,"method":"turn/start","params":{"text":""}}`) + 1
+	text := strings.Repeat(`\`, ((16<<20)-fixed)/2) + strings.Repeat("x", ((16<<20)-fixed)%2)
+	if err := ValidateCallFrame("turn/start", map[string]string{"text": text}); err != nil {
+		t.Fatalf("frame at the byte limit was rejected: %v", err)
+	}
+	err := ValidateCallFrame("turn/start", map[string]string{"text": text + "x"})
+	if data, ok := ErrorDataOf(err); !ok || data.Kind != ErrorLimitExceeded {
+		t.Fatalf("frame one byte over the limit returned %v", err)
 	}
 }

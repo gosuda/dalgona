@@ -71,7 +71,7 @@ func Attach(ctx context.Context, host *agent.Host, thread *agent.Thread, cfg con
 	if err := r.addAdvisors(ctx, host, info, cfg); err != nil {
 		return nil, errors.Join(err, r.closeChildren())
 	}
-	life, stop := context.WithCancelCause(context.WithoutCancel(ctx))
+	life, stop := context.WithCancelCause(agent.WithOperation(context.WithoutCancel(ctx), ""))
 	r.stop, r.done = stop, life.Done()
 	if err := thread.SetBoundaryHook(r.boundary); err != nil {
 		stop(errRuntimeClosed)

@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/workspace/requestPermission params",
+  "type": "object",
+  "required": [
+    "threadId",
+    "runnerId",
+    "bindingRevision",
+    "root",
+    "rights",
+    "reason"
+  ],
+  "properties": {
+    "threadId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "runnerId": {
+      "type": "string"
+    },
+    "bindingRevision": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rights": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "read",
+          "write",
+          "terminal"
+        ]
+      }
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

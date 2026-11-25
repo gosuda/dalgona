@@ -263,6 +263,7 @@ export function reduceNotification(
 		case "threadName":
 		case "advisorNote":
 		case "requestResolved":
+		case "requestWarning":
 			return state;
 		case "childSpawned": {
 			if (!sameThread(state, notification.threadId)) {

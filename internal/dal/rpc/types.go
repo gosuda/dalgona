@@ -105,11 +105,13 @@ type (
 		DiffOmitted bool   `json:"-"`
 	}
 	ItemImage struct {
-		Type  string
-		URL   string
-		Mime  string
-		Bytes int64
-		Path  string
+		Type    string
+		URL     string
+		Mime    string
+		Bytes   int64
+		Path    string
+		Name    string
+		AltText string
 	}
 	SandboxPolicy struct {
 		Type string `json:"type"`
@@ -441,8 +443,11 @@ type (
 		RemainingMS int64  `json:"remainingMs"`
 	}
 	WarningNotification struct {
-		ThreadID string `json:"threadId"`
-		Message  string `json:"message"`
+		ThreadID  string `json:"threadId"`
+		Message   string `json:"message"`
+		RequestID string `json:"requestId,omitzero"`
+		Reason    string `json:"reason,omitzero"`
+		Field     string `json:"field,omitzero"`
 	}
 	SandboxChosenNotification struct {
 		ThreadID string `json:"threadId"`
@@ -461,6 +466,7 @@ type (
 		Command     string `json:"command,omitzero"`
 		Cwd         string `json:"cwd,omitzero"`
 		Reason      string `json:"reason,omitzero"`
+		Escalated   bool   `json:"escalated,omitzero"`
 	}
 	FileChangeRequestApprovalParams struct {
 		ThreadID    string `json:"threadId"`

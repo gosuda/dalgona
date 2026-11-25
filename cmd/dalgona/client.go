@@ -1,18 +1,20 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
-	"github.com/gosuda/dalgona/cmd/internal/tuiwire"
+	"github.com/gosuda/dalgona/cmd/internal/tuiwire/dalgonawire"
 	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/herdr"
+	"github.com/gosuda/dalgona/internal/dalgona/sandboxsvc/registry"
 )
 
 const (
@@ -25,20 +27,47 @@ func runClient(ctx context.Context, args []string, std stdio) int {
 	if err != nil {
 		return fail(std, 1, err)
 	}
-	session, err := openSession(cfg, std)
-	if err != nil {
-		return fail(std, 1, err)
+	dial, closeSession := headlessDial(cfg, std)
+	defer closeSession()
+	initial := std.remoteName(cfg.Remote)
+	openRemotes := func() (*client.Remotes, error) {
+		store, err := authStore(cfg)
+		if err != nil {
+			return nil, err
+		}
+		logger := slog.New(slog.NewTextHandler(std.errOut, nil))
+		services := registry.New(registry.Options{Auth: store, Logger: logger})
+		return client.NewRemotes(cfg, services), nil
 	}
-	defer func() { _ = session.Close() }()
 	env := app.CLIEnv{
-		Product: config.ProductDalgona, Home: cfg.Home, Remote: cmp.Or(std.remote, cfg.Remote),
-		Dial:  func(ctx context.Context) (io.ReadWriteCloser, error) { return connect(ctx, session) },
-		Stdin: std.in, Stdout: std.out, Stderr: std.errOut, TUI: tuiwire.Run,
+		Product: config.ProductDalgona, Home: cfg.Home, Remote: initial,
+		Dial: dial, Stdin: std.in, Stdout: std.out, Stderr: std.errOut,
+		TUI: dalgonawire.Launch(cfg, initial, openRemotes),
 	}
 	release := attachHerdr(ctx, &env, cfg.Herdr, os.Getenv)
 	code := app.RunCLI(ctx, env, args)
 	release()
 	return code
+}
+
+func headlessDial(cfg config.Config, std stdio) (func(context.Context) (io.ReadWriteCloser, error), func()) {
+	var session *client.Session
+	open := sync.OnceValues(func() (*client.Session, error) {
+		var err error
+		session, err = openSession(cfg, std)
+		return session, err
+	})
+	return func(ctx context.Context) (io.ReadWriteCloser, error) {
+			opened, err := open()
+			if err != nil {
+				return nil, err
+			}
+			return connect(ctx, opened)
+		}, func() {
+			if session != nil {
+				_ = session.Close()
+			}
+		}
 }
 
 type herdrWorker struct {
@@ -48,8 +77,8 @@ type herdrWorker struct {
 	mu       sync.Mutex
 	closed   bool
 	last     app.Status
-	pending  map[string]app.Status
-	order    []string
+	pending  map[[2]string]app.Status
+	order    [][2]string
 	panes    [][2]string
 }
 
@@ -60,7 +89,7 @@ func attachHerdr(ctx context.Context, env *app.CLIEnv, cfg config.HerdrConfig, g
 	}
 	w := &herdrWorker{
 		reporter: reporter, wake: make(chan struct{}, 1), done: make(chan struct{}),
-		pending: make(map[string]app.Status),
+		pending: make(map[[2]string]app.Status),
 	}
 	detached := context.WithoutCancel(ctx)
 	work, stopWork := context.WithCancel(detached)
@@ -78,15 +107,19 @@ func (w *herdrWorker) status(status app.Status) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	sameThread := status.ThreadID == w.last.ThreadID
+	sameThread := status.Endpoint == w.last.Endpoint && status.ThreadID == w.last.ThreadID
 	if w.closed || (sameThread && (status.Seq < w.last.Seq || status == w.last)) {
 		return
 	}
 	w.last = status
-	if _, queued := w.pending[status.ThreadID]; !queued {
-		w.order = append(w.order, status.ThreadID)
+	key := [2]string{status.Endpoint, status.ThreadID}
+	if pos := slices.Index(w.order, key); pos >= 0 {
+		copy(w.order[pos:], w.order[pos+1:])
+		w.order[len(w.order)-1] = key
+	} else {
+		w.order = append(w.order, key)
 	}
-	w.pending[status.ThreadID] = status
+	w.pending[key] = status
 	w.signal()
 }
 
@@ -113,7 +146,7 @@ func (w *herdrWorker) run(base context.Context) {
 		statuses, panes := w.take()
 		for _, status := range statuses {
 			ctx, cancel := context.WithTimeout(base, herdrCallTimeout)
-			w.reporter.Report(ctx, herdrState(status.State), status.Seq, status.ThreadID)
+			w.reporter.Report(ctx, herdrState(status.State), status.Seq, status.Remote, status.ThreadID)
 			cancel()
 		}
 		for _, pane := range panes {

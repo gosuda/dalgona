@@ -81,13 +81,20 @@ func TestWelcomeUsesOnlyDefaultColours(t *testing.T) {
 
 func TestExitLineNamesResumeCommand(t *testing.T) {
 	t.Parallel()
-	m := initializedModel(t, "/work")
-	m.thread.id = "t1"
-	m.thread.title = "Plan"
-	m = rawUpdate(t, m, press('c', tea.ModCtrl, ""))
-	m, _ = updateWithCommand(t, m, press('c', tea.ModCtrl, ""))
-	if !strings.Contains(strings.Join(m.out.pending, "\n"), "Thread Plan saved · resume with dalgona --resume t1") {
-		t.Fatalf("exit row missing or wrong in pending %q", m.out.pending)
+	for _, tc := range []struct{ name, product, machine, remote, command string }{
+		{name: "Dal remains local", product: "dal", command: "dal"},
+		{name: "Dalgona local", product: "dalgona", machine: "local", command: "dalgona --local"},
+		{name: "Dalgona named remote", product: "dalgona", machine: "Remote label", remote: "work", command: "dalgona --remote work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := initializedModel(t, "/work")
+			m.conn.product = tc.product
+			m.conn.machine, m.conn.remote = tc.machine, tc.remote
+			m.thread.id, m.thread.title = "t1", "Plan"
+			m = rawUpdate(t, m, press('c', tea.ModCtrl, ""))
+			m, _ = updateWithCommand(t, m, press('c', tea.ModCtrl, ""))
+			assertContains(t, strings.Join(m.out.pending, "\n"), "Thread Plan saved · resume with "+tc.command+" --resume t1")
+		})
 	}
 }
 
