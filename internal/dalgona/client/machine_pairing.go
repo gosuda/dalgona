@@ -44,7 +44,7 @@ func (r *Remotes) dialDevice(ctx context.Context, spec config.RemoteSpec) (io.Re
 }
 
 func readDeviceCredential(path string) (string, error) {
-	if err := auth.CheckHomeDir(path); err != nil {
+	if err := auth.CheckHomeDir(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("check device credential access: %w", err)
 	}
 	data, err := config.ReadTokenFile(path)
