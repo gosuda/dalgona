@@ -76,9 +76,13 @@ func treeState(t *testing.T, root string) map[string]fileState {
 		if walkErr != nil || isHomeLockFile(entry.Name()) {
 			return walkErr
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return statErr
+		}
+		if info.IsDir() {
+			state[path] = fileState{mode: info.Mode()}
+			return nil
 		}
 		state[path] = fileState{size: info.Size(), mode: info.Mode(), modTime: info.ModTime()}
 		return nil
