@@ -964,8 +964,10 @@ Local runners open the thread working directory as a Go `os.Root`. Remote runner
 Box runners map the thread working directory to `/workspace` and report `pathStyle:"posix"`.
 Existing host filesystem handlers MUST NOT serve as a hidden fallback.
 
-A file revision is the SHA-256 digest of the mode, size, modification time, and file identity.
-On Linux and macOS the identity is the device, inode, and change time. On other systems it is the content digest.
+An entry revision is the SHA-256 digest of the mode, size, modification time, and entry identity.
+For a regular file the identity is the content digest on every system.
+For any other entry the identity is the device, inode, and change time on Linux and macOS, and empty on other systems.
+Stat, list, read, rename, and remove compare entry revisions the same way, so a rewritten file or a replaced directory has a new revision.
 A directory revision is the digest of the sorted entry names and entry revisions.
 A listing holds at most 10000 entries. A larger directory returns `limit_exceeded`. Names that are not valid UTF-8 are not listed.
 Search walks the runner root through the same list operation. It applies `.git/info/exclude` and every `.gitignore`, skips `.git` and symbolic links, and keeps the best 500 matches for its cursor.
