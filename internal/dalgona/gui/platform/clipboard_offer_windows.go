@@ -72,15 +72,15 @@ func (w *windowsClipboardOffer) place(pngFormat uintptr) (err error) {
 	defer runtime.UnlockOSThread()
 	ctx, cancel := context.WithTimeout(w.ctx, clipboardWriteTimeout)
 	defer cancel()
-	if err := openClipboardForImage(ctx, w.owner); err != nil {
-		return err
+	if openErr := openClipboardForImage(ctx, w.owner); openErr != nil {
+		return openErr
 	}
 	defer func() {
 		if closed, _, e := procCloseClipboard.Call(); closed&clipboardUintBits == 0 {
 			err = errors.Join(err, fmt.Errorf("close the Windows clipboard: %w", e))
 		}
 	}()
-	if err := ctx.Err(); err != nil {
+	if err = ctx.Err(); err != nil {
 		return err
 	}
 	if emptied, _, e := procEmptyClipboard.Call(); emptied&clipboardUintBits == 0 {

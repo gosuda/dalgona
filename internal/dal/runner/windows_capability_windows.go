@@ -33,8 +33,8 @@ func capabilitySeed() ([]byte, error) {
 		return nil, fmt.Errorf("runner: resolve user config directory: %w", err)
 	}
 	directory := filepath.Join(config, capabilitySeedDirectory)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, fmt.Errorf("runner: create capability seed directory: %w", err)
+	if mkdirErr := os.MkdirAll(directory, 0o700); mkdirErr != nil {
+		return nil, fmt.Errorf("runner: create capability seed directory: %w", mkdirErr)
 	}
 	seed, err := loadSeed(filepath.Join(directory, capabilitySeedFile), capabilitySeedSize)
 	if err != nil {
