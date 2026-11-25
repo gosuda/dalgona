@@ -73,7 +73,7 @@ func treeState(t *testing.T, root string) map[string]fileState {
 	t.Helper()
 	state := map[string]fileState{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
+		if walkErr != nil || isHomeLockFile(entry.Name()) {
 			return walkErr
 		}
 		info, err := entry.Info()
@@ -180,9 +180,30 @@ func requireOnlineDiagnostics(t *testing.T, rig *nativeRig, probes *atomic.Int32
 	if got := online.checks(); !slices.Equal(got, wantOnline) || probes.Load() != 1 {
 		t.Fatalf("online checks = %v with %d probes, want %v and one", got, probes.Load(), wantOnline)
 	}
-	if !maps.EqualFunc(before, treeState(t, rig.home), func(a, b fileState) bool { return a == b }) {
-		t.Fatal("diagnostics changed the home")
+	after := treeState(t, rig.home)
+	if !maps.EqualFunc(before, after, func(a, b fileState) bool { return a == b }) {
+		t.Fatalf("diagnostics changed the home: %s", homeChanges(before, after))
 	}
+}
+
+func homeChanges(before, after map[string]fileState) string {
+	var changes []string
+	for path, state := range after {
+		previous, existed := before[path]
+		switch {
+		case !existed:
+			changes = append(changes, path+" created")
+		case previous != state:
+			changes = append(changes, path+" changed")
+		}
+	}
+	for path := range before {
+		if _, exists := after[path]; !exists {
+			changes = append(changes, path+" removed")
+		}
+	}
+	slices.Sort(changes)
+	return strings.Join(changes, ", ")
 }
 
 func requireDiagnosticsReject(t *testing.T, rig *nativeRig) {
