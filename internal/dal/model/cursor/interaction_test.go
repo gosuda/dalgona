@@ -222,21 +222,51 @@ func TestFrameBacklogEndsDrainAtTurnEnd(t *testing.T) {
 	var cancelled atomic.Bool
 	tick, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
+	beat, turnEnd := make(chan struct{}), make(chan struct{})
 	var sent atomic.Int64
-	_, server := newServer(t, floodAfterBacklog(tick, release, &sent, (*fakeConn).endTurn))
+	_, server := newServer(t, floodAfterBacklog(tick, release, &sent, heartbeatThenHold(beat, turnEnd, release)))
 	go pumpTicks(tick, release)
 	start := time.Now()
-	stream, err := newProvider(server, time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blockingUntilCancelled(&cancelled)})
+	stream, err := newProvider(server, 2*time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blockingUntilCancelled(&cancelled)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	finished := make(chan result, 1)
 	go func() { finished <- drain(t, stream) }()
+	requireDrainHeldForTurnEnd(t, finished, beat)
+	close(turnEnd)
 	select {
 	case out := <-finished:
 		checkDrainEndedAtTurn(t, out, cancelled.Load(), sent.Load(), time.Since(start))
 	case <-time.After(waitLimit):
-		t.Fatal("client did not return after the turn-ended frame")
+		t.Fatal("client did not return after the turn-ended update")
+	}
+}
+
+func heartbeatThenHold(beat chan struct{}, turnEnd, release <-chan struct{}) func(*fakeConn) {
+	return func(c *fakeConn) {
+		c.sendHeartbeat()
+		close(beat)
+		select {
+		case <-turnEnd:
+		case <-release:
+			return
+		}
+		c.endTurn()
+	}
+}
+
+func requireDrainHeldForTurnEnd(t *testing.T, finished <-chan result, beat <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-beat:
+	case <-time.After(waitLimit):
+		t.Fatal("server sent no heartbeat before the turn-ended update")
+	}
+	select {
+	case out := <-finished:
+		t.Fatalf("client returned before the turn-ended update: %+v", out)
+	case <-time.After(time.Second):
 	}
 }
 
@@ -287,6 +317,10 @@ func sendFloodHeartbeat(c *fakeConn, tick, release <-chan struct{}, frame []byte
 	}
 	c.flusher.Flush()
 	return true
+}
+
+func (c *fakeConn) sendHeartbeat() {
+	c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{VariantNumber: wire.InteractionHeartbeatNumber}})
 }
 
 func checkFloodBacklog(t *testing.T, out result, cancelled bool, heartbeats int64, elapsed time.Duration) {
