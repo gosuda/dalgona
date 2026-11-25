@@ -220,13 +220,10 @@ func blockingUntilCancelled(cancelled *atomic.Bool) func(context.Context, model.
 
 func TestFrameBacklogEndsDrainAtTurnEnd(t *testing.T) {
 	var cancelled atomic.Bool
-	tick, release := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
 	defer close(release)
 	beat, turnEnd := make(chan struct{}), make(chan struct{})
-	var sent atomic.Int64
-	_, server := newServer(t, floodAfterBacklog(tick, release, &sent, heartbeatThenHold(beat, turnEnd, release)))
-	go pumpTicks(tick, release)
-	start := time.Now()
+	_, server := newServer(t, backlogThenTurnEnd(beat, turnEnd, release))
 	stream, err := newProvider(server, 2*time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blockingUntilCancelled(&cancelled)})
 	if err != nil {
 		t.Fatal(err)
@@ -234,17 +231,23 @@ func TestFrameBacklogEndsDrainAtTurnEnd(t *testing.T) {
 	finished := make(chan result, 1)
 	go func() { finished <- drain(t, stream) }()
 	requireDrainHeldForTurnEnd(t, finished, beat)
+	updated := time.Now()
 	close(turnEnd)
 	select {
 	case out := <-finished:
-		checkDrainEndedAtTurn(t, out, cancelled.Load(), sent.Load(), time.Since(start))
+		checkDrainEndedAtTurn(t, out, cancelled.Load(), time.Since(updated))
 	case <-time.After(waitLimit):
 		t.Fatal("client did not return after the turn-ended update")
 	}
 }
 
-func heartbeatThenHold(beat chan struct{}, turnEnd, release <-chan struct{}) func(*fakeConn) {
+func backlogThenTurnEnd(beat chan struct{}, turnEnd, release <-chan struct{}) func(*fakeConn) {
 	return func(c *fakeConn) {
+		c.sendExec(shellExec(9))
+		for range 64 {
+			c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{Text: &wire.TextDelta{TextView: []byte("x")}}})
+		}
+		c.expectStreamClose(9)
 		c.sendHeartbeat()
 		close(beat)
 		select {
@@ -253,6 +256,7 @@ func heartbeatThenHold(beat chan struct{}, turnEnd, release <-chan struct{}) fun
 			return
 		}
 		c.endTurn()
+		<-release
 	}
 }
 
@@ -266,17 +270,17 @@ func requireDrainHeldForTurnEnd(t *testing.T, finished <-chan result, beat <-cha
 	select {
 	case out := <-finished:
 		t.Fatalf("client returned before the turn-ended update: %+v", out)
-	case <-time.After(time.Second):
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 
-func checkDrainEndedAtTurn(t *testing.T, out result, cancelled bool, heartbeats int64, elapsed time.Duration) {
+func checkDrainEndedAtTurn(t *testing.T, out result, cancelled bool, sinceUpdate time.Duration) {
 	t.Helper()
 	if out.failure == nil || !strings.Contains(out.failure.Err.Error(), "64 server frames") || !cancelled {
 		t.Fatalf("result = %+v, cancelled = %v", out, cancelled)
 	}
-	if elapsed >= 3*time.Second {
-		t.Fatalf("client returned %v after the backlog with %d heartbeats; the turn-ended frame did not end the drain", elapsed, heartbeats)
+	if sinceUpdate >= time.Second {
+		t.Fatalf("client returned %v after the turn-ended update; the idle timeout or a timer ended the drain, not the update", sinceUpdate)
 	}
 }
 
