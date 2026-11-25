@@ -65,7 +65,7 @@ func (s *session) deliverStreamCloses(ctx context.Context, body *model.IdleBody)
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		_, _ = io.Copy(io.Discard, body)
+		s.drainToTurnEnd()
 	}()
 	timer := time.NewTimer(backlogDrainTimeout)
 	defer timer.Stop()
@@ -74,6 +74,20 @@ func (s *session) deliverStreamCloses(ctx context.Context, body *model.IdleBody)
 	case <-ctx.Done():
 	case <-timer.C:
 	}
+}
+
+func (s *session) drainToTurnEnd() {
+	for {
+		frame, err := s.frames.next()
+		if err != nil || frame.Flags&connectwire.EndStream != 0 || turnEnded(frame.Payload) {
+			return
+		}
+	}
+}
+
+func turnEnded(payload []byte) bool {
+	var message wire.AgentServerMessage
+	return wire.ConsumeAgentServerMessage(payload, &message) == nil && message.Interaction != nil && message.Interaction.Ended != nil
 }
 
 func (s *session) readFrames(ctx context.Context, gate *model.StartGate) error {
