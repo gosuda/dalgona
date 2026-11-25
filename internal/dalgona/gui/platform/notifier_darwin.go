@@ -21,7 +21,7 @@ import (
 var (
 	errNotificationBundle   = errors.New("desktop notifications need the packaged dalgona.app; open dalgona from its app bundle instead of go run")
 	errNotifierClosed       = errors.New("the desktop notifier is closed; reopen the window to send notifications")
-	errNotificationSettings = errors.New("System Settings did not open its Notifications pane; open System Settings, choose Notifications, then choose dalgona")
+	errNotificationSettings = errors.New("the System Settings Notifications pane did not open; open System Settings, choose Notifications, then choose dalgona")
 )
 
 type Notifier struct {
