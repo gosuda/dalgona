@@ -141,6 +141,24 @@ func (t *terminal) attachedBy(s *server) bool {
 	return false
 }
 
+func (h *TerminalHost) releaseOwnedWorkspaces(s *server) {
+	for _, t := range h.all() {
+		t.releaseOwnedWorkspaces(s)
+	}
+}
+
+func (t *terminal) releaseOwnedWorkspaces(s *server) {
+	t.mu.Lock()
+	var owned []*attachment
+	for _, att := range t.attachments {
+		if att.owner == s {
+			owned = append(owned, att)
+		}
+	}
+	t.mu.Unlock()
+	releaseWorkspaces(owned)
+}
+
 func (t *terminal) ownedLocked(s *server, attachmentID string, now time.Time) (*attachment, error) {
 	att, ok := t.attachments[attachmentID]
 	if t.released || !ok || att.owner != s || !now.Before(att.deadline) {

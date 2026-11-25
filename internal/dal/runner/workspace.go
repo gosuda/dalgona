@@ -225,7 +225,7 @@ func revisionOf(info fs.FileInfo, content func() (io.ReadCloser, error)) string 
 
 func fileIdentity(info fs.FileInfo, content func() (io.ReadCloser, error)) []byte {
 	if !info.Mode().IsRegular() {
-		return nil
+		return nonFileIdentity(info)
 	}
 	reader, err := content()
 	if err != nil {

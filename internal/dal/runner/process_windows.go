@@ -241,10 +241,10 @@ func resumeCommandThreadsOnce(pid uint32) (bool, error) {
 			if err != nil {
 				return resumed, fmt.Errorf("runner: open command thread: %w", err)
 			}
-			_, err = windows.ResumeThread(thread)
+			resumeErr := resumeThread(thread)
 			_ = windows.CloseHandle(thread)
-			if err != nil {
-				return resumed, fmt.Errorf("runner: resume command thread: %w", err)
+			if resumeErr != nil {
+				return resumed, fmt.Errorf("runner: resume command thread: %w", resumeErr)
 			}
 			resumed = true
 		}
@@ -253,6 +253,18 @@ func resumeCommandThreadsOnce(pid uint32) (bool, error) {
 		}
 	}
 	return resumed, nil
+}
+
+func resumeThread(thread windows.Handle) error {
+	for {
+		previous, err := windows.ResumeThread(thread)
+		if err != nil {
+			return err
+		}
+		if previous <= 1 {
+			return nil
+		}
+	}
 }
 
 func openJobObject(name string) (windows.Handle, error) {

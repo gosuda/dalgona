@@ -44,7 +44,7 @@ func WatchAppearance(ctx context.Context, changed func()) error {
 	defer read.Close()
 	defer write.Close()
 	var token unsafe.Pointer
-	if code := C.dalgona_appearance_watch(C.uintptr_t(write.Fd()), &token); code != 0 {
+	if code := C.dalgona_appearance_watch(C.uintptr_t(write.Fd()), &token); code != 0 { //nolint:gocritic // cgo writes the pointer check of this call as a comparison of two equal constants
 		return fmt.Errorf("watch the desktop appearance: configure the event pipe: %w", syscall.Errno(code)) //nolint:gosec // the native watcher returns a positive errno value
 	}
 	defer C.dalgona_appearance_unwatch(token)

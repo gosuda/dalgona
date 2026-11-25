@@ -77,6 +77,8 @@ type workspaceTable struct {
 	staged   int64
 	commands int
 	readSeq  uint64
+	owners   int
+	quiesced chan struct{}
 }
 
 type workspaceUse struct {
@@ -92,56 +94,78 @@ func (t *workspaceTable) init() {
 		t.cursors = map[string]*workspaceCursor{}
 		t.uploads = map[string]*workspaceUpload{}
 	}
+	if t.quiesced == nil {
+		drained := make(chan struct{})
+		close(drained)
+		t.quiesced = drained
+	}
 }
 
-func (t *workspaceTable) live(id string, now time.Time) *workspaceHandle {
+func (t *workspaceTable) live(id string, now time.Time) (*workspaceHandle, runner.Workspace) {
 	t.init()
 	h := t.handles[id]
 	if h == nil || h.closed {
-		return nil
+		return nil, nil
 	}
 	if now.Sub(h.used) < workspaceIdle {
-		return h
+		return h, nil
 	}
-	t.releaseLocked(h)
-	return nil
+	return nil, t.releaseLocked(h)
 }
 
 func (t *workspaceTable) acquire(ctx context.Context, id string, right workspaceRight, effect bool) (workspaceUse, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	h := t.live(id, time.Now())
+	h, pending := t.live(id, time.Now())
 	if h == nil {
+		t.mu.Unlock()
+		closeWorkspaceFiles(pending)
 		return workspaceUse{}, rpc.NativeKind(rpc.ErrorExpired)
 	}
 	if h.rights&right != right {
+		t.mu.Unlock()
 		return workspaceUse{}, rpc.NativeKind(rpc.ErrorPermissionDenied)
 	}
 	h.used = time.Now()
+	if t.owners == 0 {
+		t.quiesced = make(chan struct{})
+	}
+	t.owners++
 	if effect {
 		h.effects++
+		t.mu.Unlock()
 		return workspaceUse{ctx: ctx, handle: h, release: sync.OnceFunc(func() { t.settle(h) })}, nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	t.readSeq++
 	key := t.readSeq
 	h.reads[key] = cancel
+	t.mu.Unlock()
 	return workspaceUse{ctx: ctx, handle: h, release: sync.OnceFunc(func() { t.forgetRead(h, key) })}, nil
 }
 
 func (t *workspaceTable) settle(h *workspaceHandle) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	h.effects--
-	if h.closed && h.effects == 0 {
-		t.releaseLocked(h)
+	t.owners--
+	if t.owners == 0 {
+		close(t.quiesced)
 	}
+	var pending runner.Workspace
+	if h.closed && h.effects == 0 {
+		pending = t.releaseLocked(h)
+	}
+	t.mu.Unlock()
+	closeWorkspaceFiles(pending)
 }
 
 func (t *workspaceTable) forgetRead(h *workspaceHandle, key uint64) {
 	t.mu.Lock()
 	cancel := h.reads[key]
 	delete(h.reads, key)
+	t.owners--
+	if t.owners == 0 {
+		close(t.quiesced)
+	}
 	t.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -150,35 +174,42 @@ func (t *workspaceTable) forgetRead(h *workspaceHandle, key uint64) {
 
 func (t *workspaceTable) touch(id string) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if h := t.live(id, time.Now()); h != nil {
+	h, pending := t.live(id, time.Now())
+	if h != nil {
 		h.used = time.Now()
 	}
+	t.mu.Unlock()
+	closeWorkspaceFiles(pending)
 }
 
 func (t *workspaceTable) revoke(h *workspaceHandle) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if h.effects > 0 {
 		h.closed = true
 		t.cancelDependents(h)
+		t.mu.Unlock()
 		return
 	}
-	t.releaseLocked(h)
+	pending := t.releaseLocked(h)
+	t.mu.Unlock()
+	closeWorkspaceFiles(pending)
 }
 
 func (t *workspaceTable) close(id string) (string, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.init()
 	h := t.handles[id]
 	if h == nil || h.closed {
+		t.mu.Unlock()
 		return "notFound", nil
 	}
 	if h.effects > 0 {
+		t.mu.Unlock()
 		return "", rpc.NativeKind(rpc.ErrorBusy)
 	}
-	t.releaseLocked(h)
+	pending := t.releaseLocked(h)
+	t.mu.Unlock()
+	closeWorkspaceFiles(pending)
 	return "closed", nil
 }
 
@@ -188,17 +219,19 @@ func closeWorkspaceFiles(files runner.Workspace) {
 	}
 }
 
-func (t *workspaceTable) releaseLocked(h *workspaceHandle) {
+func (t *workspaceTable) releaseLocked(h *workspaceHandle) runner.Workspace {
 	h.closed = true
 	t.cancelDependents(h)
 	if h.effects == 0 && t.handles[h.id] == h {
 		delete(t.handles, h.id)
-		closeWorkspaceFiles(h.files)
+		return h.files
 	}
+	return nil
 }
 
 func (t *workspaceTable) closeAll() {
 	t.mu.Lock()
+	t.init()
 	handles := make([]*workspaceHandle, 0, len(t.handles))
 	for id, h := range t.handles {
 		h.closed = true
@@ -206,9 +239,20 @@ func (t *workspaceTable) closeAll() {
 		delete(t.handles, id)
 		handles = append(handles, h)
 	}
+	done := t.quiesced
 	t.mu.Unlock()
+	awaitWorkspaceQuiesced(done)
 	for _, h := range handles {
 		closeWorkspaceFiles(h.files)
+	}
+}
+
+func awaitWorkspaceQuiesced(done <-chan struct{}) {
+	timer := time.NewTimer(MetadataDeadline)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
 	}
 }
 
@@ -238,30 +282,45 @@ func (t *workspaceTable) cancelDependents(h *workspaceHandle) {
 
 func (t *workspaceTable) admit(h *workspaceHandle) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.fullLocked() {
+	exceeded, pending := t.fullLocked()
+	if !exceeded {
+		t.handles[h.id] = h
+	}
+	t.mu.Unlock()
+	for _, files := range pending {
+		closeWorkspaceFiles(files)
+	}
+	if exceeded {
 		return rpc.NativeKind(rpc.ErrorLimitExceeded)
 	}
-	t.handles[h.id] = h
 	return nil
 }
 
 func (t *workspaceTable) full() bool {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.fullLocked()
+	exceeded, pending := t.fullLocked()
+	t.mu.Unlock()
+	for _, files := range pending {
+		closeWorkspaceFiles(files)
+	}
+	return exceeded
 }
 
-func (t *workspaceTable) fullLocked() bool {
+func (t *workspaceTable) fullLocked() (bool, []runner.Workspace) {
 	t.init()
 	now := time.Now()
+	var pending []runner.Workspace
 	live := 0
 	for id := range t.handles {
-		if t.live(id, now) != nil {
+		h, files := t.live(id, now)
+		if files != nil {
+			pending = append(pending, files)
+		}
+		if h != nil {
 			live++
 		}
 	}
-	return live >= connectionWorkspaces
+	return live >= connectionWorkspaces, pending
 }
 
 func (s *server) workspaceClose(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
@@ -329,8 +388,9 @@ func (s *server) workspaceTerminal(id string) (workspaceGrant, func(), error) {
 
 func (s *server) validateTerminalWorkspace(h *workspaceHandle) error {
 	s.workspace.mu.Lock()
-	current := s.workspace.live(h.id, time.Now())
+	current, pending := s.workspace.live(h.id, time.Now())
 	s.workspace.mu.Unlock()
+	closeWorkspaceFiles(pending)
 	if current != h {
 		return rpc.NativeKind(rpc.ErrorExpired)
 	}
@@ -413,25 +473,21 @@ func (s *server) workspaceOpen(ctx context.Context, params jsontext.Value) (json
 		return nil, err
 	}
 	if err := s.authorizeWorkspace(ctx, h); err != nil {
-		s.closeCandidate(h)
+		closeWorkspaceFiles(h.files)
 		return nil, err
 	}
 	if err := s.bindWorkspace(ctx, h); err != nil {
-		s.closeCandidate(h)
+		closeWorkspaceFiles(h.files)
 		return nil, err
 	}
 	if err := s.workspace.admit(h); err != nil {
-		s.closeCandidate(h)
+		closeWorkspaceFiles(h.files)
 		return nil, err
 	}
 	return json.Marshal(workspaceOpened{
 		WorkspaceID: h.id, ThreadID: h.threadID, RunnerID: h.runnerID, BindingRevision: h.binding, Root: h.root,
 		PathStyle: h.pathStyle, Rights: h.rights.names(), ExpiresAt: rpc.FormatTimestamp(h.used.Add(workspaceIdle)),
 	})
-}
-
-func (s *server) closeCandidate(h *workspaceHandle) {
-	closeWorkspaceFiles(h.files)
 }
 
 func (s *server) workspaceCandidate(ctx context.Context, threadID string, rights workspaceRight) (*workspaceHandle, error) {

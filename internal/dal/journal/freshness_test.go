@@ -3,6 +3,7 @@ package journal
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestFreshnessDetectsSameSizeRewrite(t *testing.T) {
@@ -20,7 +21,12 @@ func TestFreshnessDetectsSameSizeRewrite(t *testing.T) {
 	if !current {
 		t.Fatal("fresh session reads as stale")
 	}
-	rewriteSameSize(t, store.journalPath("s"))
+	path := store.journalPath("s")
+	recorded := journalModTime(t, path)
+	rewriteSameSize(t, path)
+	if stampErr := os.Chtimes(path, recorded.Add(time.Second), recorded.Add(time.Second)); stampErr != nil {
+		t.Fatalf("stamp the rewrite: %v", stampErr)
+	}
 	current, err = store.isCurrent("s")
 	if err != nil {
 		t.Fatalf("isCurrent: %v", err)
@@ -28,6 +34,15 @@ func TestFreshnessDetectsSameSizeRewrite(t *testing.T) {
 	if current {
 		t.Fatal("same size rewrite with identical inode still reads as current")
 	}
+}
+
+func journalModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat journal: %v", err)
+	}
+	return info.ModTime()
 }
 
 func rewriteSameSize(t *testing.T, path string) {

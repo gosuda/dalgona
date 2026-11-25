@@ -67,8 +67,8 @@ func readAppKitPasteboard(kind PasteKind) (ClipboardContent, error) {
 		return ClipboardContent{}, err
 	}
 	var transfer C.dalgona_pasteboard_bytes
-	status := C.dalgona_pasteboard_read(C.uint8_t(format), change, C.size_t(transferLimit), C.uint64_t(appKitImagePixelLimit), &transfer)
-	defer C.free(unsafe.Pointer(transfer.data)) //nolint:gosec // dalgona_pasteboard_read allocates the transfer with malloc
+	status := C.dalgona_pasteboard_read(C.uint8_t(format), change, C.size_t(transferLimit), C.uint64_t(appKitImagePixelLimit), &transfer) //nolint:gocritic // cgo writes the pointer check of this call as a comparison of two equal constants
+	defer C.free(unsafe.Pointer(transfer.data))                                                                                           //nolint:gosec // dalgona_pasteboard_read allocates the transfer with malloc
 	if readErr := appKitPasteboardError(int(status)); readErr != nil {
 		return ClipboardContent{}, readErr
 	}

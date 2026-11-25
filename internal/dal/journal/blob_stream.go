@@ -19,6 +19,11 @@ type BlobIdentity struct {
 
 var ErrBlobIdentity = errors.New("journal: blob content does not match its recorded identity")
 
+type blobFingerprint struct {
+	size  int64
+	mtime int64
+}
+
 func (s *Store) PutBlobStream(ctx context.Context, expected *BlobIdentity, produce func(io.Writer) error) (sha string, size int64, retErr error) {
 	if err := context.Cause(ctx); err != nil {
 		return "", 0, err
@@ -33,24 +38,122 @@ func (s *Store) PutBlobStream(ctx context.Context, expected *BlobIdentity, produ
 	if err := writeBlobStream(&stream, produce); err != nil {
 		return "", 0, err
 	}
-	return stream.publish(expected, dir)
+	return s.publishBlob(&stream, expected, dir)
 }
 
-func (s *blobStream) publish(expected *BlobIdentity, dir string) (string, int64, error) {
-	if err := context.Cause(s.ctx); err != nil {
+func (s *Store) publishBlob(stream *blobStream, expected *BlobIdentity, dir string) (string, int64, error) {
+	if err := context.Cause(stream.ctx); err != nil {
 		return "", 0, err
 	}
-	sha := hex.EncodeToString(s.hash.Sum(nil))
-	if expected != nil && (expected.SHA256 != sha || expected.Bytes != s.size) {
+	sha := hex.EncodeToString(stream.hash.Sum(nil))
+	if expected != nil && (expected.SHA256 != sha || expected.Bytes != stream.size) {
 		return "", 0, ErrBlobIdentity
 	}
-	if err := os.Rename(s.stage.Name(), filepath.Join(dir, sha)); err != nil {
+	dest := filepath.Join(dir, sha)
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	reused, err := s.reuseBlob(dest, sha, stream.size)
+	if err != nil {
 		return "", 0, err
 	}
-	if err := syncDir(dir); err != nil {
+	if reused {
+		return sha, stream.size, nil
+	}
+	if err := s.renameBlobStage(stream.stage.Name(), dest, sha); err != nil {
 		return "", 0, err
 	}
-	return sha, s.size, nil
+	return sha, stream.size, nil
+}
+
+func (s *Store) reuseBlob(dest, sha string, size int64) (bool, error) {
+	info, err := os.Stat(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() || info.Size() != size {
+		return false, nil
+	}
+	if s.blobSealed(sha, info) {
+		return true, nil
+	}
+	match, err := hashBlobFile(dest, sha)
+	if err != nil || !match {
+		return false, err
+	}
+	if err := s.syncSealedBlob(dest, sha); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) blobSealed(sha string, info os.FileInfo) bool {
+	return s.syncedBlobs[sha] == blobFingerprintOf(info)
+}
+
+func blobFingerprintOf(info os.FileInfo) blobFingerprint {
+	return blobFingerprint{size: info.Size(), mtime: info.ModTime().UnixNano()}
+}
+
+func verifyBlobBytes(dest, want string) (bool, error) {
+	info, err := os.Stat(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() {
+		return false, nil
+	}
+	return hashBlobFile(dest, want)
+}
+
+func hashBlobFile(dest, want string) (bool, error) {
+	file, err := os.Open(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	sum := sha256.New()
+	if _, err := io.Copy(sum, file); err != nil {
+		return false, err
+	}
+	return hex.EncodeToString(sum.Sum(nil)) == want, nil
+}
+
+func (s *Store) renameBlobStage(stage, dest, sha string) error {
+	err := s.rename(stage, dest)
+	if err == nil {
+		return s.syncSealedBlob(dest, sha)
+	}
+	stored, verr := verifyBlobBytes(dest, sha)
+	if verr != nil {
+		return errors.Join(err, verr)
+	}
+	if !stored {
+		return err
+	}
+	if rerr := removeBlobStage(stage); rerr != nil {
+		return rerr
+	}
+	return s.syncSealedBlob(dest, sha)
+}
+
+func (s *Store) syncSealedBlob(dest, sha string) error {
+	if err := s.dirSync(filepath.Dir(dest)); err != nil {
+		return err
+	}
+	info, err := os.Stat(dest)
+	if err == nil && !info.IsDir() {
+		s.syncedBlobs[sha] = blobFingerprintOf(info)
+	}
+	return nil
 }
 
 func removeBlobStage(path string) error {

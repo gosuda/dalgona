@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/model/connectwire"
 	"github.com/gosuda/dalgona/internal/dal/model/cursor"
 	"github.com/gosuda/dalgona/internal/dal/model/cursor/wire"
 )
@@ -187,6 +188,85 @@ func TestFrameBacklogDuringCallFailsTurn(t *testing.T) {
 	out := drain(t, stream)
 	if out.failure == nil || !strings.Contains(out.failure.Err.Error(), "64 server frames") || !cancelled.Load() || time.Since(start) >= waitLimit {
 		t.Fatalf("result = %+v, cancelled = %v, elapsed = %v", out, cancelled.Load(), time.Since(start))
+	}
+}
+
+func TestFrameBacklogHeartbeatFloodEndsWithinBound(t *testing.T) {
+	var cancelled atomic.Bool
+	blocking := func(ctx context.Context, call model.ToolCall) (model.ToolResult, error) {
+		select {
+		case <-ctx.Done():
+			cancelled.Store(true)
+			return model.ToolResult{}, ctx.Err()
+		case <-time.After(waitLimit):
+			return model.ToolResult{ID: call.ID, Name: call.Name, Output: []byte(`"done"`)}, nil
+		}
+	}
+	tick, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	var sent atomic.Int64
+	_, server := newServer(t, floodAfterBacklog(tick, release, &sent))
+	go pumpTicks(tick, release)
+	start := time.Now()
+	stream, err := newProvider(server, time.Second).StreamWith(t.Context(), userRequest("run it"), cursor.StreamOptions{InBand: blocking})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan result, 1)
+	go func() { finished <- drain(t, stream) }()
+	select {
+	case out := <-finished:
+		checkFloodBacklog(t, out, cancelled.Load(), sent.Load(), time.Since(start))
+	case <-time.After(waitLimit):
+		t.Fatal("client did not return while the server kept sending heartbeats")
+	}
+}
+
+func floodAfterBacklog(tick, release <-chan struct{}, sent *atomic.Int64) func(*fakeConn) {
+	return func(c *fakeConn) {
+		c.sendExec(shellExec(9))
+		for range 64 {
+			c.send(&wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{Text: &wire.TextDelta{TextView: []byte("x")}}})
+		}
+		c.expectStreamClose(9)
+		heartbeat := connectwire.AppendFrame(nil, 0, wire.AppendAgentServerMessage(nil, &wire.AgentServerMessage{Interaction: &wire.InteractionUpdate{VariantNumber: wire.InteractionHeartbeatNumber}}))
+		for sendFloodHeartbeat(c, tick, release, heartbeat) {
+			sent.Add(1)
+		}
+	}
+}
+
+func pumpTicks(tick chan<- struct{}, release <-chan struct{}) {
+	for {
+		select {
+		case <-release:
+			return
+		case tick <- struct{}{}:
+		}
+	}
+}
+
+func sendFloodHeartbeat(c *fakeConn, tick, release <-chan struct{}, frame []byte) bool {
+	select {
+	case <-release:
+		return false
+	case <-tick:
+	}
+	if _, err := c.writer.Write(frame); err != nil {
+		<-release
+		return false
+	}
+	c.flusher.Flush()
+	return true
+}
+
+func checkFloodBacklog(t *testing.T, out result, cancelled bool, heartbeats int64, elapsed time.Duration) {
+	t.Helper()
+	if out.failure == nil || !strings.Contains(out.failure.Err.Error(), "64 server frames") || !cancelled || elapsed >= waitLimit {
+		t.Fatalf("result = %+v, cancelled = %v, heartbeats = %d, elapsed = %v", out, cancelled, heartbeats, elapsed)
+	}
+	if heartbeats == 0 {
+		t.Fatal("server sent no heartbeats after the stream close")
 	}
 }
 

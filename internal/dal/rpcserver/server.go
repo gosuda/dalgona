@@ -192,6 +192,9 @@ func (s *server) shutdown() {
 	s.watchers.Wait()
 	s.releaseNative(watches)
 	s.stopFsWatches()
+	if host := s.opts.Terminals; host != nil {
+		host.releaseOwnedWorkspaces(s)
+	}
 	s.workspace.closeAll()
 }
 

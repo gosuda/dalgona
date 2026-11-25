@@ -1,7 +1,10 @@
 package runner
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
+	"io/fs"
 	"os"
 	"syscall"
 
@@ -20,4 +23,16 @@ func renameDirNoReplace(root *os.Root, oldName, newName string) error {
 		}
 		return nil
 	})
+}
+
+func nonFileIdentity(info fs.FileInfo) []byte {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st == nil {
+		return nil
+	}
+	var raw bytes.Buffer
+	_ = binary.Write(&raw, binary.BigEndian, st.Dev)
+	_ = binary.Write(&raw, binary.BigEndian, st.Ino)
+	_ = binary.Write(&raw, binary.BigEndian, st.Ctimespec)
+	return raw.Bytes()
 }

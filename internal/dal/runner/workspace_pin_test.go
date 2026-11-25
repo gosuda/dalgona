@@ -2,10 +2,12 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -23,14 +25,14 @@ func swapPinnedWithSymlink(t *testing.T, approved, target string) bool {
 	t.Helper()
 	kept := approved + ".kept"
 	if err := os.Rename(approved, kept); err != nil {
-		if runtime.GOOS == "windows" {
+		if pinnedDirectoryHeld(err) {
 			if _, statErr := os.Stat(approved); statErr != nil {
 				t.Fatalf("pinned rename refused but directory missing: %v", statErr)
 			}
 			if _, statErr := os.Lstat(kept); !os.IsNotExist(statErr) {
 				t.Fatalf("pinned rename left %s behind: %v", kept, statErr)
 			}
-			t.Skipf("pinned directory could not be swapped on Windows (rename refused, pin enforced): %v", err)
+			t.Skipf("Windows refused to rename the pinned directory: %v", err)
 			return false
 		}
 		t.Fatal(err)
@@ -40,6 +42,12 @@ func swapPinnedWithSymlink(t *testing.T, approved, target string) bool {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	return true
+}
+
+const windowsSharingViolation = syscall.Errno(32)
+
+func pinnedDirectoryHeld(err error) bool {
+	return runtime.GOOS == "windows" && errors.Is(err, windowsSharingViolation)
 }
 
 func TestLocalPinnedSurvivesSymlinkSwap(t *testing.T) {
