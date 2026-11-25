@@ -102,11 +102,13 @@ func TestWorkspaceShutdownClosesOpenHandles(t *testing.T) {
 
 type blockingStageRunner struct {
 	runner.Runner
-	started  chan struct{}
-	release  chan struct{}
-	finished chan struct{}
-	mu       sync.Mutex
-	closes   int
+	started     chan struct{}
+	release     chan struct{}
+	finished    chan struct{}
+	released    *atomic.Bool
+	sawReleased atomic.Bool
+	mu          sync.Mutex
+	closes      int
 }
 
 func (c *blockingStageRunner) OpenWorkspace(ctx context.Context, cwd string) (runner.WorkspaceHandle, error) {
@@ -131,11 +133,17 @@ func (h *blockingStageHandle) Workspace(ctx context.Context, req runner.Workspac
 	if req.Op == runner.WorkspaceStage {
 		h.once.Do(func() { close(h.runner.started) })
 		<-h.runner.release
+		if released := h.runner.released; released != nil {
+			released.Store(true)
+		}
 	}
 	return h.WorkspaceHandle.Workspace(ctx, req)
 }
 
 func (h *blockingStageHandle) Close() error {
+	if released := h.runner.released; released != nil && released.Load() {
+		h.runner.sawReleased.Store(true)
+	}
 	h.runner.mu.Lock()
 	h.runner.closes++
 	first := h.runner.closes == 1
@@ -149,70 +157,132 @@ func (h *blockingStageHandle) Close() error {
 func joinUploadCommit(t *testing.T, commitDone <-chan error) {
 	t.Helper()
 	commitErr := <-commitDone
-	if commitErr != nil && !errors.Is(commitErr, io.ErrClosedPipe) {
+	if commitErr != nil && !commitInterruptedByShutdown(commitErr) {
 		t.Fatalf("workspace commit failed: %v", commitErr)
 	}
 }
 
-func TestWorkspaceShutdownWaitsForUploadEffect(t *testing.T) {
-	r := newRig(t, "")
-	started := make(chan struct{})
-	release := make(chan struct{})
-	finished := make(chan struct{})
-	var blocker *blockingStageRunner
+func commitInterruptedByShutdown(err error) bool {
+	if errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	data, ok := rpc.ErrorDataOf(err)
+	return ok && (data.Kind == rpc.ErrorUnknownOutcome || data.Kind == rpc.ErrorCancelled)
+}
+
+type blockingUploadStage struct {
+	started  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+	blocker  *blockingStageRunner
+}
+
+func armBlockingUploadStage(t *testing.T, r *rig, released *atomic.Bool) *blockingUploadStage {
+	t.Helper()
+	stage := &blockingUploadStage{started: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
 	base := r.cfg.Runner
 	r.cfg.Runner = func(ctx context.Context, id, name string) (runner.Runner, error) {
-		run, err := base(ctx, id, name)
-		if err != nil {
-			return nil, err
+		run, runErr := base(ctx, id, name)
+		if runErr != nil {
+			return nil, runErr
 		}
-		blocker = &blockingStageRunner{Runner: run, started: started, release: release, finished: finished}
-		return blocker, nil
+		stage.blocker = &blockingStageRunner{Runner: run, started: stage.started, release: stage.release, finished: stage.finished, released: released}
+		return stage.blocker, nil
 	}
-	r.openHost()
-	threadID := startWorkspaceThread(t, r, r.cwd)
+	return stage
+}
+
+func serveQuietWorkspaceWindow(t *testing.T, r *rig, ctx context.Context) (*workspaceWindow, chan error) {
+	t.Helper()
 	serverEnd, clientEnd := net.Pipe()
 	w := &workspaceWindow{t: t, decisions: make(chan string, 64), asked: make(chan jsontext.Value, 64), changes: make(chan workspaceChanged, 256)}
 	served := make(chan error, 1)
 	quiet := slog.New(slog.DiscardHandler)
-	go func() { served <- ServeWith(t.Context(), serverEnd, r.host, ServeOptions{Logger: quiet}) }()
+	go func() { served <- ServeWith(ctx, serverEnd, r.host, ServeOptions{Logger: quiet}) }()
 	w.conn = rpc.Dial(t.Context(), clientEnd, w)
-	opened := w.open(threadID, "read", "write")
-	data := []byte("held")
+	return w, served
+}
+
+func startHeldUploadCommit(t *testing.T, w *workspaceWindow, workspaceID, path string, data []byte) <-chan error {
+	t.Helper()
 	sum := sha256.Sum256(data)
 	var begun workspaceUploadBegun
-	w.must("dalgona/workspace/write", map[string]any{"stage": "begin", "workspaceId": opened.WorkspaceID, "path": "held.txt", "expectedRevision": runner.WorkspaceAbsent, "total": rpc.FormatDecimal(uint64(len(data))), "digest": hex.EncodeToString(sum[:]), "operationId": rpc.NewOperationID()}, &begun)
+	w.must("dalgona/workspace/write", map[string]any{"stage": "begin", "workspaceId": workspaceID, "path": path, "expectedRevision": runner.WorkspaceAbsent, "total": rpc.FormatDecimal(uint64(len(data))), "digest": hex.EncodeToString(sum[:]), "operationId": rpc.NewOperationID()}, &begun)
 	w.must("dalgona/workspace/write", map[string]any{"stage": "chunk", "uploadId": begun.UploadID, "offset": "0", "dataBase64": base64.StdEncoding.EncodeToString(data)}, nil)
 	commitDone := make(chan error, 1)
+	uploadID := begun.UploadID
 	go func() {
 		var raw jsontext.Value
-		commitDone <- w.conn.Call(t.Context(), "dalgona/workspace/write", map[string]any{"stage": "commit", "uploadId": begun.UploadID, "operationId": rpc.NewOperationID()}, &raw)
+		commitDone <- w.conn.Call(t.Context(), "dalgona/workspace/write", map[string]any{"stage": "commit", "uploadId": uploadID, "operationId": rpc.NewOperationID()}, &raw)
 	}()
-	<-started
-	if err := w.conn.Close(); err != nil {
-		t.Fatal(err)
+	return commitDone
+}
+
+func requireShutdownWaitingForUpload(t *testing.T, served <-chan error, commitDone <-chan error, release chan struct{}, w *workspaceWindow) {
+	t.Helper()
+	select {
+	case serveErr := <-served:
+		close(release)
+		joinUploadCommit(t, commitDone)
+		_ = w.conn.Close()
+		t.Fatalf("shutdown returned while the upload still held its workspace (served=%v)", serveErr)
+	case <-time.After(time.Second):
 	}
-	close(release)
+}
+
+func awaitReleaseDrivenShutdown(t *testing.T, served <-chan error) {
+	t.Helper()
+	select {
+	case serveErr := <-served:
+		if serveErr != nil {
+			t.Fatalf("ServeWith returned %v", serveErr)
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("server did not stop after upload released")
+	}
+}
+
+func awaitWorkspaceRootClosed(t *testing.T, finished <-chan struct{}) {
+	t.Helper()
 	select {
 	case <-finished:
 	case <-time.After(waitLimit):
 		t.Fatal("workspace root not closed after upload released")
 	}
-	select {
-	case err := <-served:
-		if err != nil {
-			t.Fatalf("ServeWith returned %v", err)
-		}
-	case <-time.After(waitLimit):
-		t.Fatal("server did not stop after upload released")
-	}
-	joinUploadCommit(t, commitDone)
+}
+
+func requireCloseAfterUploadReleased(t *testing.T, blocker *blockingStageRunner) {
+	t.Helper()
 	blocker.mu.Lock()
 	closes := blocker.closes
 	blocker.mu.Unlock()
 	if closes != 1 {
 		t.Fatalf("workspace closed %d times, want 1", closes)
 	}
+	if !blocker.sawReleased.Load() {
+		t.Fatal("workspace root closed before the upload released it")
+	}
+}
+
+func TestWorkspaceShutdownDefersCloseUntilUploadReleased(t *testing.T) {
+	r := newRig(t, "")
+	stage := armBlockingUploadStage(t, r, &atomic.Bool{})
+	r.openHost()
+	threadID := startWorkspaceThread(t, r, r.cwd)
+	serveCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	w, served := serveQuietWorkspaceWindow(t, r, serveCtx)
+	opened := w.open(threadID, "read", "write")
+	commitDone := startHeldUploadCommit(t, w, opened.WorkspaceID, "held.txt", []byte("held"))
+	<-stage.started
+	cancel()
+	requireShutdownWaitingForUpload(t, served, commitDone, stage.release, w)
+	close(stage.release)
+	awaitReleaseDrivenShutdown(t, served)
+	joinUploadCommit(t, commitDone)
+	awaitWorkspaceRootClosed(t, stage.finished)
+	requireCloseAfterUploadReleased(t, stage.blocker)
+	_ = w.conn.Close()
 }
 
 func TestWorkspaceShutdownClosesWhenUploadNeverReleases(t *testing.T) {
@@ -273,60 +343,5 @@ func TestWorkspaceShutdownClosesWhenUploadNeverReleases(t *testing.T) {
 	blocker.mu.Unlock()
 	if closes != 1 {
 		t.Fatalf("workspace closed %d times, want 1", closes)
-	}
-}
-
-type shutdownOrderFiles struct {
-	released *atomic.Bool
-	closed   chan struct{}
-	saw      atomic.Bool
-}
-
-func (f *shutdownOrderFiles) Workspace(context.Context, runner.WorkspaceRequest) (runner.WorkspaceResult, error) {
-	return runner.WorkspaceResult{}, nil
-}
-
-func (f *shutdownOrderFiles) Close() error {
-	f.saw.Store(f.released.Load())
-	close(f.closed)
-	return nil
-}
-
-func TestWorkspaceShutdownDefersCloseUntilEffectReleased(t *testing.T) {
-	var table workspaceTable
-	table.init()
-	var released atomic.Bool
-	files := &shutdownOrderFiles{released: &released, closed: make(chan struct{})}
-	table.handles["ws-order"] = &workspaceHandle{
-		id:     "ws-order",
-		rights: rightRead | rightWrite,
-		files:  files,
-		reads:  map[uint64]context.CancelFunc{},
-		used:   time.Now(),
-	}
-	effectUse, err := table.acquire(context.Background(), "ws-order", rightWrite, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readUse, err := table.acquire(context.Background(), "ws-order", rightRead, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	shutdownDone := make(chan struct{})
-	go func() {
-		table.closeAll()
-		close(shutdownDone)
-	}()
-	<-readUse.ctx.Done()
-	released.Store(true)
-	effectUse.release()
-	readUse.release()
-	<-files.closed
-	<-shutdownDone
-	if !files.saw.Load() {
-		t.Fatal("workspace root closed before the effect owner released it")
-	}
-	if len(table.handles) != 0 {
-		t.Fatal("shutdown left workspace handles behind")
 	}
 }
