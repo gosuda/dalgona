@@ -128,18 +128,19 @@ func hashBlobFile(dest, want string) (bool, error) {
 }
 
 func (s *Store) renameBlobStage(stage, dest, sha string) error {
-	if err := s.rename(stage, dest); err != nil {
-		verified, verr := verifyBlobBytes(dest, sha)
-		if verr != nil {
-			return errors.Join(err, verr)
-		}
-		if !verified {
-			return s.replaceDamagedBlob(stage, dest, sha, err)
-		}
-		if rerr := removeBlobStage(stage); rerr != nil {
-			return rerr
-		}
+	err := s.rename(stage, dest)
+	if err == nil {
 		return s.syncSealedBlob(dest, sha)
+	}
+	stored, verr := verifyBlobBytes(dest, sha)
+	if verr != nil {
+		return errors.Join(err, verr)
+	}
+	if !stored {
+		return err
+	}
+	if rerr := removeBlobStage(stage); rerr != nil {
+		return rerr
 	}
 	return s.syncSealedBlob(dest, sha)
 }
@@ -151,33 +152,6 @@ func (s *Store) syncSealedBlob(dest, sha string) error {
 	info, err := os.Stat(dest)
 	if err == nil && !info.IsDir() {
 		s.syncedBlobs[sha] = blobFingerprintOf(info)
-	}
-	return nil
-}
-
-func (s *Store) replaceDamagedBlob(stage, dest, sha string, renameErr error) error {
-	if rerr := removeDamagedBlob(dest); rerr != nil {
-		return errors.Join(renameErr, rerr)
-	}
-	if rerr := s.rename(stage, dest); rerr != nil {
-		return errors.Join(renameErr, rerr)
-	}
-	return s.syncSealedBlob(dest, sha)
-}
-
-func removeDamagedBlob(dest string) error {
-	info, err := os.Stat(dest)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return nil
-	}
-	if err := os.Remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
 	}
 	return nil
 }

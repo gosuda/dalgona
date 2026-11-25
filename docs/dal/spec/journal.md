@@ -96,6 +96,6 @@ The agent MUST NOT append a compaction whose `tokens_after` is not smaller than 
 
 Blob names MUST contain exactly 64 lowercase SHA-256 hexadecimal characters. `Blob` MUST reject malformed names and report missing blobs.
 
-A store MUST NOT trust a digest name alone. Before a store reuses an existing blob, it MUST verify that the bytes of the file hash to the digest. The store MUST sync the blob directory before it reports success, unless it already verified and synced those exact bytes. A store MAY remember the digests it has verified and synced, and reuse an unchanged remembered digest without reading or syncing it again. A damaged file under a digest MUST be replaced by verified bytes.
+A store MUST NOT trust a digest name alone. Before a store reuses an existing blob, it MUST verify that the bytes of the file hash to the digest. The store MUST sync the blob directory before it reports success, unless it already verified and synced those exact bytes. A store MAY remember the digests it has verified and synced, and reuse an unchanged remembered digest without reading or syncing it again. A damaged file under a digest MUST be replaced by one rename with verified bytes. A store MUST NOT delete a blob to replace it.
 
 An image MUST be stored as a blob, whatever its size.

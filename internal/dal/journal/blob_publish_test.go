@@ -254,3 +254,25 @@ func assertAdoptedBlob(t *testing.T, store *Store, digest string, want []byte) {
 		t.Fatalf("blobs dir holds %v, %v; want only %q", entries, err, digest)
 	}
 }
+
+func TestBlobStreamKeepsDamagedFileWhenRenameFails(t *testing.T) {
+	store := mustOpen(t, t.TempDir())
+	defer closeStore(t, store)
+	good := []byte("bytes the digest names")
+	sum := sha256.Sum256(good)
+	digest := hex.EncodeToString(sum[:])
+	damaged := []byte("damaged bytes under the same name")
+	plantBlob(t, store, digest, damaged)
+	store.rename = func(string, string) error { return errors.New("injected rename failure") }
+	if _, _, err := store.PutBlobStream(t.Context(), nil, func(dst io.Writer) error {
+		_, err := dst.Write(good)
+		return err
+	}); err == nil {
+		t.Fatal("PutBlobStream over a damaged file reported success when its rename failed")
+	}
+	data, err := os.ReadFile(filepath.Join(store.blobsDir(), digest))
+	if err != nil || !bytes.Equal(data, damaged) {
+		t.Fatalf("digest path holds %q, %v after a failed rename; the store deleted the file", data, err)
+	}
+	assertAdoptedBlob(t, store, digest, damaged)
+}
