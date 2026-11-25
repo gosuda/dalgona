@@ -663,3 +663,64 @@ func TestQuestionReviewKeepsSTextAndDismissesEmptyRequest(t *testing.T) {
 		t.Fatalf("empty request = %s", got)
 	}
 }
+
+func TestQuestionAnswerPreservesCanonicalText(t *testing.T) {
+	t.Parallel()
+	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
+	m, answer := openQuestion(t, free)
+	text := "ab\u200ee\u0301\U000F0001"
+	for _, r := range text {
+		m, _ = drive(t, m, press(r, 0, string(r)))
+	}
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m, _ = drive(t, m, press('s', 0, "s"))
+	_ = m
+	got := answerJSON(t, answer)
+	var decoded struct {
+		Answers map[string]struct {
+			Answers []string `json:"answers"`
+		} `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("answer %s does not decode: %v", got, err)
+	}
+	if !reflect.DeepEqual(decoded.Answers["q1"].Answers, []string{text}) {
+		t.Fatalf("answer = %s, want the canonical text %q", got, text)
+	}
+}
+
+func TestQuestionOptionLiteralEscapeDoesNotMimicControl(t *testing.T) {
+	t.Parallel()
+	data := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Choice","question":"Which?","isOther":false,"isSecret":false,"multiSelect":false,` +
+		`"options":[{"label":"Pick<U+200E>","description":"d"},{"label":"Pick\u200e","description":"e"}]}]}`
+	m, _ := openQuestion(t, data)
+	card := m.approvals[0].card
+	assertContains(t, card.optionLine(&m.screen, 80, 0), "Pick<U+003C>U+200E>")
+	assertContains(t, card.optionLine(&m.screen, 80, 1), "Pick<U+200E>")
+	assertContains(t, strings.Join(card.reviewLines(), "\n"), "Pick<U+003C>U+200E>")
+}
+
+func TestQuestionOptionLabelSentByteExact(t *testing.T) {
+	t.Parallel()
+	label := "Pick\u2028\u200e\U000F0001"
+	data := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
+		`{"id":"q1","header":"Choice","question":"Which?","isOther":false,"isSecret":false,"multiSelect":false,` +
+		`"options":[{"label":"` + label + `","description":"d"},{"label":"Other","description":"e"}]}]}`
+	m, answer := openQuestion(t, data)
+	m, _ = drive(t, m, press('1', 0, "1"))
+	_, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	got := answerJSON(t, answer)
+	var decoded struct {
+		Answers map[string]struct {
+			Answers []string `json:"answers"`
+		} `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("answer %s does not decode: %v", got, err)
+	}
+	if !reflect.DeepEqual(decoded.Answers["q1"].Answers, []string{label}) {
+		t.Fatalf("answer = %s, want the exact server label %q", got, label)
+	}
+}

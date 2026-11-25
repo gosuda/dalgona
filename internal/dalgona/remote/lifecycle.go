@@ -83,18 +83,13 @@ func (b *Binder) GC(ctx context.Context) ([]Box, error) {
 	if err != nil || len(boxes) == 0 {
 		return boxes, err
 	}
-	for _, box := range boxes {
-		b.note("%s %s (runner %s; archived threads %s)", box.Service, box.ID, box.Runner, strings.Join(box.Threads, ", "))
-	}
+	b.noteBoxes(boxes)
 	ok, err := b.confirm(fmt.Sprintf("destroy %d unbound boxes?", len(boxes)))
 	if err != nil || !ok {
 		return boxes, err
 	}
-	var errs []error
-	for _, box := range boxes {
-		errs = append(errs, b.destroy(ctx, box.Runner, boxKey{box.Service, box.ID}))
-	}
-	return boxes, errors.Join(errs...)
+	_, _, err = b.destroyAll(ctx, boxes)
+	return boxes, err
 }
 
 func (b *Binder) unboundBoxes() ([]Box, error) {

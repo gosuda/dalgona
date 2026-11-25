@@ -46,6 +46,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return search.Main(args[1:], stdout)
 		case "__search-index":
 			return search.BuildMain(args[1:], stdout)
+		case "failures":
+			return runFailures(ctx, config.ProductDal.Home(), args[1:], stdout, stderr)
 		case "--version":
 			fmt.Fprintf(stdout, "%s %s\n", binary, config.Version())
 			return 0
@@ -56,7 +58,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	env := app.CLIEnv{
 		Product: config.ProductDal, Home: home, Dial: local.dial,
 		Stdin: stdin, Stdout: stdout, Stderr: stderr,
-		TUI: tuiwire.Run,
+		TUI: tuiwire.Local(local.dial),
 	}
 	code := app.RunCLI(ctx, env, args)
 	if err := local.Close(); err != nil {

@@ -37,7 +37,7 @@ func TestConsentInvalidText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := []byte(strings.Replace(string(raw), consentTextSHA("app"), "0", 1))
+	tampered := []byte(strings.Replace(string(raw), ConsentTextHash("app"), "0", 1))
 	if err := os.WriteFile(path, tampered, 0o600); err != nil {
 		t.Fatal(err)
 	}

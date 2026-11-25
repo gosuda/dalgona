@@ -60,20 +60,20 @@ func TestHerdrReportsStatusChildrenAndRelease(t *testing.T) {
 	got := strings.Split(strings.TrimSpace(string(data)), "\n")
 	report := func(state, seq, thread string) string {
 		return "pane report-agent pane-main --source dalgona --agent dalgona --state " + state + " --seq " + seq +
-			" --agent-session-id " + thread + " -- dalgona --resume " + thread
+			" --agent-session-id " + thread + " -- dalgona --local --resume " + thread
 	}
 	allowed := map[string]bool{
 		report("working", "3", "thread-a"): true, report("blocked", "7", "thread-a"): true,
 		report("working", "9", "thread-a"): true, report("idle", "2", "thread-b"): true,
 		"pane split --current --direction right --cwd /work --no-focus": true,
-		"pane run pane-child dalgona --resume thread-child":             true,
+		"pane run pane-child dalgona --local --resume thread-child":     true,
 	}
 	for _, line := range got[:len(got)-1] {
 		if !allowed[line] {
 			t.Fatalf("unexpected herdr call %q in:\n%s", line, data)
 		}
 	}
-	for _, want := range []string{report("working", "9", "thread-a"), report("idle", "2", "thread-b"), "pane run pane-child dalgona --resume thread-child"} {
+	for _, want := range []string{report("working", "9", "thread-a"), report("idle", "2", "thread-b"), "pane run pane-child dalgona --local --resume thread-child"} {
 		if !slices.Contains(got, want) {
 			t.Fatalf("herdr calls lack %q:\n%s", want, data)
 		}
@@ -124,6 +124,21 @@ func TestHerdrResetsSequenceWhenTheThreadChanges(t *testing.T) {
 	}
 }
 
+func TestHerdrReportsTheMostRecentlySelectedMachineLast(t *testing.T) {
+	t.Parallel()
+	worker := &herdrWorker{wake: make(chan struct{}, 1), pending: make(map[[2]string]app.Status)}
+	a := app.Status{Endpoint: "local", State: "running", Seq: 3, ThreadID: "same-thread"}
+	b := app.Status{Endpoint: "remote", Remote: "remote", State: "awaiting approval", Seq: 9, ThreadID: "same-thread"}
+	aNew := app.Status{Endpoint: "local", State: "idle", Seq: 4, ThreadID: "same-thread"}
+	worker.status(a)
+	worker.status(b)
+	worker.status(aNew)
+	reports, _ := worker.take()
+	if want := []app.Status{b, aNew}; !slices.Equal(reports, want) {
+		t.Fatalf("queued reports = %+v, want B then current machine A: %+v", reports, want)
+	}
+}
+
 func waitForCalls(t *testing.T, log string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -167,7 +182,7 @@ func TestLocalSessionStartsOnlyBeforeItsFirstConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DALGONA_HOME", home)
-	session := client.Local(home, client.Backend{Path: exe, Build: client.Build()})
+	session := client.Local(home, client.Backend{Path: exe, Build: config.Build()})
 	defer func() { _ = session.Close() }()
 	dial := sessionDialer(session)
 	initial, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
@@ -176,7 +191,7 @@ func TestLocalSessionStartsOnlyBeforeItsFirstConnection(t *testing.T) {
 		_ = conn.Close()
 		t.Fatal("startup without a listening daemon succeeded")
 	}
-	stop, done := startFakeDaemon(t, home, client.Build(), os.Getpid(), nil)
+	stop, done := startFakeDaemon(t, home, config.Build(), os.Getpid(), nil)
 	requireDaemonMarker(t, marker, "initial connection did not start the daemon")
 	conn := dialDaemon(t, dial)
 	_ = conn.Close()
@@ -197,7 +212,7 @@ func TestLocalSessionStartsOnlyBeforeItsFirstConnection(t *testing.T) {
 		t.Fatalf("reconnect error = %v, want missing socket without startup", err)
 	}
 	requireNoDaemonMarker(t, marker)
-	stop, done = startFakeDaemon(t, home, client.Build(), os.Getpid(), nil)
+	stop, done = startFakeDaemon(t, home, config.Build(), os.Getpid(), nil)
 	defer stopFakeDaemon(t, stop, done)
 	conn, err = dial(t.Context())
 	if err != nil {

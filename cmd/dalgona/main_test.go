@@ -33,3 +33,32 @@ func TestGlobalConfigBeforeAppServerReachesTheAppServer(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q; want the app-server parser to reject only --listen", code, stderr.String())
 	}
 }
+
+func TestMachineFlagsOverrideOnlyTheDefaultSelection(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, remote string
+		flags        []string
+	}{
+		{name: "configured default", remote: "default-remote"},
+		{name: "explicit local", flags: []string{"--local"}},
+		{name: "explicit named endpoint", remote: "another", flags: []string{"--remote", "another"}},
+		{name: "empty remote unchanged", remote: "default-remote", flags: []string{"--remote="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resume := []string{"--resume", "same-thread"}
+			selection, rest, err := splitMachineFlags(append(tc.flags, resume...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := selection.remoteName("default-remote"); got != tc.remote || !slices.Equal(rest, resume) {
+				t.Fatalf("selected remote %q, remaining args %q; want %q, %q", got, rest, tc.remote, resume)
+			}
+		})
+	}
+	for _, args := range [][]string{{"--local", "--remote="}, {"--remote", "another", "--local"}} {
+		if code, _, stderr := runCLI(t, args...); code != 2 || !strings.Contains(stderr, "--local cannot be combined with --remote") {
+			t.Fatalf("conflicting flags %q: exit %d, stderr %q", args, code, stderr)
+		}
+	}
+}

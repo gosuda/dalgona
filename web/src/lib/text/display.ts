@@ -1,6 +1,8 @@
-import { isLineBreak, isWhiteSpace } from "#lib/text/validate.ts";
-
-const ignorable = /\p{Default_Ignorable_Code_Point}/u;
+import {
+	isDefaultIgnorable,
+	isLineBreak,
+	isWhiteSpace,
+} from "#lib/text/validate.ts";
 
 function isControl(cp: number): boolean {
 	return cp < 0x20 || (cp >= 0x7f && cp <= 0x9f);
@@ -63,9 +65,40 @@ export function exposed(text: string): string {
 }
 
 function visibleKey(line: string): string {
-	return Array.from(line)
-		.filter((char) => !ignorable.test(char))
-		.join("");
+	let out = "";
+	for (const char of line) {
+		if (!isDefaultIgnorable(char.codePointAt(0) ?? 0)) out += char;
+	}
+	return out;
+}
+
+export function quote(text: string): string {
+	let out = '"';
+	for (const char of text) {
+		const cp = char.codePointAt(0) ?? 0;
+		if (char === '"' || char === "\\") out += `\\${char}`;
+		else if (isControl(cp) || isLineBreak(cp) || isBidiControl(cp)) {
+			out += `\\u${cp.toString(16).padStart(4, "0")}`;
+		} else out += char;
+	}
+	return `${out}"`;
+}
+
+function editable(cp: number): boolean {
+	return (
+		cp === 0x09 ||
+		cp === 0x0a ||
+		(!isControl(cp) && !isBidiControl(cp) && !isLineBreak(cp))
+	);
+}
+
+export function escaped(text: string): string {
+	let out = "";
+	for (const char of text) {
+		const cp = char.codePointAt(0) ?? 0;
+		out += editable(cp) ? char : visible(cp);
+	}
+	return out;
 }
 
 export function distinctLines(sources: readonly string[]): string[] {

@@ -8,6 +8,8 @@ Feature branch pushes MUST use their pull request run instead of starting a seco
 CI MUST NOT filter changed paths because checks read files across package boundaries.
 A newer run for the same ref MUST cancel the older run.
 The workflow MUST also run its scheduled verification each Monday at 03:00 UTC.
+The workflow MUST use a concurrency group per ref.
+The concurrency group MUST cover tag pushes as well.
 
 ## Provider
 
@@ -61,6 +63,7 @@ One `web` job run then lists every failing check that does not depend on a faile
 ## Native lanes
 
 The macOS and Windows lanes MUST use the `macos-latest` and `windows-latest` GitHub-hosted runners.
+The `web` job uploads its `dist` artifact for the native jobs to download before Go verification.
 Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
 Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
 A failing native job MUST NOT cancel the other native jobs.

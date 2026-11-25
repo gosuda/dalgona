@@ -22,7 +22,10 @@ func imageTooLarge(index int, size int64) error {
 	return invalidParams(fmt.Sprintf("image %d is %d bytes; the limit is %d bytes (5 MiB)", index, size, event.MaxImageBytes))
 }
 
-func imageFromURL(raw string, admit func(int64) error) (agent.Image, error) {
+func imageFromURL(raw, name, alt string, admit func(int64) error) (agent.Image, error) {
+	if err := checkImageMeta(name, alt); err != nil {
+		return agent.Image{}, err
+	}
 	rest, hasPrefix := strings.CutPrefix(raw, "data:")
 	header, payload, hasComma := strings.Cut(rest, ",")
 	declared, isBase64 := strings.CutSuffix(header, ";base64")
@@ -43,7 +46,7 @@ func imageFromURL(raw string, admit func(int64) error) (agent.Image, error) {
 	if mime != declared {
 		return agent.Image{}, invalidParams(fmt.Sprintf("image type %s does not match the data URL type %s", mime, declared))
 	}
-	return agent.Image{Mime: mime, Data: data}, nil
+	return agent.Image{Mime: mime, Data: data, Name: name, AltText: alt}, nil
 }
 
 func decodedSize(payload string) int64 {
@@ -51,35 +54,71 @@ func decodedSize(payload string) int64 {
 	return int64(base64.StdEncoding.DecodedLen(len(payload)) - padding)
 }
 
-func imageFromPath(path string, admit func(int64) error) (agent.Image, error) {
+func checkImagePath(path string) error {
 	if !filepath.IsAbs(path) {
-		return agent.Image{}, invalidParams("image path must be absolute: " + path)
+		return invalidParams("image path must be absolute: " + path)
 	}
 	if len(path) > maxImagePathBytes {
-		return agent.Image{}, invalidParams("image path is longer than 4096 bytes")
+		return invalidParams("image path is longer than 4096 bytes")
 	}
+	return nil
+}
+
+func statImageFile(path string) (os.FileInfo, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return agent.Image{}, imageReadError(path, err)
+		return nil, imageReadError(path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return agent.Image{}, invalidParams("image path must be a regular file: " + path)
+		return nil, invalidParams("image path must be a regular file: " + path)
+	}
+	return info, nil
+}
+
+func loadAdmittedImage(path string, admit func(int64) error) ([]byte, error) {
+	info, err := statImageFile(path)
+	if err != nil {
+		return nil, err
 	}
 	if err = admit(info.Size()); err != nil {
-		return agent.Image{}, err
+		return nil, err
 	}
 	data, err := readImageFile(path)
 	if err != nil {
-		return agent.Image{}, err
+		return nil, err
 	}
 	if err = admit(int64(len(data))); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func imageFromPath(path, name, alt string, admit func(int64) error) (agent.Image, error) {
+	if err := checkImagePath(path); err != nil {
+		return agent.Image{}, err
+	}
+	if err := checkImageMeta(name, alt); err != nil {
+		return agent.Image{}, err
+	}
+	data, err := loadAdmittedImage(path, admit)
+	if err != nil {
 		return agent.Image{}, err
 	}
 	mime, err := agent.ImageMIME(data)
 	if err != nil {
 		return agent.Image{}, invalidParams(err.Error())
 	}
-	return agent.Image{Path: filepath.Clean(path), Mime: mime, Data: data}, nil
+	return agent.Image{Path: filepath.Clean(path), Mime: mime, Data: data, Name: name, AltText: alt}, nil
+}
+
+func checkImageMeta(name, alt string) error {
+	if len(name) > event.MaxImageNameBytes {
+		return invalidParams(fmt.Sprintf("image name exceeds %d bytes", event.MaxImageNameBytes))
+	}
+	if len(alt) > event.MaxImageAltBytes {
+		return invalidParams(fmt.Sprintf("image alt_text exceeds %d bytes", event.MaxImageAltBytes))
+	}
+	return nil
 }
 
 func readImageFile(path string) ([]byte, error) {
@@ -155,7 +194,7 @@ const blobURLPrefix = "dalgona-blob:"
 func itemImages(images []event.Image) []rpc.ItemImage {
 	out := make([]rpc.ItemImage, len(images))
 	for index, image := range images {
-		out[index] = rpc.ItemImage{Type: "image", URL: blobURLPrefix + image.Blob.Blob, Mime: image.Mime, Bytes: image.Blob.Bytes, Path: image.Path}
+		out[index] = rpc.ItemImage{Type: "image", URL: blobURLPrefix + image.Blob.Blob, Mime: image.Mime, Bytes: image.Blob.Bytes, Path: image.Path, Name: image.Name, AltText: image.AltText}
 	}
 	return out
 }

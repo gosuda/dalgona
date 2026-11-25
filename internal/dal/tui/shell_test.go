@@ -155,8 +155,8 @@ func shellAfterRun(t *testing.T) (model, *shellCaller) {
 func TestShellEscOnChipOnlyLineLeavesModeAndKeepsChip(t *testing.T) {
 	t.Parallel()
 	m, caller := shellAfterRun(t)
-	if m.input.mode != inputShell || m.input.composer.Value() == "" {
-		t.Fatalf("after one run mode = %v and prompt = %q, want shell mode with a chip in the prompt", m.input.mode, m.input.composer.Value())
+	if got := m.input.composer.firstLine(); m.input.mode != inputShell || got != "[Shell #1 exit 0, 1 line]" {
+		t.Fatalf("after one run mode = %v and prompt = %q, want shell mode with the shell chip alone", m.input.mode, got)
 	}
 	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
 	if m.input.mode != inputPrompt {

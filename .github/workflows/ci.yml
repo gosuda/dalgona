@@ -21,6 +21,155 @@ env:
   GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
 
 jobs:
+  desktop:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Record native target
+        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+      - name: Gio Linux packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc pkg-config libwayland-dev libx11-dev libx11-xcb-dev libxkbcommon-x11-dev libgles2-mesa-dev libegl1-mesa-dev libffi-dev libxcursor-dev libxfixes-dev libvulkan-dev
+      - name: Install just 1.59.0
+        run: |
+          curl -fsSLo /tmp/just.tar.gz https://github.com/casey/just/releases/download/1.59.0/just-1.59.0-x86_64-unknown-linux-musl.tar.gz
+          echo "409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e  /tmp/just.tar.gz" | sha256sum --check
+          sudo tar -xzf /tmp/just.tar.gz -C /usr/local/bin just
+      - run: just desktop-check
+      - run: just desktop-build
+
+  desktop-macos:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: Record native target
+        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+      - name: Validate DMG inputs without signing
+        run: |
+          bash -n deploy/desktop/package-macos.sh
+          plutil -lint deploy/desktop/Info.plist
+          if output=$(env -u DALGONA_MACOS_SIGN_IDENTITY -u DALGONA_MACOS_NOTARY_PROFILE just desktop-package 2>&1); then
+            printf '%s\n' 'desktop-package accepted missing macOS signing inputs' >&2
+            exit 1
+          fi
+          grep -F 'set DALGONA_MACOS_SIGN_IDENTITY' <<<"$output"
+      - run: just desktop-check
+      - run: just desktop-build
+
+  desktop-windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: Record native target
+        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+      - name: Validate MSI inputs without signing
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          $script = (Resolve-Path 'deploy/desktop/package-windows.ps1').Path
+          [void][System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors | Out-String) }
+          [xml] $manifest = Get-Content -Raw 'deploy/desktop/dalgona.wxs'
+          $package = $manifest.Wix.Package
+          if ($manifest.DocumentElement.NamespaceURI -ne 'http://wixtoolset.org/schemas/v4/wxs' -or
+              $package.Scope -ne 'perMachine' -or [int]$package.InstallerVersion -lt 500) {
+              throw 'The MSI manifest must declare the WiX schema, per-machine scope and installer version >= 500.'
+          }
+      - run: just desktop-check
+      - run: just desktop-build
+
+  go:
+    name: ${{ matrix.check }}
+    needs: web
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: lint
+            lane: linux-lint
+            runner: depot-ubuntu-24.04
+            recipes: fmt-check vet lint
+          - check: test
+            lane: linux-test
+            runner: depot-ubuntu-24.04
+            recipes: test
+          - check: vuln
+            lane: linux-vuln
+            runner: depot-ubuntu-24.04
+            recipes: vuln
+          - check: Verify (macos-latest)
+            lane: macos
+            runner: macos-latest
+            recipes: verify-go
+          - check: Verify (windows-latest)
+            lane: windows
+            runner: windows-latest
+            recipes: verify-go
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require verified shared assets
+        env:
+          SHARED_RESULT: ${{ needs.web.result }}
+        run: |
+          if [ "$SHARED_RESULT" != success ]; then
+            printf 'Web verification ended with %s. Re-run the web job before Go verification.\n' "$SHARED_RESULT" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download this run's verified web assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: verified-web-assets
+          path: internal/dalgona/webui/dist
+          digest-mismatch: error
+      - name: Install Linux graphics development packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev pkg-config
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
+        with:
+          version: "0.13.9"
+          python-version: "3.15"
+          require-checksums: true
+          enable-cache: false
+      - run: uv python install 3.15
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
+      - name: Verify Go contracts
+        env:
+          GOCACHE: "${{ runner.temp }}/dalgona-go-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}"
+        run: just ${{ matrix.recipes }}
   web:
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
@@ -108,74 +257,3 @@ jobs:
           include-hidden-files: true
           overwrite: true
           retention-days: 7
-
-  go:
-    name: ${{ matrix.check }}
-    needs: web
-    if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - check: lint
-            lane: linux-lint
-            runner: depot-ubuntu-24.04
-            recipes: fmt-check vet lint
-          - check: test
-            lane: linux-test
-            runner: depot-ubuntu-24.04
-            recipes: test
-          - check: vuln
-            lane: linux-vuln
-            runner: depot-ubuntu-24.04
-            recipes: vuln
-          - check: Verify (macos-latest)
-            lane: macos
-            runner: macos-latest
-            recipes: verify-go
-          - check: Verify (windows-latest)
-            lane: windows
-            runner: windows-latest
-            recipes: verify-go
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Require verified shared assets
-        env:
-          SHARED_RESULT: ${{ needs.web.result }}
-        run: |
-          if [ "$SHARED_RESULT" != success ]; then
-            printf 'Web verification ended with %s. Re-run the web job before Go verification.\n' "$SHARED_RESULT" >&2
-            exit 1
-          fi
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Download this run's verified web assets
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: verified-web-assets
-          path: internal/dalgona/webui/dist
-          digest-mismatch: error
-      - name: Install Linux graphics development packages
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev pkg-config
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
-        with:
-          version: "0.13.9"
-          python-version: "3.15"
-          require-checksums: true
-          enable-cache: false
-      - run: uv python install 3.15
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
-      - name: Verify Go contracts
-        env:
-          GOCACHE: "${{ runner.temp }}/dalgona-go-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}"
-        run: just ${{ matrix.recipes }}

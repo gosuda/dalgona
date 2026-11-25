@@ -25,8 +25,8 @@ func TestReporterCommands(t *testing.T) {
 	if r == nil {
 		t.Fatal("expected active reporter")
 	}
-	r.Report(context.Background(), StateWorking, 2, "thread-1")
-	r.Report(context.Background(), StateBlocked, 9, "thread-1")
+	r.Report(context.Background(), StateWorking, 2, "", "thread-1")
+	r.Report(context.Background(), StateBlocked, 9, "work", "thread-1")
 	r.SubagentPane(context.Background(), "child-1", "/workspace")
 	r.Release(context.Background())
 	assertArgv(t, record)
@@ -54,10 +54,10 @@ func assertArgv(t *testing.T, record string) {
 		t.Fatal(err)
 	}
 	want := strings.Join([]string{
-		"pane report-agent root-pane --source dalgona --agent dalgona --state working --seq 2 --agent-session-id thread-1 -- dalgona --resume thread-1",
-		"pane report-agent root-pane --source dalgona --agent dalgona --state blocked --seq 9 --agent-session-id thread-1 -- dalgona --resume thread-1",
+		"pane report-agent root-pane --source dalgona --agent dalgona --state working --seq 2 --agent-session-id thread-1 -- dalgona --local --resume thread-1",
+		"pane report-agent root-pane --source dalgona --agent dalgona --state blocked --seq 9 --agent-session-id remote:4:workthread-1 -- dalgona --remote work --resume thread-1",
 		"pane split --current --direction right --cwd /workspace --no-focus",
-		"pane run child-pane dalgona --resume child-1",
+		"pane run child-pane dalgona --local --resume child-1",
 		"pane release-agent root-pane --source dalgona --agent dalgona",
 	}, "\n") + "\n"
 	if string(data) != want {
@@ -95,7 +95,7 @@ func TestReporterLogsFailureOnce(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	r := &Reporter{binary: binary, paneID: "root-pane"}
-	r.Report(context.Background(), StateIdle, 1, "thread-1")
+	r.Report(context.Background(), StateIdle, 1, "", "thread-1")
 	r.Release(context.Background())
 	if got := strings.Count(logs.String(), "herdr: command failed"); got != 1 {
 		t.Fatalf("failure log count = %d, want 1", got)

@@ -216,16 +216,3 @@ func TestQuestionRefusesAnOfferedLabelThatFailsTheTextCheck(t *testing.T) {
 		t.Fatalf("NUL label: %d sent, card sent %v after %d attempts, notice %q", len(answer), card.sent, card.attempts, m.notice)
 	}
 }
-
-func TestQuestionResolutionForAnotherThreadKeepsTheCard(t *testing.T) {
-	t.Parallel()
-	m, _ := openQuestion(t, questionParamsJSON)
-	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t2","requestId":"req-1","resolution":"answered"}`)})
-	if len(m.approvals) != 1 {
-		t.Fatal("a resolution for another thread closed the card")
-	}
-	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t1","requestId":"req-1","resolution":"answered"}`)})
-	if len(m.approvals) != 0 {
-		t.Fatal("the matching resolution kept the card")
-	}
-}

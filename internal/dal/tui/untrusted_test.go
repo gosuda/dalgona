@@ -108,6 +108,48 @@ func TestUntrustedTextIsSanitizedAtEveryEntry(t *testing.T) {
 	}
 }
 
+func TestPastedControlsShowAsVisibleEscapesAndStayInTheDraft(t *testing.T) {
+	t.Parallel()
+	const hostile = "x\u001b]0;pwn\u0007y\u202e"
+	fields := []struct {
+		name  string
+		open  func(t *testing.T) model
+		value func(m model) string
+		exact string
+	}{
+		{"composer", paletteModel, func(m model) string { return m.input.composer.Value() }, "x<U+001B>]0;pwn<U+0007>y<U+202E>"},
+		{"filter", func(t *testing.T) model { return openModelPicker(t, new(fakeCaller)) }, func(m model) string { return m.input.field.value() }, ""},
+	}
+	for _, field := range fields {
+		t.Run(field.name, func(t *testing.T) {
+			t.Parallel()
+			checkPastedControlsVisible(t, field.open, field.value, field.exact, hostile)
+		})
+	}
+}
+
+func checkPastedControlsVisible(t *testing.T, open func(t *testing.T) model, value func(m model) string, exact, hostile string) {
+	t.Helper()
+	m, _ := drive(t, open(t), tea.PasteMsg{Content: hostile})
+	if got := value(m); got != hostile {
+		t.Fatalf("draft holds %q, want the pasted text %q", got, hostile)
+	}
+	view := m.View().Content
+	if exact != "" && !strings.Contains(view, exact) {
+		t.Fatalf("view does not show the pasted controls as escapes:\n%q", view)
+	}
+	for _, raw := range []string{"\x1b]", "\x07", "\u202e"} {
+		if strings.Contains(view, raw) {
+			t.Errorf("view emits the raw control %q:\n%q", raw, view)
+		}
+	}
+	for _, code := range []string{"001B", "0007", "202E"} {
+		if !strings.Contains(view, code) {
+			t.Errorf("view hides the code point %s of a pasted control:\n%q", code, view)
+		}
+	}
+}
+
 func TestUntrustedThreadNameIsSanitizedInState(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(nil, Options{})
@@ -115,24 +157,6 @@ func TestUntrustedThreadNameIsSanitizedInState(t *testing.T) {
 	m, _ = drive(t, m, notificationMsg{method: "thread/name/updated", params: []byte(`{"threadId":"t1","threadName":"x\u001b]0;pwn\u0007y\u202e"}`)})
 	if m.thread.title != "xy" {
 		t.Fatalf("thread title = %q, want the visible text xy", m.thread.title)
-	}
-}
-
-func TestPastedControlsStayInTheDraftAndShowAsEscapes(t *testing.T) {
-	t.Parallel()
-	const hostile = "x\u001b]0;pwn\u0007y\u202e"
-	m := newModel(nil, Options{}, nil)
-	m.thread.id = "t1"
-	m, _ = drive(t, m, tea.PasteMsg{Content: hostile})
-	if got := m.input.composer.Expanded(); got != hostile {
-		t.Fatalf("draft = %q, want the pasted text %q", got, hostile)
-	}
-	view := m.View().Content
-	if !strings.Contains(view, "x<U+001B>]0;pwn<U+0007>y<U+202E>") {
-		t.Fatalf("view does not show the pasted controls as escapes:\n%q", view)
-	}
-	if strings.Contains(view, "\x1b]0;") || strings.Contains(view, "\u202e") {
-		t.Fatalf("view kept untrusted control text:\n%q", view)
 	}
 }
 

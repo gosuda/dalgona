@@ -358,6 +358,47 @@ describe("thread command panels", () => {
 		});
 	});
 
+	test("review/start keeps a typed branch and commit id exactly", async () => {
+		const answers: Record<string, Answer> = {
+			"review/start": () => ({ reviewThreadId: "thread-1", turn: {} }),
+		};
+		const { session, calls } = activeSession(answers);
+		render(ThreadPanels, { props: { session } });
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Base branch" }));
+		await fireEvent.input(
+			screen.getByRole("textbox", { name: "Base branch name" }),
+			{ target: { value: " main\u00a0" } },
+		);
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		session.openPanel("review");
+		await tick();
+		await fireEvent.click(screen.getByRole("radio", { name: "Commit" }));
+		await fireEvent.input(screen.getByRole("textbox", { name: "Commit id" }), {
+			target: { value: "abc123 " },
+		});
+		await fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+		await tick();
+		expect(calls.filter((call) => call.method === "review/start")).toEqual([
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "baseBranch", branch: " main\u00a0" },
+				},
+			},
+			{
+				method: "review/start",
+				params: {
+					threadId: "thread-1",
+					target: { type: "commit", sha: "abc123 " },
+				},
+			},
+		]);
+	});
+
 	test("fork clears a stale turn selection when the panel reopens", async () => {
 		const answers: Record<string, Answer> = { "dalgona/thread/tree": tree };
 		const { session } = activeSession(answers);
@@ -545,6 +586,42 @@ test("conversation search offers retry and distinguishes no matches", async () =
 	await vi.advanceTimersByTimeAsync(300);
 	await tick();
 	expect(screen.getByText("No conversation mentions this text.")).toBeTruthy();
+});
+
+function searchSession(search: ReturnType<typeof vi.fn>): Session {
+	return {
+		listThreads: vi.fn().mockResolvedValue({ threads: [], nextCursor: null }),
+		searchThreads: search,
+		closePanel: vi.fn(),
+		openedPanel: 1,
+		closePanelIf: vi.fn(),
+	} as unknown as Session;
+}
+
+test("conversation search needs three scalars in every term and sends the filter unchanged", async () => {
+	vi.useFakeTimers();
+	const search = vi.fn().mockResolvedValue([]);
+	render(ResumePanel, { session: searchSession(search), open: true });
+	const input = screen.getByRole("searchbox", { name: "Filter threads" });
+	for (const local of ["ab ", "abc de", " \u3000 ", "ab\u00a0cde"]) {
+		await fireEvent.input(input, { target: { value: local } });
+		await vi.advanceTimersByTimeAsync(300);
+		expect(search, JSON.stringify(local)).not.toHaveBeenCalled();
+		expect(
+			screen.queryByRole("region", { name: "Matches in conversations" }),
+		).toBeNull();
+	}
+	await fireEvent.input(input, { target: { value: " abc " } });
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenCalledExactlyOnceWith(" abc ", expect.anything());
+	await fireEvent.input(input, {
+		target: { value: "\u3000\uac00\ub098\ub2e4 e\u0301e\t" },
+	});
+	await vi.advanceTimersByTimeAsync(300);
+	expect(search).toHaveBeenLastCalledWith(
+		"\u3000\uac00\ub098\ub2e4 e\u0301e\t",
+		expect.anything(),
+	);
 });
 
 test("resume closes after the thread loads and focus lands in the enabled message field", async () => {

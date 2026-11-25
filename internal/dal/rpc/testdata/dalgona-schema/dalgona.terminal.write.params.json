@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/write params",
+  "type": "object",
+  "required": [
+    "terminalId",
+    "writerLease",
+    "inputSeq",
+    "dataBase64"
+  ],
+  "properties": {
+    "terminalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "writerLease": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "inputSeq": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "dataBase64": {
+      "type": "string"
+    }
+  }
+}

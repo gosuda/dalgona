@@ -1,8 +1,6 @@
 package patch
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"io/fs"
 	"os"
@@ -14,37 +12,6 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/tool/snapshot"
 )
 
-func TestFingerprintBindsInvocationTuple(t *testing.T) {
-	env := tool.Env{Cwd: "/workspace", Evidence: snapshot.Evidence{Consumer: "model", Cutoff: 7}}
-	input := "[a#NEW]\nPUT >$:\n+hello"
-	var framed []byte
-	for _, value := range []string{"hashline-light", "1", "/workspace", "model", input} {
-		framed = binary.BigEndian.AppendUint64(framed, uint64(len(value)))
-		framed = append(framed, value...)
-	}
-	want := sha256.Sum256(framed)
-	if got := invocationFingerprint(HashlineLight, env, input); got != want {
-		t.Fatalf("fingerprint = %x, want %x", got, want)
-	}
-	otherWorkspace, otherConsumer := env, env
-	otherWorkspace.Cwd = "/other"
-	otherConsumer.Evidence.Consumer = "evaluator"
-	for _, got := range [][sha256.Size]byte{
-		invocationFingerprint(HashlineEnhanced, env, input),
-		invocationFingerprint(HashlineLight, otherWorkspace, input),
-		invocationFingerprint(HashlineLight, otherConsumer, input),
-		invocationFingerprint(HashlineLight, env, input+"\n"),
-	} {
-		if got == want {
-			t.Fatal("changed invocation tuple retained its fingerprint")
-		}
-	}
-	env.Evidence.Cutoff++
-	if invocationFingerprint(HashlineLight, env, input) != want {
-		t.Fatal("cutoff is not a fingerprint tuple member")
-	}
-}
-
 func TestStagedBatchFreezesEvidenceAndBytes(t *testing.T) {
 	env, cwd := editTestEnv(t)
 	env.Evidence = snapshot.Evidence{Consumer: "model", Cutoff: 7}
@@ -53,7 +20,7 @@ func TestStagedBatchFreezesEvidenceAndBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, err := stage(t.Context(), HashlineLight, edits, env, input)
+	batch, err := stage(t.Context(), HashlineLight, edits, env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +49,7 @@ func TestObserverRetainsFindingsWithoutWriting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch, err := stage(t.Context(), HashlineLight, edits, env, input)
+	batch, err := stage(t.Context(), HashlineLight, edits, env)
 	if err == nil || !strings.Contains(err.Error(), "omitted code") {
 		t.Fatalf("observer error = %v", err)
 	}
@@ -109,7 +76,7 @@ func stageProseControl(t *testing.T, env tool.Env, cwd, input string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepted, err := stage(t.Context(), HashlineLight, edits, env, control)
+	accepted, err := stage(t.Context(), HashlineLight, edits, env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +97,7 @@ func TestStagedBatchValidatesShapesBeforeEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = stage(t.Context(), HashlineLight, edits, env, input)
+	_, err = stage(t.Context(), HashlineLight, edits, env)
 	if err == nil || !strings.Contains(err.Error(), "cannot combine") {
 		t.Fatalf("shape must fail before unavailable evidence: %v", err)
 	}

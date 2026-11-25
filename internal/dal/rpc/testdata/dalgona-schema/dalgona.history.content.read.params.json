@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/history/content/read params",
+  "type": "object",
+  "required": [
+    "source",
+    "contentId"
+  ],
+  "properties": {
+    "source": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "snapshot",
+            "live"
+          ]
+        },
+        "historyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "streamId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "contentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "offset": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 262144
+    }
+  }
+}

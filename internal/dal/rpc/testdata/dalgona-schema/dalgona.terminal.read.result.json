@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/read result",
+  "type": "object",
+  "required": [
+    "offset",
+    "next",
+    "dataBase64",
+    "resizes",
+    "resizeOrdinal",
+    "status",
+    "leaseExpiresAt"
+  ],
+  "properties": {
+    "offset": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "next": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "dataBase64": {
+      "type": "string"
+    },
+    "resizes": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "ordinal",
+          "offset",
+          "columns",
+          "rows"
+        ],
+        "properties": {
+          "ordinal": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$"
+          },
+          "offset": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)$"
+          },
+          "columns": {
+            "type": "integer",
+            "minimum": 20,
+            "maximum": 240
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 5,
+            "maximum": 120
+          }
+        }
+      }
+    },
+    "resizeOrdinal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "status": {
+      "type": "object",
+      "required": [
+        "state",
+        "inputState"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "running",
+            "exited",
+            "closed"
+          ]
+        },
+        "inputState": {
+          "enum": [
+            "ready",
+            "uncertain",
+            "closed"
+          ]
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "finalOffset": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "finalResizeOrdinal": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "outputExpiresAt": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        }
+      }
+    },
+    "leaseExpiresAt": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    }
+  }
+}

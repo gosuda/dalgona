@@ -689,7 +689,7 @@ func (m *model) setState(state string) {
 }
 
 func (m *model) emitStatus() {
-	if m.conn.opts.OnStatus != nil {
-		m.conn.opts.OnStatus(Status{State: m.thread.state, Seq: m.thread.seq, ThreadID: m.thread.id})
+	if m.conn.opts.OnStatus != nil && (m.conn.link.Endpoint == "" || m.conn.foreground) {
+		m.conn.opts.OnStatus(Status{Endpoint: m.conn.link.Endpoint, Remote: m.conn.remote, State: m.thread.state, Seq: m.thread.seq, ThreadID: m.thread.id})
 	}
 }

@@ -44,7 +44,7 @@ func (s *server) question(ctx context.Context, w *watch, ch <-chan agent.Update,
 		params:    userInputParams(update.Thread, w.tracker.currentTurn(), prompt),
 	}
 	askCtx, cancel := context.WithCancel(ctx)
-	started, dup := s.spawnRequest(prompt.RequestID, cancel, func() {
+	started, dup := s.spawnRequest(prompt.RequestID, update.Thread, cancel, func() {
 		defer s.settle(prompt.RequestID)
 		s.requestInput(ctx, askCtx, q)
 	})

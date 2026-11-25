@@ -3,6 +3,7 @@ package mcp
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"testing"
@@ -53,5 +54,58 @@ func TestToolNameIsProviderSafe(t *testing.T) {
 	}
 	if a, b := toolName("plug:srv", "echo"), toolName("plug:srv", "echo"); a != b {
 		t.Fatalf("toolName is not repeatable: %q then %q", a, b)
+	}
+}
+
+var nameFragments = []string{"a", "Z", "0", "_", "-", ".", "/", ":", " ", "@", "é", "中", "😀"}
+
+var nameLengths = []int{1, 2, 5, 55, 62, 63, 64, 65, 100, 200}
+
+func randomNamePart(r *rand.Rand) string {
+	target := nameLengths[r.IntN(len(nameLengths))]
+	var b strings.Builder
+	for b.Len() < target {
+		b.WriteString(nameFragments[r.IntN(len(nameFragments))])
+	}
+	return b.String()
+}
+
+func checkToolName(t *testing.T, seen map[string]string, server, tool string) {
+	t.Helper()
+	joined := server + "__" + tool
+	got := toolName(server, tool)
+	if len(got) > maxToolName {
+		t.Fatalf("toolName(%q, %q) = %q, %d bytes over the 64-byte cap", server, tool, got, len(got))
+	}
+	if !safeNamePattern.MatchString(got) {
+		t.Fatalf("toolName(%q, %q) = %q, outside the provider set", server, tool, got)
+	}
+	if again := toolName(server, tool); again != got {
+		t.Fatalf("toolName(%q, %q) changed from %q to %q", server, tool, got, again)
+	}
+	if prev, dup := seen[got]; dup && prev != joined {
+		t.Fatalf("toolName collision: %q and %q both give %q", prev, joined, got)
+	}
+	seen[got] = joined
+}
+
+func TestToolNameHoldsAcrossRandomNames(t *testing.T) {
+	seen := make(map[string]string)
+	edges := [][2]string{
+		{"", "echo"},
+		{"s", ""},
+		{"-x", "y"},
+		{"_ok", "fine"},
+		{strings.Repeat("a", 200), "b"},
+		{"srv", strings.Repeat("😀", 50)},
+		{"plug:srv", "a/b.c:d e@f"},
+		{"a", strings.Repeat("é", 100)},
+	}
+	for _, edge := range edges {
+		checkToolName(t, seen, edge[0], edge[1])
+	}
+	r := rand.New(rand.NewPCG(0x6d63706e616d65, 0x746f6f6c303631))
+	for range 300 {
+		checkToolName(t, seen, randomNamePart(r), randomNamePart(r))
 	}
 }

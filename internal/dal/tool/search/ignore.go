@@ -14,25 +14,25 @@ type ignoreRule struct {
 	basename bool
 }
 
-type ignoreStack struct {
+type IgnoreRules struct {
 	rules []ignoreRule
 }
 
-func loadIgnore(root string) ignoreStack {
-	var stack ignoreStack
+func loadIgnore(root string) IgnoreRules {
+	var stack IgnoreRules
 	stack.loadFile(root, filepath.Join(root, ".git", "info", "exclude"))
 	stack.loadFile(root, filepath.Join(root, ".gitignore"))
 	return stack
 }
 
-func (s *ignoreStack) loadDir(root, dir string) {
+func (s *IgnoreRules) loadDir(root, dir string) {
 	if filepath.Clean(dir) == filepath.Clean(root) {
 		return
 	}
 	s.loadFile(dir, filepath.Join(dir, ".gitignore"))
 }
 
-func (s *ignoreStack) loadScopeIgnores(root, scope string) {
+func (s *IgnoreRules) loadScopeIgnores(root, scope string) {
 	rel, err := filepath.Rel(root, scope)
 	if err != nil || rel == "." {
 		return
@@ -43,12 +43,16 @@ func (s *ignoreStack) loadScopeIgnores(root, scope string) {
 	}
 }
 
-func (s *ignoreStack) loadFile(base, path string) {
+func (s *IgnoreRules) loadFile(base, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
-	for raw := range strings.SplitSeq(string(data), "\n") {
+	s.Add(base, string(data))
+}
+
+func (s *IgnoreRules) Add(base, text string) {
+	for raw := range strings.SplitSeq(text, "\n") {
 		line, _ := strings.CutSuffix(raw, "\r")
 		rule, ok := parseIgnoreRule(base, line)
 		if ok {
@@ -82,7 +86,7 @@ func parseIgnoreRule(base, text string) (ignoreRule, bool) {
 	return rule, true
 }
 
-func (s ignoreStack) ignored(path string, dir bool) bool {
+func (s IgnoreRules) Ignored(path string, dir bool) bool {
 	ignored := false
 	for _, rule := range s.rules {
 		rel, err := filepath.Rel(rule.base, path)

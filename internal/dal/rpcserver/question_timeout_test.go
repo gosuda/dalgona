@@ -157,7 +157,7 @@ func openBubbleWindow(t *testing.T, ctx context.Context, r *rig, thread *agent.T
 	w.client = client
 	w.server = &server{
 		host: r.host, log: slog.New(slog.DiscardHandler), conn: w.conn,
-		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, refused: map[string]struct{}{},
+		watches: map[string]*watch{}, pending: map[string]context.CancelFunc{}, threads: map[string]string{}, refused: map[string]struct{}{},
 	}
 	w.watch = &watch{thread: thread}
 	w.watch.tracker = w.server.newTracker(thread.ID())

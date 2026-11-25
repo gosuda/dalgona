@@ -127,7 +127,10 @@ func (h *Host) maskReview(text string) (string, error) {
 }
 
 func (w *worker) startReview(ctx context.Context, p *prepared, completed event.ToolCompleted) {
-	round := w.round
+	w.queueReview(ctx, w.round, p, completed)
+}
+
+func (w *worker) queueReview(ctx context.Context, round *reviewRound, p *prepared, completed event.ToolCompleted) {
 	if round == nil || w.t.host.cfg.EditJudge == nil || !w.t.host.Config().EditReview.Enabled || w.reviewFailures >= reviewFailureLimit || p.class != tool.ClassEdit || !completed.OK || len(p.files) == 0 {
 		return
 	}
@@ -142,17 +145,16 @@ func (w *worker) startReview(ctx context.Context, p *prepared, completed event.T
 }
 
 func (w *worker) joinReviews(ctx context.Context) error {
-	round := w.round
+	pending := waitReviews(w.inBand.takeReviews(), w.round)
 	w.round = nil
-	if round == nil {
+	if len(pending) == 0 {
 		return nil
 	}
-	round.group.Wait()
 	given, err := w.feedbackGiven()
 	if err != nil {
 		return err
 	}
-	judged := w.collectJudged(round, given)
+	judged := w.collectJudged(pending, given)
 	if len(judged) == 0 {
 		return nil
 	}
@@ -160,9 +162,23 @@ func (w *worker) joinReviews(ctx context.Context) error {
 	return err
 }
 
-func (w *worker) collectJudged(round *reviewRound, given int) []event.Event {
+func waitReviews(rounds ...*reviewRound) []*event.ToolJudged {
+	var pending []*event.ToolJudged
+	for _, round := range rounds {
+		if round == nil {
+			continue
+		}
+		round.group.Wait()
+		round.stateMu.Lock()
+		pending = append(pending, round.pending...)
+		round.stateMu.Unlock()
+	}
+	return pending
+}
+
+func (w *worker) collectJudged(pending []*event.ToolJudged, given int) []event.Event {
 	var judged []event.Event
-	for _, slot := range round.pending {
+	for _, slot := range pending {
 		if slot.CallID == "" {
 			continue
 		}

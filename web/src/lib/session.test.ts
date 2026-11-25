@@ -2266,3 +2266,28 @@ function question(id: string): QuestionRequest {
 		],
 	};
 }
+
+describe("answered resolution notices", () => {
+	beforeEach(() => {
+		vi.stubGlobal("history", { replaceState: vi.fn() });
+	});
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test("an answered request that resolves as answered still shows a notice", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		const sent = question("req-1");
+		ports[0]?.question(sent);
+		session.answerQuestion(sent, [{ picked: ["Postgres"], other: "" }]);
+		ports[0]?.deliver(resolvedNotice("t1", "req-1", "answered"));
+		const texts = session.notices.map((notice) => notice.text);
+		expect(texts).toContain("Question answered");
+		expect(texts).not.toContain("Question answered in another window");
+		session.stop();
+	});
+});

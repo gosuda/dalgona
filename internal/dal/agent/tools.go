@@ -3,13 +3,11 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"html"
-	"io/fs"
+	"io"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -40,15 +38,18 @@ const (
 var instructionsPath = regexp.MustCompile(`<instructions path="([^"]*)">`)
 
 type prepared struct {
-	call     event.ToolCall
-	tool     tool.Tool
-	class    tool.Class
-	args     jsontext.Value
-	repairs  int
-	plan     *tool.Plan
-	files    []event.FileChange
-	verdict  verdict
-	evidence snapshot.Evidence
+	call       event.ToolCall
+	tool       tool.Tool
+	class      tool.Class
+	args       jsontext.Value
+	repairs    int
+	plan       *tool.Plan
+	files      []event.FileChange
+	verdict    verdict
+	evidence   snapshot.Evidence
+	invocation string
+	claim      *invocationClaim
+	execOutput *outputTee
 }
 
 func (p *prepared) processID() string {
@@ -257,6 +258,13 @@ func (w *worker) prepare(ctx context.Context, call event.ToolCall, requestID str
 }
 
 func (w *worker) admit(ctx context.Context, p *prepared, requestID string) (*prepared, error) {
+	expired, err := w.claimInvocation(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	if expired {
+		return nil, w.declineCall(ctx, p.call, requestID, expiredRefusal(p.claim.profile))
+	}
 	gc, err := w.gateCall(ctx, p, requestID)
 	if err != nil {
 		return nil, w.failBeforeRun(ctx, p, requestID, err)
@@ -350,6 +358,13 @@ func planRefusalMeta(cause error) jsontext.Value {
 	return outcomeMeta(refused.Outcome)
 }
 
+func (w *worker) readOnlyRefusal(class tool.Class, name string) (verdict, bool) {
+	if !w.t.created.ReadOnly || class == tool.ClassRead {
+		return verdict{}, false
+	}
+	return decline("read-only", "read-only thread refused "+name), true
+}
+
 func declineOutcome(v verdict) tool.Outcome {
 	if v.decision == "cancel" {
 		return tool.Outcome{Status: tool.StatusInterrupted, Commit: tool.CommitNone, Reason: tool.ReasonInterrupted}
@@ -358,16 +373,20 @@ func declineOutcome(v verdict) tool.Outcome {
 }
 
 func refusalMeta(item tool.Tool, result tool.Outcome) jsontext.Value {
-	profiled, ok := item.(tool.Profiled)
-	if !ok {
-		return nil
-	}
-	profile, ok := profiled.Profile()
+	profile, ok := profileOf(item)
 	if !ok {
 		return nil
 	}
 	result.Style, result.Version = profile.Style, profile.Version
 	return outcomeMeta(result)
+}
+
+func profileOf(item tool.Tool) (tool.Profile, bool) {
+	profiled, ok := item.(tool.Profiled)
+	if !ok {
+		return tool.Profile{}, false
+	}
+	return profiled.Profile()
 }
 
 func outcomeMeta(outcome tool.Outcome) jsontext.Value {
@@ -387,10 +406,19 @@ func (w *worker) start(ctx context.Context, p *prepared) error {
 	if err != nil {
 		return err
 	}
-	if _, err = w.t.appendEvents(ctx, started); err != nil {
+	invocation, err := w.invocationStarted(p)
+	if err != nil {
+		return err
+	}
+	records := []event.Event{started}
+	if invocation.Identity != "" {
+		records = append(records, invocation)
+	}
+	if _, err = w.t.appendEvents(ctx, records...); err != nil {
 		return err
 	}
 	p.files = started.Files
+	p.invocation = invocation.Identity
 	return nil
 }
 
@@ -543,17 +571,29 @@ func maskPostText(args jsontext.Value, mask func(string) (string, error)) (jsont
 }
 
 func (w *worker) execute(ctx context.Context, p *prepared) (event.ToolCompleted, error) {
-	var result tool.Result
-	var err error
-	if p.plan != nil {
-		result, err = p.plan.Apply(ctx)
-		if err != nil {
-			p.discardPlan()
-		}
-	} else {
-		result, err = w.run(ctx, p)
+	result, err := w.invoke(ctx, p)
+	completed, err := w.completion(ctx, p, result, err)
+	if err != nil || p.invocation == "" {
+		return completed, err
 	}
-	return w.completion(ctx, p, result, err)
+	settled := event.HashlineInvocationSettled{
+		Identity: p.invocation, OK: completed.OK, Output: completed.Output, Spill: completed.Spill, Meta: completed.Meta,
+	}
+	if _, err = w.t.appendEvents(context.WithoutCancel(ctx), settled); err != nil {
+		return event.ToolCompleted{}, err
+	}
+	return completed, nil
+}
+
+func (w *worker) dispatch(ctx context.Context, p *prepared) (tool.Result, error) {
+	if p.plan == nil {
+		return w.run(ctx, p)
+	}
+	result, err := p.plan.Apply(ctx)
+	if err != nil {
+		p.discardPlan()
+	}
+	return result, err
 }
 
 func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
@@ -567,7 +607,12 @@ func (w *worker) run(ctx context.Context, p *prepared) (tool.Result, error) {
 	tee := w.t.teeOutput(env.Runner, p.processID(), p.call.ID)
 	env.Runner = tee
 	result, err := p.tool.Run(withWorker(ctx, w), p.toolCall(), env)
-	tee.flush()
+	if w.t.host.cfg.Auth == nil {
+		tee.flush()
+	} else {
+		tee.deferMasked()
+		p.execOutput = tee
+	}
 	return result, err
 }
 
@@ -670,31 +715,76 @@ func deniedSocketSandbox(mode runner.SandboxMode, roots []string, home string) r
 
 func (w *worker) completion(ctx context.Context, p *prepared, result tool.Result, runErr error) (event.ToolCompleted, error) {
 	ok := result.OK && runErr == nil
-	output := string(result.Output)
-	if ok && p.call.Name == "read" {
-		output += w.nestedInstructions(ctx, p.args)
-	}
-	if runErr != nil {
-		output = joinError(output, runErr.Error())
-	}
-	var run runOutput
-	if p.class == tool.ClassExec {
-		run = runOutput{id: p.processID(), path: result.Path}
-	}
-	maskedOutput, err := w.t.host.mask(output)
-	if err != nil {
-		return event.ToolCompleted{}, err
-	}
-	text, spill, err := w.project(ctx, p.tool.Spec().Keep, maskedOutput, run)
+	text, spill, err := w.completionOutput(ctx, p, result, runErr)
 	if err != nil {
 		return event.ToolCompleted{}, err
 	}
 	if err := w.storeSnapshots(result.Meta); err != nil {
 		return event.ToolCompleted{}, err
 	}
+	if p.execOutput != nil && result.Path != "" && spill == nil {
+		p.execOutput.deliverMaskedCompletion(text)
+	}
 	return event.ToolCompleted{
 		CallID: p.call.ID, OK: ok, Output: text, Spill: spill, ExitCode: result.ExitCode, Recovered: "none", Meta: result.Meta,
+		Failure: string(result.Failure),
 	}, nil
+}
+
+func (w *worker) completionOutput(ctx context.Context, p *prepared, result tool.Result, runErr error) (string, *event.Spill, error) {
+	if p.class == tool.ClassExec {
+		return w.completeExecOutput(ctx, p, result, runErr)
+	}
+	return w.projectResult(ctx, p, result, runErr)
+}
+
+func (w *worker) completeExecOutput(ctx context.Context, p *prepared, result tool.Result, runErr error) (string, *event.Spill, error) {
+	if result.Path == "" {
+		return w.completeUnstoredExecOutput(ctx, p, result, runErr)
+	}
+	run := runOutput{id: p.processID(), path: result.Path, observed: result.ObservedOutputBytes}
+	source, err := w.execOutputPages(ctx, run)
+	if err != nil {
+		return "", nil, err
+	}
+	return w.completeStoredExecOutput(ctx, p, result, source, runErr)
+}
+
+func (w *worker) completeUnstoredExecOutput(ctx context.Context, p *prepared, result tool.Result, runErr error) (string, *event.Spill, error) {
+	if result.OutputTruncated || result.ObservedOutputBytes > event.MaxInlineBytes {
+		return "", nil, fmt.Errorf("agent: incomplete exec output: observed %d bytes: %w", result.ObservedOutputBytes, io.ErrUnexpectedEOF)
+	}
+	return w.projectResult(ctx, p, result, runErr)
+}
+
+func (w *worker) completeStoredExecOutput(ctx context.Context, p *prepared, result tool.Result, source spillPages, runErr error) (string, *event.Spill, error) {
+	if source.size > event.MaxInlineBytes {
+		return w.publishRunSpill(ctx, source, result.Path, runErr)
+	}
+	if !result.OutputTruncated && source.size == result.ObservedOutputBytes && int64(len(result.Output)) == result.ObservedOutputBytes {
+		return w.projectResult(ctx, p, result, runErr)
+	}
+	inline, err := source.inline(ctx, result.Path)
+	if err != nil {
+		return "", nil, err
+	}
+	result.Output = inline
+	return w.projectResult(ctx, p, result, runErr)
+}
+
+func (w *worker) projectResult(ctx context.Context, p *prepared, result tool.Result, runErr error) (string, *event.Spill, error) {
+	output := string(result.Output)
+	if result.OK && runErr == nil && p.call.Name == "read" {
+		output += w.nestedInstructions(ctx, p.args)
+	}
+	if runErr != nil {
+		output = joinError(output, runErr.Error())
+	}
+	masked, err := w.t.host.mask(output)
+	if err != nil {
+		return "", nil, err
+	}
+	return w.project(p.tool.Spec().Keep, masked)
 }
 
 func joinError(output, message string) string {
@@ -704,53 +794,24 @@ func joinError(output, message string) string {
 	return output + "\n" + message
 }
 
-type runOutput struct {
-	id   string
-	path string
-}
-
-func (w *worker) project(ctx context.Context, keep tool.Keep, masked string, run runOutput) (string, *event.Spill, error) {
-	if run.path != "" {
-		if spill, err := w.runSpill(ctx, run); err != nil || spill != nil {
-			return fitTail(masked, event.MaxProjectionBytes), spill, err
-		}
-	}
+func (w *worker) project(keep tool.Keep, masked string) (string, *event.Spill, error) {
 	if len(masked) <= event.MaxInlineBytes {
 		return masked, nil, nil
 	}
-	sha, err := w.t.host.journal.PutBlob([]byte(masked))
+	spill, err := w.spillBlob(masked)
 	if err != nil {
-		return "", nil, fmt.Errorf("agent: spill tool output: %w", err)
+		return "", nil, err
 	}
-	path := "blobs/" + sha
-	text, _ := tool.Project([]byte(masked), keep, path)
-	return fitTail(text, event.MaxProjectionBytes), &event.Spill{Path: path, Bytes: int64(len(masked)), SHA256: sha}, nil
+	text, _ := tool.Project([]byte(masked), keep, spill.Path)
+	return fitTail(text, event.MaxProjectionBytes), spill, nil
 }
 
-func (w *worker) runSpill(ctx context.Context, run runOutput) (*event.Spill, error) {
-	info, err := w.t.runner.Stat(ctx, run.path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
+func (w *worker) spillBlob(masked string) (*event.Spill, error) {
+	sha, err := w.t.host.journal.PutBlob([]byte(masked))
 	if err != nil {
-		return nil, fmt.Errorf("agent: stat exec output %s: %w", run.path, err)
+		return nil, fmt.Errorf("agent: spill tool output: %w", err)
 	}
-	if info.Size <= event.MaxInlineBytes {
-		return nil, nil
-	}
-	hash := sha256.New()
-	var offset int64
-	for {
-		page, err := w.t.runner.Read(ctx, run.id, offset)
-		if err != nil {
-			return nil, fmt.Errorf("agent: read exec spill %s: %w", run.path, err)
-		}
-		if len(page.Data) == 0 || page.Next <= offset {
-			return &event.Spill{Path: run.path, Bytes: offset, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
-		}
-		hash.Write(page.Data)
-		offset = page.Next
-	}
+	return &event.Spill{Path: "blobs/" + sha, Bytes: int64(len(masked)), SHA256: sha}, nil
 }
 
 func fitTail(text string, limit int) string {

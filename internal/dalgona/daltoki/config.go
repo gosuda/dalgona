@@ -83,10 +83,35 @@ func validateIdentity(raw config.DaltokiConfig) ([]github.Repository, error) {
 	if raw.Model == "" {
 		return nil, fmt.Errorf("daltoki: invalid model")
 	}
-	if raw.Profile == "" {
+	if raw.Profile == "" || !validProfileName(raw.Profile) {
 		return nil, fmt.Errorf("daltoki: invalid profile")
 	}
+	if !config.ValidEditStyle(raw.Profile) {
+		return nil, fmt.Errorf("daltoki: unknown profile %q", raw.Profile)
+	}
 	return repositories, nil
+}
+
+func validProfileName(profile string) bool {
+	if len(profile) == 0 || len(profile) > 48 {
+		return false
+	}
+	for i := 0; i < len(profile); i++ {
+		if !validProfileChar(profile[i], i == 0) {
+			return false
+		}
+	}
+	return true
+}
+
+func validProfileChar(c byte, first bool) bool {
+	if c >= 'a' && c <= 'z' {
+		return true
+	}
+	if first {
+		return false
+	}
+	return c == '_' || c == '-' || c >= '0' && c <= '9'
 }
 
 func validateLimits(raw config.DaltokiConfig) error {

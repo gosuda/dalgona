@@ -1,13 +1,11 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
 	"net"
 
-	"github.com/gosuda/dalgona/internal/dal/app"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/codexapp"
@@ -20,14 +18,14 @@ func loadConfig() (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	if err := app.InstallTLSRoots(cfg); err != nil {
+	if err := config.InstallTLSRoots(cfg.TLSCAFile); err != nil {
 		return config.Config{}, err
 	}
 	return cfg, nil
 }
 
 func openSession(cfg config.Config, std stdio) (*client.Session, error) {
-	if name := cmp.Or(std.remote, cfg.Remote); name != "" {
+	if name := std.remoteName(cfg.Remote); name != "" {
 		store, err := authStore(cfg)
 		if err != nil {
 			return nil, err
@@ -70,6 +68,14 @@ func runWeb(ctx context.Context, args []string, std stdio) int {
 	}
 	defer func() { _ = session.Close() }()
 	web := webui.Config{Listen: cfg.Web.Listen, Token: cfg.Web.Token, CertFile: cfg.Web.CertFile, KeyFile: cfg.Web.KeyFile}
+	if cfg.Web.CertFile != "" && cfg.Web.KeyFile != "" {
+		local, _, err := localSession(cfg.Home)
+		if err != nil {
+			return fail(std, 1, err)
+		}
+		defer func() { _ = local.Close() }()
+		web.PairingDial = local.Connect
+	}
 	if err := webui.Serve(ctx, web, sessionDialer(session), std.errOut); err != nil {
 		return fail(std, 1, err)
 	}

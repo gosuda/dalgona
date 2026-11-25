@@ -57,13 +57,13 @@ func TestTLSCAFileTrustsPrivateServer(t *testing.T) {
 
 	saved := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = saved })
-	if err := InstallTLSRoots(config.Config{TLSCAFile: caFile}); err != nil {
+	if err := config.InstallTLSRoots(caFile); err != nil {
 		t.Fatal(err)
 	}
 	if http.DefaultTransport == saved {
 		t.Fatal("InstallTLSRoots left http.DefaultTransport unchanged")
 	}
-	if err := InstallTLSRoots(config.Config{}); err != nil {
+	if err := config.InstallTLSRoots(""); err != nil {
 		t.Fatalf("InstallTLSRoots with an empty key: %v", err)
 	}
 

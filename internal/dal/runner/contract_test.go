@@ -333,7 +333,19 @@ func TestRemotePagesLargePayloads(t *testing.T) {
 		if len(state.Data) != size || !bytes.Equal(state.Data, bytes.Repeat([]byte("p"), size)) {
 			t.Fatalf("process output = %d bytes, want %d of 'p'", len(state.Data), size)
 		}
+		requireBoundedProcessPage(t, remote, spec.ID, size)
 	})
+}
+
+func requireBoundedProcessPage(t *testing.T, r Runner, id string, size int) {
+	t.Helper()
+	for _, offset := range []int64{0, int64(size) - 5} {
+		page, err := ReadProcessPage(t.Context(), r, id, offset, 17)
+		count := min(17, size-int(offset))
+		if err != nil || page.Exit == nil || page.Next != offset+int64(count) || string(page.Data) != strings.Repeat("p", count) {
+			t.Fatalf("exit page at %d: len=%d, next=%d, exit=%v, error=%v", offset, len(page.Data), page.Next, page.Exit, err)
+		}
+	}
 }
 
 func drainRemoteProcess(t *testing.T, remote Runner, ctx context.Context, id string) Output {

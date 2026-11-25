@@ -47,7 +47,8 @@ type Host struct {
 	refreshes     refreshLedger
 	memoryTimeout time.Duration
 
-	slots childSlots
+	slots    childSlots
+	failures *failureLog
 }
 
 func sandboxCauseOf(cause func() string) func() string {
@@ -73,6 +74,7 @@ func NewHost(cfg HostConfig) (*Host, error) {
 	if h.clock == nil {
 		h.clock = time.Now
 	}
+	h.failures = newFailureLog(cfg, h.log)
 	table, err := customKeywords(cfg.Config)
 	if err != nil {
 		return nil, err
@@ -278,10 +280,14 @@ func (h *Host) Start(ctx context.Context, spec ThreadSpec) (*Thread, error) {
 }
 
 func (h *Host) startSession(ctx context.Context, spec ThreadSpec, id string) (*Thread, error) {
+	if err := profileError(spec.Profile); err != nil {
+		return nil, err
+	}
 	created, err := h.sessionCreated(spec, id)
 	if err != nil {
 		return nil, err
 	}
+	created.Operation = operationOf(ctx)
 	thread, err := h.openThread(ctx, loadedSession{created: created}, spec.Overrides)
 	if err != nil {
 		return nil, err
@@ -290,6 +296,13 @@ func (h *Host) startSession(ctx context.Context, spec ThreadSpec, id string) (*T
 		return nil, errors.Join(err, thread.Close())
 	}
 	return thread, nil
+}
+
+func profileError(profile string) error {
+	if profile != "" && !config.ValidEditStyle(profile) {
+		return fmt.Errorf("agent: unknown profile %q", profile)
+	}
+	return nil
 }
 
 func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated, error) {
@@ -302,6 +315,8 @@ func (h *Host) sessionCreated(spec ThreadSpec, id string) (event.SessionCreated,
 		Sandbox:  string(cmp.Or(spec.Sandbox, cfg.Sandbox, config.SandboxWorkspaceWrite)),
 		Effort:   string(spec.Effort),
 		Runner:   cmp.Or(spec.Runner, cfg.Runner, "local"),
+		ReadOnly: spec.ReadOnly,
+		Profile:  spec.Profile,
 	}
 	if created.Model == "" {
 		return created, errors.New("agent: no model is configured; pick one with /model")

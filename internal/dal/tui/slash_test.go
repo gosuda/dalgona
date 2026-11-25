@@ -87,3 +87,18 @@ func TestParseSlashKinds(t *testing.T) {
 		}
 	}
 }
+
+func TestOfflineHelpOpensWithoutConnectionNotice(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(nil, Options{})
+	m.conn.link.Endpoint = "machine"
+	m.conn.client = nil
+	m.conn.lost = "connection lost: EOF"
+	m.executeSlash("help", "")
+	if m.help == nil {
+		t.Fatal("/help while offline left the help panel closed")
+	}
+	if m.notice != "" {
+		t.Fatalf("/help while offline set the notice to %q", m.notice)
+	}
+}

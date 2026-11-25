@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/close result",
+  "type": "object",
+  "required": [
+    "status"
+  ],
+  "properties": {
+    "status": {
+      "type": "object",
+      "required": [
+        "state",
+        "inputState"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "running",
+            "exited",
+            "closed"
+          ]
+        },
+        "inputState": {
+          "enum": [
+            "ready",
+            "uncertain",
+            "closed"
+          ]
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "signal": {
+          "type": "string"
+        },
+        "finalOffset": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "finalResizeOrdinal": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "outputTruncated": {
+          "type": "boolean"
+        },
+        "outputExpiresAt": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+        }
+      }
+    }
+  }
+}

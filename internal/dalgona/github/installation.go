@@ -52,7 +52,7 @@ type tokenRequest struct {
 type tokenPermissions struct {
 	Issues       string `json:"issues"`
 	PullRequests string `json:"pull_requests"`
-	Metadata     string `json:"metadata"`
+	Contents     string `json:"contents"`
 }
 
 type jwtHeader struct {
@@ -246,7 +246,7 @@ func (c *InstallationCredential) newTokenExchangeRequest(ctx context.Context, in
 		Permissions: tokenPermissions{
 			Issues:       "write",
 			PullRequests: "write",
-			Metadata:     "read",
+			Contents:     "write",
 		},
 	}
 	body, err := json.Marshal(payload)

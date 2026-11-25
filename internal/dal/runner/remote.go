@@ -147,7 +147,7 @@ func (r *Remote) Read(ctx context.Context, id string, offset int64) (Output, err
 	next := offset
 	var last Output
 	for {
-		page, err := r.readPage(ctx, id, next)
+		page, err := r.ReadPage(ctx, id, next, readPageSize)
 		if err != nil {
 			return Output{}, err
 		}
@@ -163,8 +163,9 @@ func (r *Remote) Read(ctx context.Context, id string, offset int64) (Output, err
 	return last, nil
 }
 
-func (r *Remote) readPage(ctx context.Context, id string, offset int64) (Output, error) {
-	params, err := encodeReadParams(id, offset, readPageSize)
+func (r *Remote) ReadPage(ctx context.Context, id string, offset, limit int64) (Output, error) {
+	limit = clampPage(limit)
+	params, err := encodeReadParams(id, offset, limit)
 	if err != nil {
 		return Output{}, err
 	}
@@ -172,7 +173,11 @@ func (r *Remote) readPage(ctx context.Context, id string, offset int64) (Output,
 	if err != nil {
 		return Output{}, err
 	}
-	return decodeOutput(result)
+	out, err := decodeOutput(result)
+	if err == nil && (int64(len(out.Data)) > limit || out.Next-offset != int64(len(out.Data))) {
+		return Output{}, errors.New("runner: invalid process output page")
+	}
+	return out, err
 }
 
 func encodeReadParams(id string, offset, limit int64) (jsontext.Value, error) {
@@ -231,15 +236,7 @@ func (r *Remote) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	var combined []byte
 	var offset int64
 	for {
-		params, err := encodeReadFileParams(path, offset, readPageSize)
-		if err != nil {
-			return nil, err
-		}
-		result, err := r.call(ctx, "fs/readFile", params)
-		if err != nil {
-			return nil, err
-		}
-		data, next, err := decodeData(result)
+		data, next, err := r.ReadFilePage(ctx, path, offset, readPageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -249,6 +246,23 @@ func (r *Remote) ReadFile(ctx context.Context, path string) ([]byte, error) {
 		}
 		offset = next
 	}
+}
+
+func (r *Remote) ReadFilePage(ctx context.Context, path string, offset, limit int64) ([]byte, int64, error) {
+	limit = clampPage(limit)
+	params, err := encodeReadFileParams(path, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	result, err := r.call(ctx, "fs/readFile", params)
+	if err != nil {
+		return nil, 0, err
+	}
+	data, next, err := decodeData(result)
+	if err == nil && (int64(len(data)) > limit || next-offset != int64(len(data))) {
+		return nil, 0, errors.New("runner: invalid file output page")
+	}
+	return data, next, err
 }
 
 func encodeReadFileParams(path string, offset, limit int64) (jsontext.Value, error) {
@@ -555,8 +569,14 @@ func clientError(msg rpcMessage) error {
 	if msg.errCode == rpcProcessMissing || msg.errMsg == ErrProcessNotFound.Error() {
 		return processMissingError(ErrProcessNotFound.Error())
 	}
+	if msg.errMsg == ErrSandboxDowngrade.Error() {
+		return ErrSandboxDowngrade
+	}
 	if msg.errCode == rpcFileMissing {
 		return fileMissingError(msg.errMsg)
+	}
+	if err := workspaceClientError(msg); err != nil {
+		return err
 	}
 	if msg.errMsg == "" {
 		return errors.New("runner: rpc error")

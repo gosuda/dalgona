@@ -228,13 +228,37 @@ func TestWindowsShimConfinesWorkspaceWriteCommand(t *testing.T) {
 }
 
 func TestWindowsReadOnlyIgnoresWritableRoots(t *testing.T) {
-	roots, err := windowsWritableRoots(t.TempDir(), Sandbox{
+	roots, err := windowsWritableRoots(Sandbox{
 		Mode:          SandboxMode("read-only"),
 		WritableRoots: []string{t.TempDir()},
 	})
 	if err != nil || len(roots) != 0 {
 		t.Fatalf("read-only roots = %v, %v", roots, err)
 	}
+}
+
+func TestWindowsWorkspaceWriteLeavesCommandDirectoryUngranted(t *testing.T) {
+	declared := t.TempDir()
+	commandDir := t.TempDir()
+	isolateWindowsSeed(t)
+	temp := t.TempDir()
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("TEMP", temp)
+	t.Setenv("TMP", temp)
+	target := filepath.Join(commandDir, "written.txt")
+	cmd := exec.Command("cmd")
+	cmd.Dir = commandDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd /S /C "echo written>"` + target + `""`}
+	err := configureSandbox(cmd, t.TempDir(), Sandbox{Mode: SandboxWorkspaceWrite, WritableRoots: []string{declared}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runErr := cmd.Run()
+	releaseCommandToken(cmd)
+	if runErr == nil {
+		t.Fatal("a write into the undeclared command directory exited 0")
+	}
+	requireWindowsAbsent(t, target)
 }
 
 func TestWindowsNetworkRefusalLeavesCommandUnstarted(t *testing.T) {

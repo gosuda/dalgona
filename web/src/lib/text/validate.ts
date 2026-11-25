@@ -1,4 +1,4 @@
-import { whiteSpaceRanges } from "./tables";
+import { paletteBits, scalarPalette, scalarRuns } from "./tables";
 
 export type TextReason =
 	| "invalid_encoding"
@@ -62,12 +62,30 @@ export function newlinesToLF(text: string): string {
 	return text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
 }
 
-export function isWhiteSpace(cp: number): boolean {
-	for (let i = 0; i < whiteSpaceRanges.length; i += 2) {
-		if (cp < (whiteSpaceRanges[i] ?? 0)) return false;
-		if (cp <= (whiteSpaceRanges[i + 1] ?? 0)) return true;
+const whiteSpaceFlag = 1 << 7;
+const ignorableFlag = 1 << 8;
+
+function propertyOf(cp: number): number {
+	if (cp < 0 || cp > 0x10ffff) return 0;
+	const target = (cp + 1) << paletteBits;
+	let lo = 0;
+	let hi = scalarRuns.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if ((scalarRuns[mid] ?? 0) < target) lo = mid + 1;
+		else hi = mid;
 	}
-	return false;
+	if (lo === 0) return 0;
+	const palette = (scalarRuns[lo - 1] ?? 0) & ((1 << paletteBits) - 1);
+	return (scalarPalette[palette] ?? [0, 0, 0])[0] ?? 0;
+}
+
+export function isWhiteSpace(cp: number): boolean {
+	return (propertyOf(cp) & whiteSpaceFlag) !== 0;
+}
+
+export function isDefaultIgnorable(cp: number): boolean {
+	return (propertyOf(cp) & ignorableFlag) !== 0;
 }
 
 export function isBlank(text: string): boolean {

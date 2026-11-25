@@ -13,8 +13,7 @@ import (
 )
 
 func (m model) Init() tea.Cmd {
-	start := tea.Sequence(m.initialize(), m.readSettings(), m.loadKeywords(), m.loadLevels(), m.startThread())
-	return tea.Batch(m.input.composer.Focus(), tea.RequestBackgroundColor, start)
+	return tea.Batch(m.input.composer.Focus(), tea.RequestBackgroundColor)
 }
 
 func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
@@ -27,6 +26,17 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 		return m.updateTick(msg)
 	case keywordTickMsg:
 		return m.sendKeywordMatch(msg)
+	case machineRefresh, hintExpiredMsg, diagramMsg:
+		return m.handlePassiveMsg(msg)
+	default:
+		return m.handleTerminalMsg(msg)
+	}
+}
+
+func (m *model) handlePassiveMsg(msg tea.Msg) tea.Cmd {
+	switch msg := msg.(type) {
+	case machineRefresh:
+		return nil
 	case hintExpiredMsg:
 		m.expireHint(msg)
 		return nil
@@ -34,15 +44,36 @@ func (m *model) handleMsg(msg tea.Msg) tea.Cmd {
 		m.applyDiagram(msg)
 		return nil
 	default:
-		if command, handled := m.updateTerminal(msg); handled {
-			return command
-		}
-		return m.updateComposer(msg)
+		return nil
 	}
 }
 
+func (m *model) handleTerminalMsg(msg tea.Msg) tea.Cmd {
+	if command, handled := m.updateTerminal(msg); handled {
+		return command
+	}
+	return m.updateComposer(msg)
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, command := m.update(msg)
+	return next, command
+}
+
+func (m model) update(msg tea.Msg) (model, tea.Cmd) {
 	m.anchorState().revision++
+	command := m.reduce(msg)
+	settle := m.settle()
+	printCommand := m.drain()
+	tick := m.scheduleTick()
+	anchor := m.anchorDock()
+	quit := m.finishQuit()
+	suspend := m.finishSuspend()
+	diagrams := m.takeDiagramCommands()
+	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend, diagrams)
+}
+
+func (m *model) reduce(msg tea.Msg) tea.Cmd {
 	before := m.input.composer.Value()
 	notice := m.notice
 	command := m.handleMsg(msg)
@@ -57,14 +88,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !m.noticePrinted {
 		m.commitOverflowNotice()
 	}
-	settle := m.settle()
-	printCommand := m.drain()
-	tick := m.scheduleTick()
-	anchor := m.anchorDock()
-	quit := m.finishQuit()
-	suspend := m.finishSuspend()
-	diagrams := m.takeDiagramCommands()
-	return m, tea.Batch(command, tick, settle, printCommand, anchor, quit, suspend, diagrams)
+	return command
 }
 
 func (m *model) wheel(msg tea.MouseWheelMsg) {
@@ -294,7 +318,7 @@ func (m *model) followupKey(msg tea.KeyPressMsg) bool {
 		m.openQueue()
 		return true
 	case "alt+up":
-		if m.input.composer.Value() == "" && len(m.queue) > 0 {
+		if m.input.composer.empty() && len(m.queue) > 0 {
 			m.dequeueFollowup()
 			return true
 		}
@@ -408,7 +432,13 @@ func (m *model) exitLine() string {
 	if m.thread.id == "" {
 		return "No thread was started"
 	}
-	return fmt.Sprintf("Thread %s saved · resume with %s --resume %s", sanitizeText(m.thread.title), m.conn.product, sanitizeText(m.thread.id))
+	command := m.conn.product
+	if m.conn.remote != "" {
+		command = "dalgona --remote " + sanitizeText(m.conn.remote)
+	} else if m.conn.machine != "" {
+		command = "dalgona --local"
+	}
+	return fmt.Sprintf("Thread %s saved · resume with %s --resume %s", sanitizeText(m.thread.title), command, sanitizeText(m.thread.id))
 }
 
 func (m *model) dockInFlight() bool {
@@ -444,6 +474,10 @@ func (m *model) finishSuspend() tea.Cmd {
 }
 
 func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
+	if _, refused := msg.(terminalPasteRefused); refused {
+		m.errorf("Paste exceeds the 1 MiB limit. Save it to a file and mention it with @path.")
+		return nil
+	}
 	var imageCmd tea.Cmd
 	if paste, ok := msg.(tea.PasteMsg); ok {
 		if len(paste.Content) > pasteLimit {
@@ -451,6 +485,10 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if m.pasteField(paste.Content) {
+			return nil
+		}
+		if notice := composerPasteRefusal(paste.Content); notice != "" {
+			m.errorf("%s", notice)
 			return nil
 		}
 		if m.textMode() == inputPrompt {
@@ -463,6 +501,10 @@ func (m *model) updateComposer(msg tea.Msg) tea.Cmd {
 }
 
 func (m *model) pasteField(text string) bool {
+	mode := m.textMode()
+	if mode == inputPrompt || mode == inputShell {
+		return false
+	}
 	switch m.textMode() {
 	case inputFilter:
 		if m.typeIntoField(text) {
@@ -526,7 +568,7 @@ func (m model) rawFrame() tea.View {
 		view := tea.NewView("")
 		view.ReportFocus = true
 		return view
-	case m.review != nil:
+	case m.review != nil && m.machines == nil:
 		view := tea.NewView(m.screen.emit(m.reviewView()))
 		view.AltScreen = true
 		view.ReportFocus = true

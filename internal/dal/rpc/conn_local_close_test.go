@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -29,22 +30,6 @@ func (b *safeBuffer) String() string {
 	return b.buf.String()
 }
 
-type readAfterLocalClose struct {
-	closed    chan struct{}
-	closeOnce sync.Once
-}
-
-func (r *readAfterLocalClose) Read([]byte) (int, error) {
-	return 0, &net.OpError{Op: "read", Net: "unix", Err: net.ErrClosed}
-}
-
-func (r *readAfterLocalClose) Write(p []byte) (int, error) { return len(p), nil }
-
-func (r *readAfterLocalClose) Close() error {
-	r.closeOnce.Do(func() { close(r.closed) })
-	return nil
-}
-
 type errorOnRead struct {
 	err       error
 	closed    chan struct{}
@@ -63,38 +48,38 @@ func (r *errorOnRead) Close() error {
 }
 
 func TestLocalCloseIsNotLoggedAsReadFailure(t *testing.T) {
-	var log safeBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	rwc := &readAfterLocalClose{closed: make(chan struct{})}
-	NewConn(t.Context(), rwc, nil)
-	select {
-	case <-rwc.closed:
-	case <-time.After(waitLimit):
-		t.Fatal("connection did not close within deadline")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if out := log.String(); strings.Contains(out, "rpc: read failure") {
-		t.Fatalf("a connection the client closed itself was logged as a read failure: %s", out)
-	}
-}
+	_ = writer.Close()
+	_ = reader.Close()
+	_, closedFile := reader.Read(make([]byte, 1))
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"socket", &net.OpError{Op: "read", Net: "unix", Err: net.ErrClosed}},
+		{"pipe", io.ErrClosedPipe},
+		{"file", closedFile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var log safeBuffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
 
-func TestClosedPipeIsNotLoggedAsReadFailure(t *testing.T) {
-	var log safeBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	rwc := &errorOnRead{err: io.ErrClosedPipe, closed: make(chan struct{})}
-	NewConn(t.Context(), rwc, nil)
-	select {
-	case <-rwc.closed:
-	case <-time.After(waitLimit):
-		t.Fatal("connection did not close within deadline")
-	}
-	if out := log.String(); strings.Contains(out, "rpc: read failure") {
-		t.Fatalf("closed pipe was logged as a read failure: %s", out)
+			rwc := &errorOnRead{err: tc.err, closed: make(chan struct{})}
+			NewConn(t.Context(), rwc, nil)
+			select {
+			case <-rwc.closed:
+			case <-time.After(waitLimit):
+				t.Fatal("connection did not close within deadline")
+			}
+			if out := log.String(); strings.Contains(out, "rpc: read failure") {
+				t.Fatalf("a transport this client closed was logged as a read failure: %s", out)
+			}
+		})
 	}
 }
 

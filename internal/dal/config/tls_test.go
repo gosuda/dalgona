@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,4 +131,20 @@ func TestConfigTLSCAFileResolvesAndAccepts(t *testing.T) {
 	writePaddedCACertificate(t, home)
 	requireTLSCAFile(t, home, "tls_ca_file = \"exact.pem\"\n", filepath.Join(home, "exact.pem"))
 	requireTLSCAFile(t, home, "model = \"openai/gpt-test\"\n", "")
+}
+
+func TestInstallTLSRoots(t *testing.T) {
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	writeCACertificate(t, caFile)
+	saved := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = saved })
+	if err := config.InstallTLSRoots(caFile); err != nil {
+		t.Fatal(err)
+	}
+	if http.DefaultTransport == saved {
+		t.Fatal("InstallTLSRoots left http.DefaultTransport unchanged")
+	}
+	if err := config.InstallTLSRoots(""); err != nil {
+		t.Fatalf("InstallTLSRoots with an empty key: %v", err)
+	}
 }

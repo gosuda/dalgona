@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/attach params",
+  "type": "object",
+  "required": [
+    "workspaceId",
+    "terminalId",
+    "access"
+  ],
+  "properties": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "terminalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "access": {
+      "enum": [
+        "read",
+        "write"
+      ]
+    },
+    "resumeLease": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

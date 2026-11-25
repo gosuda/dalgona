@@ -158,6 +158,32 @@ func TestLoginPanelApiKeyFlow(t *testing.T) {
 	assertShown(t, m, "Signed in to openai. Run /model to choose a model")
 }
 
+func TestLoginAPIKeyIsSentWithItsExactText(t *testing.T) {
+	t.Parallel()
+	const key = " sk-live test\t"
+	caller := new(fakeCaller)
+	m := openLoginPanel(t, caller, "openai")
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = typeText(t, m, "  ")
+	before := len(caller.calls)
+	m, command := drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runPickCommand(t, m, command)
+	if len(caller.calls) != before || m.login == nil {
+		t.Fatalf("enter on a blank key made %d requests or closed the panel, want neither", len(caller.calls)-before)
+	}
+	if m.login.err != "Enter the API key." {
+		t.Fatalf("enter on a blank key showed %q, want Enter the API key.", m.login.err)
+	}
+	m = pressKeys(t, m, tea.KeyPressMsg{Code: tea.KeyBackspace}, tea.KeyPressMsg{Code: tea.KeyBackspace})
+	m, _ = drive(t, m, tea.PasteMsg{Content: key})
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	runPickCommand(t, m, command)
+	params, ok := caller.calls[len(caller.calls)-1].params.(rpc.AccountLoginStartParams)
+	if !ok || params.APIKey != key {
+		t.Fatalf("last call = %#v, want account/login/start with the key %q", caller.calls[len(caller.calls)-1], key)
+	}
+}
+
 func TestLoginPanelOAuthCompletes(t *testing.T) {
 	t.Parallel()
 	m := openLoginPanel(t, new(fakeCaller), "chatgpt")

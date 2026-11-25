@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -34,6 +35,12 @@ type Env struct {
 
 type row struct{ status, check, detail string }
 
+type Row struct {
+	Status string
+	Check  string
+	Detail string
+}
+
 type configured struct {
 	id   string
 	cred auth.Credential
@@ -53,6 +60,19 @@ type inspector struct {
 
 func Run(ctx context.Context, env Env) int {
 	return newInspector(env).run(ctx)
+}
+
+func Diagnose(ctx context.Context, env Env) []Row {
+	var rows []Row
+	newInspector(env).inspect(ctx, func(r Row) { rows = append(rows, r) })
+	return rows
+}
+
+func ExitCode(rows []Row) int {
+	if slices.ContainsFunc(rows, func(r Row) bool { return r.Status == statusFail }) {
+		return 1
+	}
+	return 0
 }
 
 func newInspector(env Env) *inspector {
@@ -75,18 +95,21 @@ func (in *inspector) checks() []func(context.Context) []row {
 	return append(checks, in.checkSandbox, in.checkTLS, in.checkMCP, in.checkPlugins)
 }
 
-func (in *inspector) run(ctx context.Context) int {
-	failed := false
+func (in *inspector) inspect(ctx context.Context, emit func(Row)) {
 	for _, check := range in.checks() {
 		for _, r := range check(ctx) {
-			fmt.Fprintf(in.env.Out, "%s %s: %s\n", r.status, r.check, in.clean(r.detail))
-			failed = failed || r.status == statusFail
+			emit(Row{Status: r.status, Check: r.check, Detail: in.clean(r.detail)})
 		}
 	}
-	if failed {
-		return 1
-	}
-	return 0
+}
+
+func (in *inspector) run(ctx context.Context) int {
+	var rows []Row
+	in.inspect(ctx, func(r Row) {
+		fmt.Fprintf(in.env.Out, "%s %s: %s\n", r.Status, r.Check, r.Detail)
+		rows = append(rows, r)
+	})
+	return ExitCode(rows)
 }
 
 func okRow(check, detail string) row { return row{statusOK, check, detail} }

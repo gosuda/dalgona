@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/terminal/checkpoint/open params",
+  "type": "object",
+  "required": [
+    "terminalId",
+    "attachmentId"
+  ],
+  "properties": {
+    "terminalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "attachmentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  }
+}

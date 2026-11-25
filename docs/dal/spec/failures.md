@@ -8,6 +8,22 @@ The closed `Class` values are `panic`, `tool`, `model`, `journal`, and `runtime`
 
 Local capture includes side-conversation failures. Remote reporting excludes them. One terminal model failure is captured after retries and failover finish.
 
+## Capture
+
+The host opens the store under `<home>/failures` for both `dal` and `dalgona`, with the auth store as masker. If the store cannot open, the host logs `failure log unavailable; failures are not recorded` and captures nothing, but it still contains panics. A tool marks its own failure with the typed result kind `internal`. The `tool.completed` event then carries `failure` `internal`. Each record keeps the session, turn, and call ids that apply in its correlation sidecar.
+
+Tools mark only their own machinery. `exec` marks a missing runner, a process that cannot start, and a failed output read. A kill-guard refusal or a sandbox downgrade refusal stays ordinary. `web_fetch` and `search` mark failures to start, wait for, or read their helper subprocess. `ask` marks a failed question delivery. `patch` and `rewrite` mark a commit that ends as `write_error` or `indeterminate`, unless the cause is a refused or missing requested path. A cancelled call or one past its own deadline is never marked.
+
+| Class | Capture point | Failing step |
+|---|---|---|
+| `tool` | A tool result of kind `internal` | Converted from the recorded call |
+| `panic` | A panic in a tool run or edit apply completes the call as failed with `failure: recovered panic` and kind `internal`, and the turn continues. A panic in turn setup or the turn loop ends the turn `failed` with `failure: recovered panic`. A panic in a provider stream ends the turn `failed` with `model: provider panicked` and keeps the provider frames. A panic in a thread actor closes that thread, which can be resumed from its journal. The host keeps serving other threads in every case. | `failure case unavailable: panic has no completed tool call` |
+| `model` | The terminal provider error, empty response, or repeated overflow of a turn that was not interrupted | `failure case unavailable: provider failures cannot be replayed` |
+| `journal` | The first failed journal append of a session in one host process, except cancellation | `failure case unavailable: environment and external state are not recorded` |
+| `runtime` | The crash-loop breaker abandons a turn after three recovery attempts | `failure case unavailable: sandbox and process state are not recorded` |
+
+Advisor sessions capture with origin `side`. Other sessions capture with origin `main`. The host calls the product sink once after each committed record. `dalgona` passes the consented reporter queue and `dal` passes none. A refused capture, such as a failed write, is logged and never reaches the sink.
+
 ## Record shape
 
 ```go
@@ -47,6 +63,8 @@ Record JSON members are exactly `schemaVersion`, `id`, `time`, `product`, `versi
 
 Ids are 16 cryptographically random bytes encoded as 32 lowercase hex digits. An empty id generates one. An empty version becomes `unknown`. Empty tool and excerpts are valid. Product is exactly `dal` or `dalgona`. Unknown product, class, or origin MUST fail with `failure: invalid record`. Nonempty tool names MUST match `[A-Za-z0-9_.-]{1,64}`. Versions MUST match `[A-Za-z0-9_.+-]{1,80}`. Invalid values become `unknown`. Origins are `main`, `side`, `doctor`, and `test`.
 
+The store lists public records newest first. Records with equal times sort by descending id. One list returns at most 100 records. A list can start after a time and id position and then returns only older records in the same order. A missing record MUST fail with `failure: record not found`.
+
 ## Masking and bounds
 
 `Build` MUST decode valid argument JSON and mask every string key and value. Invalid JSON is treated as plain text. All text runs through the masker, then the built-in secret scanner regardless of configuration. Residual matches become `[redacted]`, longest first with deterministic lexical ties.
@@ -63,7 +81,7 @@ Frames normalize by removing headers, arguments, offsets, receiver addresses, an
 
 `Fingerprint` is the full lowercase SHA-256 over NUL-separated fields `failure-v1`, product, class, tool, then each normalized `function@file`. No trailing NUL is used. Product version and line numbers never enter the hash. A version-only rebuild creates no new issue. Empty and content-free stacks contribute `no-stack`. Ids, error text, arguments, output, and timestamps never enter it. SHA-256 collision risk is negligible, but semantic coalescing is not: distinct stackless failures of one product, class, and tool share a fingerprint. Fingerprint equality MUST NOT prove that a local case reproduces an issue.
 
-`Reportable` is true only for dalgona origin main. `ReportText` renders the shared title and body from masked records with no network imports. `dal` consumes it directly for manual output.
+`Reportable` is true only for dalgona origin main. `ReportText` renders the shared title and body from masked records with no network imports. `dal` consumes it directly for manual output. `dal failures` lists the local records newest first with id, time, class, and tool. `dal failures <id>` prints the report text of one record to a file. An id that is not 32 lowercase hexadecimal digits or names no record fails with exit status 1.
 
 ## Converter
 

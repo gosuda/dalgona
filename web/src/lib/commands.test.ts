@@ -51,6 +51,19 @@ describe("composer text", () => {
 			command: "  ls -la ",
 		});
 	});
+
+	test("removing the // escape keeps the rest exactly", () => {
+		expect(parseComposerText("// help \n")).toEqual({
+			kind: "message",
+			text: "/ help \n",
+		});
+	});
+
+	test("fullwidth lookalikes stay message text", () => {
+		for (const text of ["\uff0fhelp", "\uff01ls", "\uff20file"]) {
+			expect(parseComposerText(text)).toEqual({ kind: "message", text });
+		}
+	});
 });
 
 describe("slash commands", () => {

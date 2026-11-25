@@ -132,7 +132,7 @@ func (a *actor) submit(ctx context.Context, in preparedInput) error {
 	message := event.UserMessage{
 		ItemID: newID("item-"), Text: in.text, TextBlob: in.textBlob, Kind: string(in.kind),
 		Notices: in.notices, Mentions: in.mentions, Images: in.images, Effort: in.effort, Verbatim: in.verbatim,
-		Model: in.settings.Model, Approval: string(in.settings.Approval), Sandbox: string(in.settings.Sandbox),
+		Model: in.settings.Model, Approval: string(in.settings.Approval), Sandbox: string(in.settings.Sandbox), Operation: operationOf(ctx),
 	}
 	if a.busy {
 		if in.kind == InputPrompt || a.state.TurnID == "" {
@@ -187,6 +187,7 @@ func (t *Thread) InterruptTurn(ctx context.Context, turnID string) error {
 		if a.state.TurnID == "" || a.state.TurnID != turnID {
 			return turnNotRunningError(turnID)
 		}
+		a.interruptOperation = cmp.Or(a.interruptOperation, operationOf(ctx))
 		a.interrupt()
 		return nil
 	})
@@ -211,8 +212,8 @@ func (t *Thread) Answer(requestID string, reply Reply) error {
 	return err
 }
 
-func (t *Thread) Revert(beforeTurn string) error {
-	return askErr(context.Background(), t, func(a *actor) error {
+func (t *Thread) Revert(ctx context.Context, beforeTurn string) error {
+	return askErr(ctx, t, func(a *actor) error {
 		if a.busy {
 			return runningError(a.t.id)
 		}
@@ -220,7 +221,7 @@ func (t *Thread) Revert(beforeTurn string) error {
 		if err != nil {
 			return err
 		}
-		_, err = a.append(context.Background(), event.Branch{ParentSeq: parent})
+		_, err = a.append(ctx, event.Branch{ParentSeq: parent, Operation: operationOf(ctx)})
 		return err
 	})
 }
@@ -240,8 +241,8 @@ func revertParent(path []event.Seqd, beforeTurn string) (uint64, error) {
 	return 0, notOnPathError(beforeTurn)
 }
 
-func (t *Thread) SetLeaf(turn string) error {
-	return askErr(context.Background(), t, func(a *actor) error {
+func (t *Thread) SetLeaf(ctx context.Context, turn string) error {
+	return askErr(ctx, t, func(a *actor) error {
 		if a.busy {
 			return runningError(a.t.id)
 		}
@@ -249,7 +250,7 @@ func (t *Thread) SetLeaf(turn string) error {
 		if !ok {
 			return unknownTurnError(turn)
 		}
-		_, err := a.append(context.Background(), event.Branch{ParentSeq: seq})
+		_, err := a.append(ctx, event.Branch{ParentSeq: seq, Operation: operationOf(ctx)})
 		return err
 	})
 }
@@ -270,7 +271,7 @@ func (t *Thread) Fork(ctx context.Context, lastTurn string) (*Thread, error) {
 		return nil, source.err
 	}
 	created := source.created
-	created.ID, created.ForkOf, created.Parent, created.Advisor = t.host.newThreadID(), t.id, "", ""
+	created.ID, created.ForkOf, created.Parent, created.Advisor, created.Operation = t.host.newThreadID(), t.id, "", "", operationOf(ctx)
 	created.CreatedAt = t.host.clock().UTC()
 	child, err := t.host.openThread(ctx, loadedSession{created: created}, Overrides{})
 	if err != nil {
@@ -353,7 +354,7 @@ func lastAtOrBefore(renumbered map[uint64]uint64, old uint64) uint64 {
 }
 
 func (t *Thread) Compact(ctx context.Context) error {
-	done, err := ask(ctx, t, func(a *actor) chan error { return a.spawnCompaction() })
+	done, err := ask(ctx, t, func(a *actor) chan error { return a.spawnCompaction(operationOf(ctx)) })
 	if err != nil {
 		return err
 	}
@@ -365,7 +366,7 @@ func (t *Thread) Compact(ctx context.Context) error {
 	}
 }
 
-func (a *actor) spawnCompaction() chan error {
+func (a *actor) spawnCompaction(operation string) chan error {
 	done := make(chan error, 1)
 	if a.busy {
 		done <- runningError(a.t.id)
@@ -375,7 +376,7 @@ func (a *actor) spawnCompaction() chan error {
 		w := &worker{t: a.t}
 		err := w.prime(ctx)
 		if err == nil {
-			err = w.compact(ctx, compactManual)
+			err = w.compact(WithOperation(ctx, operation), compactManual)
 		}
 		w.release()
 		done <- err

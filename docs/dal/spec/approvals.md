@@ -42,7 +42,7 @@ In mode `auto`, the gate sends an `Action` to the configured `Decider`. A missin
 
 In mode `ask`, a matching thread grant accepts by `grant:<prefix>`. With no subscribed client, the gate declines with `declined: no client could approve this call`. Otherwise the thread publishes an `UpdateApproval` and waits for `Thread.Answer`. The prompt summary names the thread working directory. For escalated `exec`, it states that the call runs unsandboxed. An `exec` prompt carries exact command text. The app-server MUST show that text verbatim, not as a reassembled form. `accept` and `accept_session` accept by `user`. `decline` declines with `declined by user`. `cancel` declines with `cancelled by user` and interrupts the turn. The call completes with `cancelled by user` and `recovered=none`. It MUST NOT complete as `skipped`. An interrupt during the wait resolves the request as `cancel` by `user`. A cancellation that races the request offer MUST also resolve as `cancel` and MUST discard the pending prompt.
 
-`GateCommit` keeps actor-owned `approval.requested` and `approval.resolved` journaling around the decision stages. Required-human stages are not implemented by this ordering change.
+`GateCommit` journals `approval.resolved` once before dispatch. The gate journals `approval.requested` before the decision stages. `GateDecider` runs the human path with grants and the user wait.
 
 An advisor thread MUST NOT wait for a user decision. In mode `ask`, it MUST use the decider instead of the human path.
 

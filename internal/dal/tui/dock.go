@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const composerMaxRows = 6
@@ -23,23 +24,7 @@ func (m *model) dock() ([]string, int, int) {
 	editorLimit := min(composerMaxRows, max(1, m.screen.height-3))
 	rows, row, col := m.inputRows(m.screen.width, editorLimit)
 	budget := m.screen.height - 1
-	showBand, showLive := true, true
-	count := func() int {
-		n := len(rows) + len(panel)
-		if showLive {
-			n++
-		}
-		if showBand {
-			n++
-		}
-		return n
-	}
-	if count() > budget {
-		showBand = false
-	}
-	if count() > budget {
-		showLive = false
-	}
+	showBand, showLive := m.planDockBands(len(rows), len(panel), budget)
 	lines := slices.Clone(rows)
 	lines = append(lines, panel...)
 	if showLive {
@@ -51,16 +36,45 @@ func (m *model) dock() ([]string, int, int) {
 	return lines, row, col
 }
 
+func dockLineTotal(rowCount, panelCount int, showBand, showLive bool) int {
+	n := rowCount + panelCount
+	if showLive {
+		n++
+	}
+	if showBand {
+		n++
+	}
+	return n
+}
+
+func (m *model) planDockBands(rowCount, panelCount, budget int) (bool, bool) {
+	showBand, showLive := true, true
+	if dockLineTotal(rowCount, panelCount, showBand, showLive) > budget && m.conn.machine != "" && !m.panelOpen() {
+		showLive = false
+	}
+	if dockLineTotal(rowCount, panelCount, showBand, showLive) > budget {
+		showBand = false
+	}
+	if dockLineTotal(rowCount, panelCount, showBand, showLive) > budget {
+		showLive = false
+	}
+	return showBand, showLive
+}
+
 func (m *model) dockLines() []string {
 	lines, _, _ := m.dock()
 	return lines
 }
 
 func (m *model) panelOpen() bool {
-	return len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil || m.login != nil || m.help != nil
+	return m.machines != nil || len(m.approvals) > 0 || m.confirm != nil || m.list != nil || m.settings != nil || m.login != nil || m.help != nil
 }
 
 func (m *model) inputRows(width, limit int) ([]string, int, int) {
+	if m.machines != nil {
+		text, cursor := m.machineInput(width)
+		return []string{text}, 0, cursor
+	}
 	if m.popupShown() {
 		return m.editorRows(width, 1)
 	}
@@ -129,27 +143,36 @@ func (m *model) fieldLabel(mode inputMode) string {
 	return inputLabel(mode)
 }
 
+type fieldClusters struct {
+	source string
+	stops  []int
+}
+
 func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
-	if s.cells(string(text)) <= room {
-		return s.expand(string(text)), s.cells(string(text[:cursor]))
+	field := fieldClusters{source: string(text)}
+	at := len(string(text[:cursor]))
+	if s.cells(displayText(field.source)) <= room {
+		return s.expandDisplay(field.source), s.cells(displayText(field.source[:at]))
 	}
-	left, right := growWindow(s, text, cursor, room)
+	field.stops = textinput.Boundaries(field.source)
+	caret, _ := slices.BinarySearch(field.stops, at)
+	left, right := field.grow(s, caret, room)
 	prefix := ""
 	if left > 0 {
 		prefix = "..."
 	}
-	return s.expand(windowText(text, left, right)), s.cells(prefix + string(text[left:cursor]))
+	return s.expand(field.window(left, right)), s.cells(prefix + displayText(field.source[field.stops[left]:field.stops[caret]]))
 }
 
-func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
-	left, right := cursor, cursor
+func (f fieldClusters) grow(s *screenState, caret, room int) (int, int) {
+	left, right := caret, caret
 	for grown := true; grown; {
 		grown = false
-		if right < len(text) && windowCells(s, text, left, right+1) <= room {
+		if right < len(f.stops)-1 && s.cells(f.window(left, right+1)) <= room {
 			right++
 			grown = true
 		}
-		if left > 0 && windowCells(s, text, left-1, right) <= room {
+		if left > 0 && s.cells(f.window(left-1, right)) <= room {
 			left--
 			grown = true
 		}
@@ -157,20 +180,16 @@ func growWindow(s *screenState, text []rune, cursor, room int) (int, int) {
 	return left, right
 }
 
-func windowText(text []rune, left, right int) string {
+func (f fieldClusters) window(left, right int) string {
 	var window strings.Builder
 	if left > 0 {
 		window.WriteString("...")
 	}
-	window.WriteString(string(text[left:right]))
-	if right < len(text) {
+	window.WriteString(displayText(f.source[f.stops[left]:f.stops[right]]))
+	if right < len(f.stops)-1 {
 		window.WriteString("...")
 	}
 	return window.String()
-}
-
-func windowCells(s *screenState, text []rune, left, right int) int {
-	return s.cells(windowText(text, left, right))
 }
 
 func (m *model) editorRows(width, limit int) ([]string, int, int) {
@@ -480,6 +499,9 @@ func (m *model) noticeLine() string {
 
 func (m *model) activity() string {
 	if len(m.approvals) > 0 && m.approvals[0].card != nil {
+		if m.approvals[0].card.sent {
+			return "Waiting for the server"
+		}
 		return "Waiting for your answer"
 	}
 	if len(m.approvals) > 0 || m.thread.state == stateAwaitingApproval {
@@ -556,12 +578,22 @@ func (m *model) decisionLines() []string {
 
 func (m *model) panelLines() []string {
 	switch {
+	case m.machines != nil:
+		panel := m.machines.view(&m.screen)
+		return framePanel(&m.screen, panel, panelRows(panel.layout, m.screen.height))
 	case len(m.approvals) > 0:
 		return m.decisionLines()
 	case m.confirm != nil:
 		return framePanel(&m.screen, m.confirmPanel(), panelRows(panelConfirm, m.screen.height))
 	case m.list != nil:
 		return framePanel(&m.screen, m.listPanelView(), panelRows(panelList, m.screen.height))
+	default:
+		return m.panelOverlayLines()
+	}
+}
+
+func (m *model) panelOverlayLines() []string {
+	switch {
 	case m.popupShown():
 		return m.popupLines()
 	case m.settings != nil:

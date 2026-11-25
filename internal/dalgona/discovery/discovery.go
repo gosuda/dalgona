@@ -36,22 +36,35 @@ type (
 )
 
 func Discover(home, cwd string, sources []string, n Result) (Result, error) {
-	enabled, err := enabledSources(sources)
-	if err != nil {
+	m := newMerger(n)
+	if err := eachSource(home, cwd, sources, m.add); err != nil {
 		return Result{}, err
 	}
-	m := newMerger(n)
+	return m.result, nil
+}
+
+func MCPCandidates(home, cwd string, sources []string) ([]MCPServer, error) {
+	var found []MCPServer
+	err := eachSource(home, cwd, sources, func(r Result) { found = append(found, r.MCPServers...) })
+	return found, err
+}
+
+func eachSource(home, cwd string, sources []string, visit func(Result)) error {
+	enabled, err := enabledSources(sources)
+	if err != nil {
+		return err
+	}
 	for _, source := range []string{"claude", "codex", "claude-plugins"} {
 		if !enabled[source] {
 			continue
 		}
 		r, err := loadSource(source, home, cwd)
 		if err != nil {
-			return Result{}, fmt.Errorf("discovery: %s: %w", source, err)
+			return fmt.Errorf("discovery: %s: %w", source, err)
 		}
-		m.add(r)
+		visit(r)
 	}
-	return m.result, nil
+	return nil
 }
 
 func enabledSources(sources []string) (map[string]bool, error) {

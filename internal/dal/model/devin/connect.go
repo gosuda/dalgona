@@ -3,7 +3,6 @@ package devin
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -51,10 +50,9 @@ func (f *inflater) payload(frame connectwire.Frame) ([]byte, error) {
 }
 
 func gzipFrame(payload []byte) ([]byte, error) {
-	var buffer bytes.Buffer
-	buffer.Grow(len(payload)/2 + 64)
-	buffer.Write([]byte{connectwire.Compressed, 0, 0, 0, 0})
-	writer := gzip.NewWriter(&buffer)
+	var compressed bytes.Buffer
+	compressed.Grow(len(payload)/2 + 64)
+	writer := gzip.NewWriter(&compressed)
 	if _, err := writer.Write(payload); err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("gzip request: %w", err)
@@ -62,11 +60,8 @@ func gzipFrame(payload []byte) ([]byte, error) {
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("gzip request: %w", err)
 	}
-	frame := buffer.Bytes()
-	size := len(frame) - 5
-	if size < 0 || size > maxFramePayload {
+	if compressed.Len() > maxFramePayload {
 		return nil, errors.New("request frame exceeds 16 MiB")
 	}
-	binary.BigEndian.PutUint32(frame[1:5], uint32(size))
-	return frame, nil
+	return connectwire.AppendFrame(nil, connectwire.Compressed, compressed.Bytes()), nil
 }

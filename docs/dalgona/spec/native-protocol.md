@@ -17,7 +17,7 @@ The native client MUST preserve their semantics rather than infer behavior from 
 
 | User operation | Existing method | Material constraint |
 | --- | --- | --- |
-| Initialize | `initialize` | Current reply has no native capability contract. |
+| Initialize | `initialize` | A negotiated reply adds the `dalgonaNative` member from R03. |
 | New thread | `thread/start` | Model, working directory, approval, and sandbox retain core validation. |
 | Resume thread | `thread/resume` | Native callers send `excludeTurns:true` before opening paged history. |
 | Read thread | `thread/read` | Native callers send `includeTurns:false` and obtain content through R05. |
@@ -67,6 +67,8 @@ Neither panel may fall back to host `fs/*` or `command/exec` for a remote thread
 All members use camelCase. Required members cannot be null.
 An omitted optional member differs from an empty value where the field contract says so.
 Unknown response members remain ignorable under the core compatibility policy.
+The authenticated connection supplies endpoint scope. `EndpointID` MUST NOT become a redundant wire routing member.
+Client indexes for wire identifiers and content references MUST include their owning `EndpointID`.
 
 Every text field MUST follow [Input text](../../dal/spec/input-text.md), including exact preservation and validation before effects.
 Byte offsets MUST identify their original source and revision. They MUST NOT be interpreted as runes, UTF-16 units, or grapheme counts.
@@ -168,11 +170,13 @@ The new `dalgona/capabilities/read {}` method returns:
 ```
 
 `receiptMethods` MUST list every mutation covered by R07. The empty array above shows shape only.
+`backendBuild` is the same build identity that `dalgona/daemon/identity` reports: the first 16 hexadecimal characters of the SHA-256 of the daemon executable.
+`requestCancellation:1` enables standard `$/cancelRequest` notifications for cancelable requests.
 `mcpConfig:1` includes the inventory-version and runtime-source extension in R10.
 `workspace:1` includes explicit workspace release. `terminal:1` includes resize replay, final-output retention, and attachment detach.
 All listed feature versions are required for the complete native release.
 A missing feature or unsupported checkpoint version makes that endpoint incompatible.
-The GUI MUST offer a backend update or endpoint switch instead of silently reducing required functionality.
+The GUI MUST mark only that endpoint incompatible and offer its backend update, leaving other endpoint sessions unchanged.
 
 Negotiation applies to one connection only.
 Clients that omit the native capability retain existing notifications and response schemas.
@@ -180,6 +184,11 @@ The implementation MUST add native decoding to the shared wire owner.
 It MUST NOT require a second parallel connection for new features.
 
 ## R04. One ordered delivery stream
+
+Each endpoint connection generation owns one ordered delivery stream.
+Streams on different endpoints MUST have independent stream identifiers and ordinal sequences.
+Equal ordinals on different endpoints MUST NOT identify the same event.
+The client MUST demultiplex streams by `EndpointID` before applying connection generation and stream identity.
 
 An opted-in connection receives thread notifications only through `dalgona/event`.
 It MUST NOT also receive their legacy unwrapped copies.
@@ -231,6 +240,9 @@ An otherwise oversized parameter object uses `paramsContent` instead of `params`
 The two members are mutually exclusive.
 The referenced parameter object is immutable at that event ordinal.
 It uses bounded metadata and nested content references wherever its normal projection contains bulk item fields.
+The referenced body is `{metadata, contents}`.
+`metadata` holds each parameter member that stays inside the R05 metadata limits.
+`contents` holds one live content reference for each bulk member, named by that member.
 The reader materializes bounded headers and pages document fields instead of reconstructing an unbounded event in the mailbox.
 
 The projection splits oversized incoming text deltas before assigning native ordinals.
@@ -250,15 +262,9 @@ This is an internal ordering boundary, not another wire event or journal record.
 The client applies the concatenated text once and advances to `lastOrdinal`.
 
 A gap, overlap, wrong stream identifier, or impossible range invalidates the live projection.
-The GUI MUST reconnect and obtain a new snapshot.
-It MUST NOT guess missing text or continue from `thread/status/changed.seq`.
+The GUI MUST reconnect only that endpoint and obtain a new snapshot without guessing missing text or continuing from `thread/status/changed.seq`. Other endpoint streams MUST continue without interruption.
 
-The native stream uses a fresh connection ordinal, not a durable journal cursor.
-`thread/status/changed.seq` retains its existing status-only meaning.
-Reconnect always establishes a new stream and authoritative snapshot.
-It does not request replay by an old ordinal.
-
-The server writer queue retains the core 4096-message bound and adds a 16 MiB encoded byte bound.
+The native stream uses a fresh connection ordinal, not a durable journal cursor. `thread/status/changed.seq` retains its existing status-only meaning. Reconnect always establishes a new stream and authoritative snapshot without requesting replay by an old ordinal.
 A full queue closes the connection.
 The session worker MUST treat this closure as recoverable state loss with uncertain dispatched mutations.
 
@@ -290,6 +296,7 @@ The snapshot MUST NOT truncate an approval diff or omit a valid decision to meet
 
 Opening a snapshot MUST atomically register the subscription and capture its projection cut.
 The snapshot contains all durable state and accumulated active-item content at that cut.
+For a new subscription, the server captures the journal head and the active item prefixes at the same barrier.
 Subsequent delivery contains all changes after the cut.
 The server MUST NOT reconstruct this cut from status sequence numbers.
 
@@ -329,6 +336,7 @@ Both preparation and publication remain within the snapshot storage budgets.
 The application holds a local snapshot lease for the complete duration of copy, Find, or export.
 It MUST NOT request replacement of a handle held by such a consumer.
 Active server reads also prevent retiring their handle until the reads finish or cancel.
+Closing the handle prevents new reads immediately. Admitted reads keep their storage and capacity until they finish or cancel.
 When the old snapshot is leased, a fresh snapshot requires a separate free slot.
 If no slot exists, the server returns `limit_exceeded` without invalidating the old snapshot or evicting another thread.
 The application shows that capacity failure and preserves the current view.
@@ -355,6 +363,7 @@ Bulk text, reasoning, command arguments, patches, and outputs move into content 
 Each reference is `{source, contentId, field, encoding, total, digest}`.
 `field` is the original item field name. `encoding` is `utf8`, `json`, or `binary`.
 Images retain their indexed image metadata and use R08 for bytes.
+A user message carries its text as the `text` reference and keeps its image entries in its `content` metadata.
 
 `source` is the discriminated union `ContentSource`:
 
@@ -372,9 +381,19 @@ Only the single content-read method serves both kinds.
 
 Output content references MUST include the complete masked logical output, including stored spill bytes beyond an inline preview.
 Each reference binds endpoint, thread, turn, item, source revision, byte length, and immutable content digest.
-The backend MUST resolve that exact spill through its journal index and read only the requested range.
+The backend MUST resolve the exact spill through its journal index.
+For a legacy runner spill, the backend MUST first capture bounded pages from the recorded path.
+It MUST mask the capture and verify its full masked length and digest before admitting it as an immutable journal blob.
+Once the blob exists, the backend MUST reuse it and read only the requested range.
+A spilled output replaces the `outputSpill` descriptor with an `outputSpill` content reference to the complete output.
+A journal blob reference carries the blob byte length as `total` and the blob name as `digest`.
 Equal item identifiers in different turns MUST remain distinct.
 Neither branch changes nor later output appends may redirect an existing reference to another spill or version.
+A spilled-output read resolves only through the `Path`, `Bytes`, and `SHA-256` recorded in its own reference.
+It MUST NOT resolve the latest spill by item or call identifier.
+A size or digest mismatch fails the read instead of serving replaced bytes.
+Ranges address the recorded bytes, and a range starting at the recorded length reads empty.
+
 The native reader MUST NOT use legacy `dalgona/item/output/read` or expose a raw spill path.
 Legacy clients retain that method's existing behavior.
 
@@ -408,6 +427,7 @@ It MUST NOT reconnect repeatedly to refetch an oversized live event.
 The server MUST use the existing immutable index or bounded reference metadata.
 It MUST NOT add an unbounded registry of live items or retain one copied body per notification.
 Live spill data shares the storage budgets below and remains pinned while an admitted read needs it.
+The server discards transient spill data after its last reference and admitted read end.
 An export that includes live items first obtains a frozen snapshot covering its selected scope.
 
 The implementation MUST use a journal index and immutable content references for older turns.
@@ -417,9 +437,10 @@ Its in-memory portion is at most 256 KiB per active item.
 Snapshot-specific spill storage is capped at 256 MiB per thread and 1 GiB per daemon.
 Capacity refusal leaves existing snapshots valid and returns `limit_exceeded`.
 
-These indexing and active-content contracts are new backend work.
-The existing subscription replays pending questions but does not provide a complete accumulated partial-text snapshot.
-The implementation MUST close that gap before advertising `history:1`.
+The daemon builds the turn index once for each snapshot.
+Each active item keeps a bounded accumulator with spill storage.
+The snapshot contains the accumulated partial text of each active item at its cut.
+The implementation MUST keep these contracts while it advertises `history:1`.
 
 Cancelling a history request releases its temporary scan and allocation work.
 It does not interrupt the thread or invalidate a previously issued snapshot.
@@ -436,11 +457,13 @@ It MUST NOT combine bytes from different path revisions into one exported docume
 Implement the existing upstream method `thread/unsubscribe {threadId}`.
 Its result is `{status:"unsubscribed"|"notSubscribed"|"notLoaded"}`.
 The enums come from the vendored Codex [unsubscribe response](../../../internal/dal/rpc/testdata/codex-schema/v2/ThreadUnsubscribeResponse.json).
-The baseline includes that schema but no registered handler.
+The daemon registers the handler.
 
 Unsubscribe removes only this connection's thread subscription and history handles.
 It does not archive the thread, destroy a runner, stop a terminal, or interrupt a turn.
 Repeated unsubscribe is harmless and returns the appropriate status.
+Unsubscribe withdraws the decision requests that this connection holds for that thread, on native and legacy connections.
+A later answer from this connection to a withdrawn request has no effect.
 
 Approvals retain the core server request schemas and first-answer-wins behavior.
 Questions retain those schemas and the first-valid-answer rule in [Ask tool](../../dal/spec/ask.md).
@@ -494,8 +517,11 @@ Both config write methods and both remote management mutations are covered.
 Native clients MUST NOT assume older backends honor an ignored operation identifier.
 
 The server reserves an operation identifier and canonical parameter digest durably before dispatching its external effect.
-The key is scoped to the authenticated product home and endpoint identity.
-Its method and parameter digest cannot change.
+The server receipt key remains scoped to the authenticated product home.
+Every client receipt and unknown-outcome index MUST use the `(EndpointID, operationId)` pair.
+Equal operation identifiers on different endpoints MUST remain distinct.
+Receipt inspection MUST use the connection owned by the same `EndpointID`.
+The method and parameter digest of a reservation cannot change.
 Reuse with another digest returns `operation_conflict`.
 
 The new `dalgona/operation/read {operationId}` returns `{state, method, result?, error?, expiresAt}`.
@@ -511,19 +537,53 @@ The daemon MUST NOT dispatch an unknown operation again automatically.
 Receipts remain for 25 hours.
 New identifiers more than 24 hours old or five minutes in the future are rejected as invalid parameters.
 The store permits 10000 receipts and 32 MiB.
+Admission charges both the reservation and space for its bounded final outcome.
 Capacity exhaustion refuses new mutations before effects occur.
 It never evicts an unexpired reservation to admit new work.
 
 Thread-related outcomes use journal-correlated durable records.
 Other outcomes use an atomically published private receipt store.
+Each covered thread mutation records its operation identifier on the journal event that carries its effect.
+
+| Method | Effect event | Result rebuilt from the journal |
+| --- | --- | --- |
+| `thread/start` | `session.created` of the new thread | The thread session response. |
+| `thread/fork` | `session.created` of the fork | The thread session response. |
+| `thread/name/set` | `thread.named` | `{}` |
+| `thread/archive` | `thread.archived` with `archived:true` | `{}` |
+| `thread/unarchive` | `thread.archived` with `archived:false` | The current thread object. |
+| `thread/revert` | `branch` | The current thread object. |
+| `dalgona/thread/leaf/set` | `branch` | `{}` |
+| `thread/compact/start` | `compaction` | `{}` |
+| `turn/start` | `user.message` | The message turn with status `inProgress`. |
+| `turn/steer` | `user.message` | The message turn identifier. |
+| `turn/interrupt` | `turn.completed` of the interrupted turn | `{}` |
+| `review/start` | `user.message` | The review thread and the message turn with status `inProgress`. |
+
+When the daemon loads a reserved or running receipt for one of these methods, it reads the journal.
+For `thread/start` and `thread/fork`, it searches the home threads created no earlier than five minutes before the operation timestamp.
+For the other methods, it reads the thread that the receipt names and takes the last event with the operation identifier.
+An effect event of the method settles the receipt as `succeeded` with the rebuilt result.
+A missing event or another event settles the receipt as `failed` with `cancelled`.
+A failed archive hook restores the thread with `thread.archived` under the same identifier, so its receipt settles as `failed`.
+The archive hook journals nothing, so a receipt settles from `thread.archived` even when a crash stopped the hook.
+`dalgona/remote/gc` reclaims a box that such a stopped hook kept.
+Only the first interrupt of a running turn records its identifier, and a later duplicate settles as `failed` after a crash.
+A crash before the interrupted turn journals `turn.completed` settles the receipt as `failed`, and recovery resumes the turn.
+`dalgona/advisor/set` and `dalgona/advisor/reset` change only the in-process advisor runtime and journal no event.
+A daemon restart rebuilds that runtime from configuration, so the journal cannot show whether either change ran.
+Their reserved or running receipts become `unknown`.
+The client reads `dalgona/advisor/status` and sends a new operation identifier when the advisor state differs from its intent.
+Every other reserved or running receipt becomes `unknown`.
 Receipt failures MUST fail the operation before dispatch or preserve unknown outcome after dispatch.
 No exactly-once claim extends beyond a known committed outcome.
 
 The client marks a mutation `unknown` when transport ends after dispatch without a conclusive response.
-Its Go error is typed `UnknownOutcomeError` with method, endpoint, operation identifier, and dispatch generation.
+Its Go error is typed `UnknownOutcomeError` with method, `EndpointID`, operation identifier, and dispatch generation.
 Cancellation after dispatch has the same uncertainty unless the server confirms otherwise.
 Read-only calls may be retried after reconnect within their deadlines.
-Unknown mutations require receipt inspection and reconciliation before any explicit retry.
+Unknown mutations require receipt inspection and reconciliation on the same endpoint before any explicit retry.
+An equal `operationId` on another endpoint MUST NOT resolve the unknown outcome.
 
 | Code | Exact `kind` | Required meaning |
 | --- | --- | --- |
@@ -556,10 +616,14 @@ An error's name alone never permits mutation retry.
 
 ## R08. Referenced image retrieval
 
-The new method is `dalgona/item/image/read {threadId, turnId, itemId, imageIndex, offset?, limit?}`.
+The core method `dalgona/item/image/read {threadId, turnId, itemId, imageIndex, offset?, limit?}` reads the bytes of one stored image.
 Its result is `{mimeType, digest, total, offset, next, dataBase64}`.
+`offset`, `next`, and `total` are `Offset` strings. `digest` is the SHA-256 of the complete stored image.
 The image index is zero-based within the item's image list.
 The default limit is 256 KiB. The maximum is 1 MiB.
+A missing image index, a limit below 1 or above 1 MiB, or an offset after the end returns `invalid_params`.
+An unknown thread, or a turn, item, and index that do not name an image of that thread, returns `not_found`.
+The read has the 30-second page deadline.
 
 The server resolves an image only through the authorized thread, turn, and item tuple.
 An item identifier may repeat in different turns.
@@ -573,16 +637,26 @@ Only the existing PNG, JPEG, and GIF input formats are accepted.
 The GUI MUST enforce those limits before base64 encoding.
 Remote attachment upload uses inline bytes when the selected file exists only on the GUI host.
 
+Image entries MAY carry optional `name` and `altText`.
+`name` holds the attachment file name and is omitted when empty.
+`altText` holds author-provided alternative text and is omitted when empty.
+Each value is at most 4096 bytes.
+Turn `image` and `localImage` inputs accept optional `name` plus `altText`, with `alt` as a legacy alias.
+Those strings are validated as text and masked at the trust boundary.
+The journal persists masked values as `name` and `alt_text`.
+The wire projects them as `name` and `altText`.
+Empty values keep the existing Path-basename then `Image N` fallback.
 The decoder rejects dimensions beyond 16384 pixels per side or 32000000 pixels total.
 Decoding runs in the bounded worker and cannot exceed 128 MiB of decoded allocation.
 Animated images additionally obey the document decoder budget.
 The GUI keeps outgoing JSON messages within 15 MiB, below the transport framing ceiling.
+
 Decoder failure produces a visible attachment error without affecting the transcript.
 Image bytes and thumbnails MUST NOT enter diagnostic logs.
 
 ## R09. Provider, MCP, and reporter authentication
 
-New authentication types are:
+The authentication methods use these types:
 
 | Type | Fields |
 | --- | --- |
@@ -625,6 +699,14 @@ Remote backends MUST NOT advertise their loopback listener as reachable from the
 When a browser callback cannot reach the backend, the GUI selects an offered device or manual variant for that callback-based flow.
 Offered callback-free flows remain valid on remote endpoints without an OAuth fallback.
 Unsupported combinations return `invalid_params` before opening a browser.
+A daemon in a remote box has `DALGONA_BOX_TOKEN` in its environment. It does not offer `browserCallback`.
+Other daemons offer `browserCallback` when the provider has a loopback redirect.
+A loopback redirect also offers `manualCode`. A device endpoint offers `deviceCode`. A poll endpoint offers `cursorDeepLink`.
+An API-key provider or a runner service offers `apiKey`.
+A start for a target that has a live transaction returns `busy`.
+A fifth live transaction on one connection returns `limit_exceeded`.
+A pasted redirect must have the advertised scheme, host, and path, an authorization code, and the advertised state.
+Otherwise the submit returns `invalid_params` and the transaction keeps waiting.
 
 `response` is `{kind:"apiKey"|"redirectUrl"|"authorizationCode", value}`.
 API keys are single-line strings of at most 4096 bytes.
@@ -634,6 +716,8 @@ Accepted credential values MUST NOT be trimmed, normalized, or silently truncate
 An invalid candidate MUST leave the credential unchanged and remain correctable in its protected field.
 The backend validates state, issuer, resource, redirect, and provider-specific exchange rules.
 Secrets MUST NOT appear in logs, operation receipts, restore state, or completed status responses.
+The daemon keeps each challenge only in its live connection-owned transaction.
+An operation receipt keeps the authentication status without the challenge.
 
 The backend owns PKCE verifiers, callback listeners, device polling, token exchange, and credential persistence.
 The GUI only opens the system browser, displays challenges, and sends explicit input.
@@ -665,9 +749,12 @@ Reporter App authorization uses its separate restricted identity.
 It requires valid reporting consent and the configured method before authorization begins.
 It cannot reuse provider, Daltoki, or ordinary GitHub credentials.
 
+The dalgona daemon registers these methods as product extensions in [auth_native.go](../../../cmd/dalgona/auth_native.go).
+A successful provider login sends `account/login/completed` on the connection.
+
 ## R10. MCP configuration and runtime status
 
-The new `dalgona/mcp/config/read {threadId?}` returns `{version, servers, trustedWorkspace}`.
+`dalgona/mcp/config/read {threadId?}` returns `{version, servers, trustedWorkspace}`.
 Each server contains `{name, source, editable, config, effective, status?}`.
 `source` is `user`, `project`, or `discovered`.
 `user` identifies native product-home configuration after its config/settings merge.
@@ -690,12 +777,20 @@ The client cannot write the display placeholder as a secret.
 An editable environment entry is `{value:string}` or `{preserve:true}`, never both.
 The preserve marker is legal only for an existing redacted entry with the matching expected version.
 
-The new `dalgona/mcp/config/write` accepts `{expectedVersion, edits, operationId}`.
+`dalgona/mcp/config/write` accepts `{expectedVersion, edits, operationId}`.
 Each edit is `{name, action:"put"|"remove", config?}`.
 `put` supplies the complete typed user-level server entry, with explicit preservation markers where required.
 The maximum is 32 edits and 256 KiB encoded parameters.
 The server validates every entry before an atomic user-settings write.
+The server uses the settings revision and preserved values from the snapshot that it checks against `expectedVersion`.
+If the settings change before the write, the server returns `stale_revision`.
 Its result is `{version, restartRequiredServers}`.
+The write stops each changed or removed user server before its replacement starts, and stops a workspace server that a new user entry shadows.
+`restartRequiredServers` names workspace servers that become effective but do not run until their workspace servers restart.
+The next turn in an open thread uses the replacement tools without a model change.
+`remove` applies only to an entry in `settings.toml`. An entry in `config.toml` returns `invalid_params`.
+The read result redacts every stdio environment value.
+An unknown or changed `expectedVersion` returns `stale_revision`.
 
 Project and discovered source entries are read-only in this panel.
 Editing their files requires the workspace editor and its separate authority.
@@ -724,8 +819,10 @@ An absent runtime row means not started, not healthy.
 Changing an active server configuration stops its old transport before the replacement starts.
 In-flight calls receive a typed cancelled or unknown outcome according to their dispatch state.
 
-The baseline [status writer](../../../internal/dal/rpcserver/mcp.go) emits no source field.
-Retaining origin in discovery and the runtime registry, then emitting negotiated provenance, is required implementation work.
+The [status writer](../../../internal/dal/rpcserver/mcp.go) emits `source` and `configVersion` only when the connection negotiated `dalgonaNative` and the daemon advertises `mcpConfig:1`.
+A runtime row whose name, source, or configuration does not match its effective inventory row returns `stale_revision`.
+A runtime row without a source returns `incompatible`.
+The dalgona daemon registers the configuration methods in [mcp_native.go](../../../cmd/dalgona/mcp_native.go).
 
 ## R11. Runner-aware workspace authority
 
@@ -733,7 +830,7 @@ Workspace operations use the thread's bound runner, including local runners.
 The daemon remains the authorization owner.
 The native process never obtains a direct runner object.
 
-The new `dalgona/workspace/open` accepts `{threadId, root:"cwd", rights, operationId}`.
+The daemon implements `dalgona/workspace/open`. It accepts `{threadId, root:"cwd", rights, operationId}`.
 `rights` is a nonempty subset of `read`, `write`, and `terminal`.
 The result is `{workspaceId, threadId, runnerId, bindingRevision, root, pathStyle, rights, expiresAt}`.
 `root` is the backend's canonical display path, not a client-provided alternate root.
@@ -744,7 +841,7 @@ The request displays raw-content access and command execution where requested.
 The default decision is decline.
 An agent tool approval does not silently authorize this handle.
 
-The new server request is `dalgona/workspace/requestPermission`.
+The daemon sends the server request `dalgona/workspace/requestPermission`.
 Its original parameters are `{threadId, runnerId, bindingRevision, root, rights, reason}`.
 Native delivery adds the R04 request envelope and its ordinal metadata.
 Its response is `{decision:"allowOnce"|"decline"}`.
@@ -755,8 +852,12 @@ The handle binds its owner connection, endpoint, thread, runner, root, rights, a
 It expires after fifteen minutes without a successful workspace or attached terminal operation.
 Changing runner identity revokes it immediately.
 Every operation rechecks the binding and required rights before accessing a path.
+Each attached terminal operation rechecks its workspace binding before it reads output or dispatches input.
+The binding revision is the SHA-256 digest of the thread runner name and its recorded `runner.bound` fields.
+A runner without root-confined workspace operations makes `open` fail with `incompatible` and stage `runner`.
+An unknown thread fails with `not_found`. An unknown, foreign, closed, or expired handle fails with `expired`. A missing right fails with `permission_denied`.
 
-The new `dalgona/workspace/close {workspaceId}` explicitly releases an unused handle.
+The daemon implements `dalgona/workspace/close {workspaceId}`. It explicitly releases an unused handle.
 It returns `{status:"closed"|"notFound"}` and requires no operation identifier.
 The owner connection alone may close its handle. An absent or foreign identifier returns `notFound` without changing another grant.
 Repeating close is harmless and returns `notFound` after the first successful release.
@@ -809,6 +910,9 @@ It follows the existing file-search exclusion rules and never follows a symlink 
 Results sort by descending score, then by path.
 An exhausted scan budget sets `incomplete:true` without claiming a complete workspace search.
 Search cursors bind the workspace revision and expire after two minutes.
+The server refuses a directory listing cursor on a search request. It returns `stale_revision` if the search revision changes.
+Each search cursor records the last directory and the revision of the completed part of the scan.
+The server checks only that part for later pages. If the check times out, the cursor remains valid.
 The implementation MUST provide runner-side search rather than silently call host `fuzzyFileSearch`.
 
 Read limits default to 64 KiB and cannot exceed 1 MiB.
@@ -855,12 +959,25 @@ At most 1000 paths or 64 KiB may appear in one notification.
 Overflow sends `rescanRequired:true` and an empty path list.
 The client relists before claiming the visible directory is current.
 
-Workspace operations require new runner and exec-server methods where current interfaces lack bounded reads, atomic commit, or safe rename.
+Workspace operations use the runner `Workspace` method in [runner.md](../../dal/spec/runner.md#workspace-operations).
+Local runners open the thread working directory as a Go `os.Root`. Remote runners send the same request through the exec-server method `workspace/call`.
+Box runners map the thread working directory to `/workspace` and report `pathStyle:"posix"`.
 Existing host filesystem handlers MUST NOT serve as a hidden fallback.
+
+A file revision is the SHA-256 digest of the mode, size, modification time, and file identity.
+On Linux and macOS the identity is the device, inode, and change time. On other systems it is the content digest.
+A directory revision is the digest of the sorted entry names and entry revisions.
+A listing holds at most 10000 entries. A larger directory returns `limit_exceeded`. Names that are not valid UTF-8 are not listed.
+Search walks the runner root through the same list operation. It applies `.git/info/exclude` and every `.gitignore`, skips `.git` and symbolic links, and keeps the best 500 matches for its cursor.
+Watches poll the runner every 250 ms. A directory that cannot be listed sends `rescanRequired:true` with directory revision `absent`.
+Upload chunks stay in daemon memory until commit. Commit stages the bytes in `.dalgona-upload-*` beside the target and publishes them with one rename inside the root.
+Runner errors map to `not_found`, `permission_denied` for an escaping path, `stale_revision` for a changed or existing target, `limit_exceeded`, and `invalid_params`. Other transport failures return `unknown_outcome` for a mutation and `unavailable` for a read.
 
 ### Runner-scoped one-shot shell commands
 
-The native `!` composer uses the new `dalgona/workspace/exec {workspaceId, text, operationId}` method.
+The native `!` composer uses the `dalgona/workspace/exec {workspaceId, text, operationId}` method.
+The daemon runs `text` through `sh -c` on remote runners and POSIX hosts, and through the Windows shell on a Windows local runner.
+A start failure returns `unavailable`. A command that started without a confirmed exit returns `unknown_outcome`. `signal` is not reported.
 `text` is nonempty UTF-8 shell text of at most 64 KiB.
 The handle requires the `terminal` right, which authorizes explicit user command execution.
 The backend selects the actual runner's shell, working directory, and configured sandbox policy.
@@ -985,34 +1102,44 @@ All checkpoint read results remain within the ordinary encoded result budget.
 `checkpoint/open` refreshes the calling connection's existing attachment without changing its identity, workspace binding, or access role.
 It requires no additional attachment slot and remains available for retained finalized terminals before their fixed output expiry.
 A replacement is built within the existing eight MiB checkpoint-body limit and shared checkpoint budget.
+The daemon reserves the maximum body size before encoding. It releases unused space after encoding.
 The server publishes the replacement atomically, then retires that attachment's previous checkpoint.
 An active checkpoint read prevents replacement and returns `busy` without changing the old attachment or checkpoint.
 The client MUST finish or cancel its checkpoint reads before refreshing.
 Allocation, validation, or budget refusal MUST preserve the previous usable checkpoint and attachment.
 Expired attachments retain their normal expiry result. Refresh MUST NOT recreate released state or extend finalized output retention.
 
-The checkpoint body is versioned structured VT state, not executable terminal output.
+The checkpoint body is versioned structured VT state.
+It is not executable terminal output.
 It contains both grids, scrollback, cursor, saved cursors, modes, margins, tabs, current attributes, links, and parser continuation.
-The state also includes pending UTF-8 bytes and incomplete escape sequence bytes.
-Its digest covers the complete canonical UTF-8 JSON body.
-The entire body is limited to 8 MiB encoded JSON.
-Scrollback is limited to 1 MiB and 10000 rows, whichever arrives first.
+The state also contains pending UTF-8 bytes, incomplete escape sequence bytes, and the pending grapheme cluster.
+The digest covers the complete canonical UTF-8 JSON body.
+The body is limited to 8 MiB of encoded JSON.
+Scrollback is limited to 1 MiB and 10000 rows. The first limit that the terminal reaches applies.
 Eviction removes only the oldest completed scrollback rows.
+If the complete scrollback does not fit in the body limit, the checkpoint MUST drop the oldest scrollback rows until the body fits.
+The checkpoint MUST record the number of dropped rows in `droppedScrollbackRows`.
+If the state without scrollback does not fit in the body limit, the checkpoint fails with `limit_exceeded`.
 
-The body schema is `VTStateV1`:
+The body schema is `VTStateV1`.
+The members MUST appear in the order of this table:
 
 | Member | Contract |
 | --- | --- |
-| `primary`, `alternate` | Screen objects containing `rows`, `cursor`, `savedCursor`, and `margins`. |
-| `activeScreen` | Exactly `primary` or `alternate`. |
-| `scrollback` | Oldest-first row objects within the scrollback bounds. |
-| `styles` | Indexed style records containing colors, underline kind, and text attribute flags. |
+| `version` | The integer `1`. |
+| `engineVersion` | The identifier of the pinned engine. It names the vendored VT revision and the module versions that set grapheme widths. |
+| `styles` | Indexed style records that contain colors, underline kind, and text attribute flags. |
 | `links` | Indexed `{uri, id}` records under the document hyperlink allowlist. |
 | `currentStyle` | Valid index into `styles`. |
-| `modes` | Enabled ANSI and DEC mode numbers, plus saved mode values. |
+| `currentLink` | Optional. Valid index into `links` for the active hyperlink. |
+| `activeScreen` | Exactly `primary` or `alternate`. |
+| `primary`, `alternate` | Screen objects that contain `rows`, `cursor`, `savedCursor`, and `margins`. |
+| `scrollback` | Oldest-first row objects within the scrollback limits. |
+| `droppedScrollbackRows` | The number of oldest scrollback rows that the checkpoint dropped to fit the body limit. |
+| `modes` | `{ansi, dec}` lists of enabled mode numbers in ascending order. The pinned engine has no saved mode values. |
 | `tabStops` | Sorted unique zero-based columns below `columns`. |
 | `charsets` | G0 through G3 designation, active GL and GR, and any pending single shift. |
-| `cursorStyle`, `cursorVisible` | Supported cursor shape and visibility. |
+| `cursorStyle`, `cursorVisible` | Supported cursor shape, blink state, and visibility. `cursorVisible` MUST agree with DEC mode 25. |
 | `parserStateBase64` | At most 64 KiB of versioned parser continuation from the pinned checkpoint adapter. |
 
 A row is `{cells, softWrapped}` and contains exactly `columns` cells.
@@ -1020,11 +1147,12 @@ A cell is `{text, width, style, link?}`.
 Width is zero for a wide-character continuation, otherwise one or two.
 Style and link indices MUST reference existing entries.
 A cursor is `{row, column, wrapPending}` with positions inside its screen.
-A saved cursor additionally records its style, origin mode, and character set state.
+A saved cursor also records its style, an optional `link`, origin mode, and character set state.
 Margins are inclusive `{top, bottom, left, right}` positions inside the screen.
 Colors are `{kind:"default"}`, `{kind:"indexed", index}`, or `{kind:"rgb", red, green, blue}`.
 Color components and indexed values are integers from zero through 255.
-Mode numbers and flags are validated against the pinned engine's supported set.
+Mode numbers and flags are validated against the supported set of the pinned engine.
+A decoder MUST reject a body that is not in canonical form.
 
 The adapter owns the exact parser continuation encoding for checkpoint version one.
 It MUST reject unknown flags, impossible cell geometry, unsupported parser state, and invalid UTF-8 outside preserved partial parser bytes.
@@ -1035,7 +1163,7 @@ The daemon and GUI MUST use the same pinned VT engine and checkpoint schema.
 The checkpoint adapter belongs outside the GUI package so the daemon never imports Gio.
 The current `x/vt` dependency does not supply a complete public checkpoint import/export contract.
 Implementing and validating that adapter is required work.
-A checkpoint version mismatch returns `incompatible` before input is accepted.
+A mismatch of the checkpoint version or the engine version returns `incompatible` before input is accepted.
 
 The daemon's authoritative VT processor alone generates automatic terminal protocol replies.
 This includes device attributes and status-report responses.
@@ -1114,19 +1242,57 @@ Terminal output and input are unmasked raw data.
 They MUST NOT enter transcript journals, telemetry, or failure excerpts automatically.
 Copying selected terminal text requires an explicit user action.
 
+### Terminal implementation
+
+The daemon implements all R12 methods in `internal/dal/rpcserver` and advertises `terminal:1` only when `dalgona` supplies the `vtstate` engine.
+The `dal` binary does not advertise the feature, and its terminal methods return `unavailable`.
+Every terminal method requires the negotiated `dalgonaNative` capability and returns `incompatible` without it.
+
+The runner owns the process with `runner.TerminalOpener`.
+Unix uses a PTY with a new session and a controlling terminal. Windows uses ConPTY inside a kill-on-close job object.
+The shell is `SHELL` or `/bin/sh` on Unix and `ComSpec` on Windows, taken from the target environment.
+A box runner opens the terminal through the exec-server methods `terminal/open`, `terminal/read`, `terminal/write`, `terminal/resize`, `terminal/signal`, and `terminal/close`.
+The exec server holds at most 1 MiB of unread output per terminal and stops reading the PTY when that buffer is full.
+It closes a terminal after two minutes without a call.
+The daemon retries a failed or timed-out `terminal/read` at the same offset with backoff of at most one second.
+It marks the terminal lost only when no read succeeds within 30 seconds of the first failure. This is the terminal lease.
+A lost terminal reports `state:"exited"` without `exitCode`, and its final output is marked truncated.
+An exec server that forgets the terminal or a closed exec connection marks the terminal lost at once.
+
+These rules settle the error kinds that the contract above leaves open:
+
+- An unknown terminal, attachment, or checkpoint identifier returns `expired`, including identifiers from an earlier daemon.
+- A foreign attachment returns `expired` and detach returns `notFound`.
+- Attach with a workspace whose thread, runner, root, or binding revision differs from the terminal returns `not_found`.
+- A writer attachment on an exited or closed terminal returns `permission_denied`.
+- Write or resize after exit or close returns `expired`. A writer lease from another connection returns `permission_denied`.
+- New input or resize while `inputState` is `uncertain` returns `unavailable` before dispatch.
+- Close requires an attachment of the calling connection on that terminal.
+- A failed checkpoint construction, a body above 8 MiB, or the shared budget returns `limit_exceeded` and keeps the previous checkpoint.
+- Attach with `access:"read"` and the current `resumeLease` removes the attachment that held the writer lease.
+
 ## R13. Remote and runner management
 
-Client-owned endpoint operations remain in the shared lifecycle package.
-They are `Endpoints`, `SaveRemote`, `CloudUp`, `CloudPull`, and `CloudDown`.
-Their target is the locally selected remote configuration, not the current conversation daemon.
-They return typed progress and final outcomes instead of parsing CLI output.
+Endpoint inventory and session lifecycle remain in `EndpointSet`.
+`Endpoints` returns every configured endpoint with its ID, label, kind, and phase.
+`EndpointSet.SaveRemote` applies admission control and delegates configuration storage to `client.Remotes.SaveRemote`.
+`client.Remotes` owns configuration storage, validation, the box bridge, and the client-side cloud operations.
+It exposes `SaveRemote`, `CloudUp`, `CloudPull`, and `CloudDown`.
+Every request MUST name its target `EndpointID` explicitly.
+The owner MUST resolve configuration and credentials only for that target.
+It MUST NOT infer the target from an open thread or another endpoint connection.
+These operations return typed progress and final outcomes instead of parsing CLI output.
+
+Cloud progress MUST use the callback in `CloudRequest`, not a wire notification.
+The callback MUST receive `client.Progress{Endpoint, OperationID, Phase, Done, Total}` at each operation step.
+The client MUST retain `(Endpoint, OperationID)` identity when it surfaces that callback.
 
 The existing product methods retain their names:
 
 | Method | Native parameters | Native result |
 | --- | --- | --- |
-| `dalgona/remote/pull` | `{threadId, dalgonaOperationId}` | `{exitCode, output, changedPaths, conflictPaths, bindingRevision}`. |
-| `dalgona/remote/gc` | `{yes, dalgonaOperationId}` | `{exitCode, output, candidates, destroyed, failures}`. |
+| `dalgona/remote/pull` | `{threadId, dalgonaOperationId}` | `{exitCode, output, changedPaths, conflictPaths, bindingRevision, truncated}`. |
+| `dalgona/remote/gc` | `{yes, previewRevision?, dalgonaOperationId}` | `{exitCode, output, candidates, destroyed, failures, previewRevision, truncated}`. |
 
 Structured fields apply only after `runnerManagement:1` negotiation.
 The existing `exitCode` and `output` remain available.
@@ -1139,10 +1305,15 @@ Destructive execution requires a confirmation bound to that preview's ledger rev
 The native request then includes `previewRevision` and `yes:true`.
 A changed ledger returns `stale_revision` before any destruction.
 Candidate records contain `{boxId, service, threadIds, reason}`.
-Failure records contain `{boxId, kind}` without credentials.
+Failure records contain `{boxId, kind}` without credentials. `kind` is `failed` or `cancelled`.
+`destroyed` lists the destroyed box identifiers. `previewRevision` is the ledger revision that the next confirmation must send.
+`yes:true` without `previewRevision` keeps the legacy unconditional `dalgona runner gc --yes` behavior and returns only `{exitCode, output}`.
+The ledger revision is the SHA-256 digest of `boxes.log` and the current candidate list.
 
-Add `dalgona/remote/status {threadId?, cursor?, limit?}` for runner inventory and binding state.
-Its result is `{runners, bindings, ledgerRevision}`.
+The daemon implements `dalgona/remote/status {threadId?, cursor?, limit?}` for runner inventory and binding state.
+Its result is `{runners, bindings, ledgerRevision, nextCursor?}`. A cursor from another ledger revision returns `stale_revision`.
+Runners are `local` and every `[runners.<name>]` entry. `available` is true when the service can be constructed.
+Binding `state` is `bound`, `archived`, `destroyed`, or `unbound`. `unbound` appears only for a requested thread without a box. An unknown thread returns `not_found`.
 Runner records contain `{name, service, available, capabilities}`.
 Binding records contain `{threadId, runnerId, boxId?, sharedThreadIds, state, bindingRevision}`.
 The default is 100 records. The maximum is 500 records per page across both collections.
@@ -1152,8 +1323,10 @@ Native pull progress uses `dalgona/remote/progress {operationId, phase, complete
 `phase` is `connecting`, `reading`, `merging`, `publishing`, or `finished`.
 Counts use decimal strings. An unknown total is omitted.
 Notifications are limited to four per second and do not replace the final mutation result.
-Client-owned cloud operations publish the same typed progress through their local operation owner.
-
+The daemon sends progress only when the request carries `dalgonaOperationId`, and uses that value as `operationId`.
+A pull with an empty diff sends only `finished`.
+Cloud operations report progress only through the `CloudRequest` callback defined above.
+The client MUST still demultiplex wire notifications by `(EndpointID, operationId)` before applying them to a session.
 Pull preserves the existing three-way merge and conflict behavior.
 The UI shows its local destination domain before execution.
 Archive confirmation discloses whether the last shared thread box will be destroyed.
@@ -1161,10 +1334,15 @@ Cloud down separately discloses loss of the remote daemon and every thread store
 
 ## R14. Diagnostics and failure records
 
-The new `dalgona/diagnostics/run {online:false|true}` returns `{rows, exitCode}`.
+The product extension `dalgona/diagnostics/run {online:false|true}` returns `{rows, exitCode}`.
+[cmd/dalgona/native_diagnostics.go](../../../cmd/dalgona/native_diagnostics.go) registers it.
+The `online` member is required. A missing or non-boolean value returns `invalid_params`.
 Each row is `{status:"ok"|"warn"|"fail", check, detail}`.
 Rows preserve the order and meaning in [doctor.md](doctor.md).
 Each detail is masked, control-cleaned, and limited to 400 characters.
+`exitCode` is 1 when a row has the status `fail`. Otherwise it is 0.
+More than 1000 rows or 1 MiB of encoded JSON returns `limit_exceeded`.
+The run has the 30-second page deadline.
 
 Online mode requires an explicit action and sends only the existing bounded model-list probes.
 Each probe has a five-second deadline, no retry, no account rotation, and no token refresh.
@@ -1176,19 +1354,24 @@ It MUST remain usable when startup itself fails.
 Connected remote diagnostics describe the remote endpoint, never the GUI host.
 Unavailable remote diagnostics cannot be replaced silently by local results.
 
-The new `dalgona/failures/list {cursor?, limit?}` returns `{records, nextCursor?}`.
-It lists masked metadata summaries in reverse chronological order.
+The core method `dalgona/failures/list {cursor?, limit?}` returns `{records, nextCursor?}`.
+It lists masked metadata summaries in reverse chronological order. Records with equal times sort by descending identifier.
+Each summary is `{id, time, product, version, os, arch, class, tool, fingerprint, contentFree, reportable}`. `time` is a `Timestamp`.
 The default limit is 50. The maximum is 100.
+A full page includes `nextCursor`. The page after it can be empty.
 The cursor freezes a listing boundary and expires after five minutes.
+An expired cursor returns `expired`. A malformed cursor or a limit below 1 or above 100 returns `invalid_params`.
 
-The new `dalgona/failures/read {id}` returns the existing public `Record` schema.
+The core method `dalgona/failures/read {id}` returns the existing public `Record` schema.
 Its masking, classification, bounds, and content-free fallback follow [failures.md](../../dal/spec/failures.md).
 It MUST NOT include the local correlation sidecar or private replay inputs.
 Downloading a record exports only those same masked public fields.
+An identifier that is not 32 lowercase hexadecimal digits returns `invalid_params`. An unknown record returns `not_found`.
+Both failure methods have the 10-second metadata deadline. An unreadable record store returns `unavailable`.
 
 ## R15. Consented reporting
 
-The new `dalgona/reporting/read {method?}` returns:
+The product extension `dalgona/reporting/read {method?}` returns:
 
 ```json
 {
@@ -1209,22 +1392,32 @@ The new `dalgona/reporting/read {method?}` returns:
 `consentReceipt` is null or `{schemaVersion:1, time, method, textHash}`.
 `authorization` is `ready`, `missing`, `expired`, or `unavailable`.
 `restriction` is null or `{kind, until?, message}` using the reporter's existing bounded state.
+`kind` is `stopped` for an HTTP stop latch or unreadable reporter state, `rateLimited` for a GitHub rate-limit wait, or `localLimit` for an exhausted daily cap.
+`until` is a `Timestamp` and is present for `rateLimited` and `localLimit`.
+`available` is false for an overridden home or an `unavailable` authorization.
+App authorization is `unavailable` without the App client identifier. Gh authorization is `ready` when the `gh` executable resolves and `unavailable` otherwise. The read never runs `gh`.
+`enabled` is true only when the configuration enables reporting with this method and a valid receipt for this method exists.
+[cmd/dalgona/native_reporting.go](../../../cmd/dalgona/native_reporting.go) registers the three reporting methods. Enable and disable are receipt-covered mutations.
 
-The new `dalgona/reporting/enable` accepts `{method, textHash, confirmation, operationId}`.
-`confirmation` MUST equal the exact string `yes`.
-The hash MUST match the current substituted consent text and selected method.
+The product extension `dalgona/reporting/enable` accepts `{method, textHash, confirmation, operationId}`.
+`confirmation` MUST equal the exact string `yes`. Any other value returns `permission_denied`.
+The hash MUST match the current substituted consent text and selected method. A different hash returns `stale_revision` with the current hash as `currentRevision`.
 The daemon writes the receipt durably before enabling configuration.
-A write failure leaves reporting off.
-The result returns the stored `consentReceipt` and current authorization state.
+It then writes `failure_reports.auth` and `failure_reports.enabled` in one settings write.
+A write failure leaves reporting off and returns `unavailable` with stage `consent` or `config`.
+The result is `{consentReceipt, authorization}` with the stored receipt and current authorization state.
 
 The native typed confirmation explicitly extends the existing terminal-only consent presentation.
 It preserves the requirement for a deliberate person action and exact text.
 Checkbox defaults, generic settings writes, project configuration, and environment variables cannot opt in.
 Changing authentication methods requires a new receipt and cannot inherit old consent.
 
-The new `dalgona/reporting/disable {operationId}` disables first and removes consent, App credentials, and queued excerpts.
+The product extension `dalgona/reporting/disable {operationId}` disables first and removes consent, App credentials, and queued excerpts.
 It preserves local records, receipts, counters, and restriction deadlines.
 The result is `{enabled:false, queuedReportsDeleted:true, publishedIssuesDeleted:false}`.
+A failed configuration write returns `unavailable` with stage `config`. A failed removal returns `unavailable` with stage `consent`.
+After each enable or disable call, the daemon closes its reporter and opens it again from the live configuration and receipt.
+Enable therefore activates reporting without a restart. Disable deactivates it without a restart.
 
 Reporter login uses R09 with the reporter target.
 App mode retains its separate client identifier, device flow, repository checks, and restricted permission.
@@ -1250,8 +1443,9 @@ Native connections support the new notification `$/cancelRequest {id}` after `re
 The server maps it only to an active request on that connection.
 Unknown or completed identifiers are ignored.
 Cancellation requests stop cancellable work and do not imply rollback of a dispatched effect.
-The existing `rpc.Conn` currently cancels local waiting only when a call context ends.
-The implementation MUST add negotiated server cancellation rather than claim that behavior already exists.
+After negotiation, `rpc.Conn` maps `$/cancelRequest` to the matching active request on that connection.
+The request scope of a cancellable method then ends, and the method returns `cancelled`.
+A deadline expiry also returns `cancelled`, with `stage:"deadline"` in the error data.
 
 Every worker inherits its owning connection context unless the contract explicitly grants a reconnect lease.
 Cancellation before effect returns `cancelled`.

@@ -22,7 +22,7 @@ func PlanReplace(ctx context.Context, env tool.Env, summary string, replaced []R
 	if err != nil {
 		return tool.Plan{}, err
 	}
-	batch := newStagedBatch(Replace, env, summary)
+	batch := newStagedBatch(Replace, env)
 	for _, file := range files {
 		file.beforeSHA = fileSHA(file.before, file.exists)
 		file.afterSHA = fileSHA(file.after, !file.deleted)

@@ -26,6 +26,7 @@ type turnParams struct {
 	text           []string
 	items          int
 	textErr        error
+	texts          []textinput.Item
 	loads          []imageLoad
 	images         []agent.Image
 	imageErr       error
@@ -121,9 +122,41 @@ func stricterApproval(thread, turn config.Approval) config.Approval {
 	return turn
 }
 
+func resolveImageAlt(altText, altAlias string) string {
+	if altText != "" {
+		return altText
+	}
+	return altAlias
+}
+
+func (p *turnParams) recordImageMeta(index int, name, altText, altAlias string) {
+	if name != "" {
+		p.addInputText(index, "name", name)
+	}
+	if altText != "" {
+		p.addInputText(index, "altText", altText)
+	}
+	if altAlias != "" {
+		p.addInputText(index, "alt", altAlias)
+	}
+}
+
+func (p *turnParams) queueURLImage(index int, url, name, altText, altAlias string) {
+	p.addInputText(index, "url", url)
+	p.recordImageMeta(index, name, altText, altAlias)
+	alt := resolveImageAlt(altText, altAlias)
+	p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, name, alt, admit) })
+}
+
+func (p *turnParams) queuePathImage(index int, path, name, altText, altAlias string) {
+	p.recordImageMeta(index, name, altText, altAlias)
+	alt := resolveImageAlt(altText, altAlias)
+	p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, name, alt, admit) })
+}
+
 func (p *turnParams) readInput(d *jsontext.Decoder) error {
-	var kind, text, path, url string
-	err := rpc.ReadMembers(d, stringMembers(map[string]*string{"type": &kind, "text": &text, "path": &path, "url": &url}))
+	var kind, text, path, url, name, altText, altAlias string
+	err := rpc.ReadMembers(d, stringMembers(map[string]*string{"type": &kind, "text": &text, "path": &path, "url": &url, "name": &name, "altText": &altText, "alt": &altAlias}))
 	if err != nil {
 		return err
 	}
@@ -131,20 +164,38 @@ func (p *turnParams) readInput(d *jsontext.Decoder) error {
 	p.items++
 	switch kind {
 	case "text":
-		p.checkText(index, "text", text)
+		p.addInputText(index, "text", text)
 		p.text = append(p.text, text)
 	case "mention", "skill":
-		p.checkText(index, "path", path)
+		p.addInputText(index, "path", path)
 		p.text = append(p.text, "@"+path)
 	case "image":
-		p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, admit) })
+		p.queueURLImage(index, url, name, altText, altAlias)
 	case "localImage":
-		p.checkText(index, "path", path)
-		p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, admit) })
+		p.addInputText(index, "path", path)
+		p.queuePathImage(index, path, name, altText, altAlias)
 	default:
 		return invalidParams("unsupported input type " + kind)
 	}
 	return nil
+}
+
+func (p *turnParams) addInputText(index int, member, value string) {
+	field := "input[" + strconv.Itoa(index) + "]." + member
+	p.texts = append(p.texts, textinput.Item{Field: field, Policy: directTextPolicy, Text: value})
+	p.checkText(index, member, value)
+}
+
+func parseTurn(params jsontext.Value) (turnParams, error) {
+	var p turnParams
+	err := decodeParams(params, p.member)
+	p.texts = append(p.texts, textinput.Item{Field: "model", Policy: directTextPolicy, Text: p.model})
+	return p, err
+}
+
+func turnTexts(params jsontext.Value) ([]textinput.Item, error) {
+	p, err := parseTurn(params)
+	return p.texts, err
 }
 
 func (p *turnParams) checkText(index int, member, value string) {
@@ -158,8 +209,8 @@ func (p *turnParams) checkText(index int, member, value string) {
 }
 
 func decodeTurn(params jsontext.Value) (turnParams, error) {
-	var p turnParams
-	if err := decodeParams(params, p.member); err != nil {
+	p, err := parseTurn(params)
+	if err != nil {
 		return p, err
 	}
 	if p.textErr != nil {

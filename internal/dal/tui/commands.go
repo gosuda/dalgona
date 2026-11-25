@@ -3,6 +3,7 @@ package tui
 import (
 	"cmp"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -22,8 +23,9 @@ import (
 )
 
 const (
-	requestTimeout = 30 * time.Second
-	maxFollowups   = 32
+	requestTimeout   = 30 * time.Second
+	maxFollowups     = 32
+	promptInputLimit = 15 << 20
 )
 
 func requestContext(done <-chan struct{}) (context.Context, context.CancelFunc) {
@@ -46,36 +48,26 @@ func boundedContext(done <-chan struct{}, timeout time.Duration) (context.Contex
 }
 
 func (m *model) call(op, method string, params, result any, text string) tea.Cmd {
-	return m.callPrompt(op, method, params, result, followup{text: text})
+	return m.callRPC(method, params, resultMsg{op: op, value: result, text: text})
 }
 
 func (m *model) callPrompt(op, method string, params, result any, prompt followup) tea.Cmd {
-	turnID := m.thread.turnID
-	return func() tea.Msg {
-		if m.conn.client == nil {
-			return resultMsg{op: op, text: prompt.text, verbatim: prompt.verbatim, err: errors.New("rpc client is not connected")}
-		}
-		ctx, cancel := requestContext(m.conn.done)
-		defer cancel()
-		err := m.conn.client.Call(ctx, method, params, result)
-		return resultMsg{op: op, value: result, text: prompt.text, verbatim: prompt.verbatim, turnID: turnID, err: err}
-	}
+	return m.callRPC(method, params, resultMsg{op: op, value: result, text: prompt.text, verbatim: prompt.verbatim})
 }
 
-func (m *model) initialize() tea.Cmd {
-	return func() tea.Msg {
-		if m.conn.client == nil {
-			return resultMsg{op: "initialize", err: errors.New("rpc client is not connected")}
+func (m *model) callRPC(method string, params any, reply resultMsg) tea.Cmd {
+	client, done := m.conn.client, m.conn.done
+	reply.turnID = m.thread.turnID
+	return m.conn.link.scope(func() tea.Msg {
+		if client == nil {
+			reply.err = errors.New("rpc client is not connected")
+			return reply
 		}
-		ctx, cancel := requestContext(m.conn.done)
+		ctx, cancel := requestContext(done)
 		defer cancel()
-		params := rpc.InitializeParams{ClientInfo: rpc.ClientInfo{Name: "dalgona", Title: "dalgona TUI", Version: clientVersion()}}
-		var result rpc.InitializeResult
-		if err := m.conn.client.Call(ctx, "initialize", params, &result); err != nil {
-			return resultMsg{op: "initialize", err: err}
-		}
-		return resultMsg{op: "initialize", value: &result, err: m.conn.client.Notify("initialized", nil)}
-	}
+		reply.err = client.Call(ctx, method, params, reply.value)
+		return reply
+	})
 }
 
 func clientVersion() string {
@@ -153,6 +145,9 @@ func (m *model) loadLevels() tea.Cmd {
 }
 
 func (m *model) startThread() tea.Cmd {
+	if m.conn.opts.Latest {
+		return m.callSeq(m.resetPendingResume(""), "latest", "thread/list", rpc.ThreadListParams{Limit: 1}, new(rpc.ThreadListResponse))
+	}
 	if m.conn.opts.ThreadID != "" {
 		return m.resumeThread(m.conn.opts.ThreadID)
 	}
@@ -207,24 +202,34 @@ func (m *model) submitPrompt() tea.Cmd {
 		text = ""
 	}
 	images := composer.images()
-	if text == "" && len(images) == 0 {
-		return m.startQueuedFollowup()
+	if command, done := m.submitEmpty(text, images); done {
+		return command
 	}
 	text, command, done := m.slashSubmit(composer, text)
 	if done {
 		return command
 	}
-	m.input.composer.SetValue("")
-	if m.thread.id == "" {
-		m.noticef("thread is not ready; wait for startup or use /new to retry")
-		m.input.composer = composer
+	if m.machineOffline() {
 		return nil
 	}
-	m.input.history.rewind()
-	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
-		return m.sendSteer(text, images)
+	if !m.threadReady() {
+		return nil
 	}
-	return m.sendPrompt(text, images)
+	items := promptInput(text, images)
+	if m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
+		return m.sendSteer(text, items)
+	}
+	return m.sendPrompt(text, items)
+}
+
+func (m *model) submitEmpty(text string, images []chip) (tea.Cmd, bool) {
+	if text != "" || len(images) != 0 {
+		return nil, false
+	}
+	if len(m.input.composer.chips) != 0 {
+		return nil, true
+	}
+	return m.startQueuedFollowup(), true
 }
 
 func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool) {
@@ -245,20 +250,54 @@ func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool
 	return text, nil, false
 }
 
-func (m *model) sendPrompt(text string, images []chip) tea.Cmd {
+func (m *model) sendPrompt(text string, items []rpc.InputItem) tea.Cmd {
+	params := m.promptStart(items)
+	if !m.promptFits("turn/start", params, items) {
+		return nil
+	}
+	m.acceptComposer()
 	m.input.history.add(text, "")
 	m.setState(stateRunning)
 	m.thread.turnStartedAt = m.now()
 	m.thread.turnSent = true
-	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: promptInput(text, images), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
 	return m.call("send", "turn/start", params, result, text)
 }
 
-func (m *model) sendSteer(text string, images []chip) tea.Cmd {
+func (m *model) sendSteer(text string, items []rpc.InputItem) tea.Cmd {
+	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: items}
+	if !m.promptFits("turn/steer", params, items) {
+		return nil
+	}
+	m.acceptComposer()
 	m.input.history.add(text, m.thread.turnID)
-	params := rpc.TurnSteerParams{ThreadID: m.thread.id, ExpectedTurnID: m.thread.turnID, Input: promptInput(text, images)}
 	return m.call("steer", "turn/steer", params, new(rpc.TurnSteerResponse), text)
+}
+
+func (m *model) acceptComposer() {
+	m.input.composer.SetValue("")
+	m.input.history.rewind()
+}
+
+func (m *model) promptStart(items []rpc.InputItem) rpc.TurnStartParams {
+	return rpc.TurnStartParams{ThreadID: m.thread.id, Input: items, Model: m.thread.modelName}
+}
+
+func (m *model) promptFits(method string, params any, items []rpc.InputItem) bool {
+	data, err := json.Marshal(items)
+	if err != nil {
+		m.errorf("Cannot encode prompt input: %v", err)
+		return false
+	}
+	if len(data) > promptInputLimit {
+		m.errorf("Prompt input exceeds 15 MiB of encoded JSON. Reduce the draft or remove an attachment.")
+		return false
+	}
+	if err := rpc.ValidateCallFrame(method, params); err != nil {
+		m.errorf("Cannot send prompt: %v. Reduce the draft or remove an attachment.", err)
+		return false
+	}
+	return true
 }
 
 func textInput(text string) []rpc.InputItem {
@@ -287,6 +326,10 @@ func (m *model) queueFollowup() tea.Cmd {
 	}
 	if len(m.queue) >= maxFollowups {
 		m.noticef("follow-up queue is full (%d); wait for the active turn or press Esc", maxFollowups)
+		return nil
+	}
+	items := textInput(text)
+	if !m.promptFits("turn/start", m.promptStart(items), items) {
 		return nil
 	}
 	m.queue = append(m.queue, followup{text: text, verbatim: m.input.composer.sendsPastedSlash(text)})
@@ -324,17 +367,28 @@ func (m *model) dequeueFollowup() {
 }
 
 func (m *model) startQueuedFollowup() tea.Cmd {
-	if len(m.queue) == 0 || m.thread.state == stateRunning || m.thread.state == stateAwaitingApproval {
+	if m.machineOffline() {
+		return nil
+	}
+	if len(m.queue) == 0 || m.turnLive() {
+		return nil
+	}
+	if !m.threadReady() {
 		return nil
 	}
 	next := m.queue[0]
+	items := textInput(next.text)
+	params := m.promptStart(items)
+	if err := rpc.ValidateCallFrame("turn/start", params); err != nil {
+		m.errorf("Cannot send follow-up: %v. Use Alt+Up or the queue to edit the draft.", err)
+		return nil
+	}
 	m.queue = m.queue[1:]
 	m.input.history.add(next.text, "")
 	m.syncQueue()
 	m.setState(stateRunning)
 	m.thread.turnStartedAt = m.now()
 	m.thread.turnSent = true
-	params := rpc.TurnStartParams{ThreadID: m.thread.id, Input: textInput(next.text), Model: m.thread.modelName}
 	result := new(rpc.TurnStartResponse)
 	return m.callPrompt("followup", "turn/start", params, result, next)
 }
@@ -383,14 +437,28 @@ func (m *model) applyPreludeResult(msg resultMsg) (tea.Cmd, bool) {
 		return nil, true
 	case strings.HasPrefix(msg.op, "advisor"):
 		return m.applyAdvisorResult(msg), true
-	case (msg.op == "new" || msg.op == "fork") && msg.seq != 0 && msg.seq != m.pendingState().seq:
-		return nil, true
-	case msg.op == "initialize" && msg.err != nil:
-		flat := strings.Join(strings.Fields(msg.err.Error()), " ")
-		m.commit("welcome", []string{m.screen.fit(sanitizeText("Could not start: "+flat+". Press ctrl+c to exit."), terminalWidth(m.screen.width))})
+	case m.stalePreludeThread(msg):
 		return nil, true
 	}
-	return nil, false
+	return m.failPreludeInitialize(msg)
+}
+
+func (m *model) stalePreludeThread(msg resultMsg) bool {
+	switch msg.op {
+	case "new", "fork", "latest":
+		return msg.seq != 0 && msg.seq != m.pendingState().seq
+	default:
+		return false
+	}
+}
+
+func (m *model) failPreludeInitialize(msg resultMsg) (tea.Cmd, bool) {
+	if msg.op != "initialize" || msg.err == nil {
+		return nil, false
+	}
+	flat := strings.Join(strings.Fields(msg.err.Error()), " ")
+	m.commit("welcome", []string{m.screen.fit(sanitizeText("Could not start: "+flat+". Press ctrl+c to exit."), terminalWidth(m.screen.width))})
+	return nil, true
 }
 
 func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
@@ -401,16 +469,35 @@ func (m *model) applySuccessResult(msg resultMsg) tea.Cmd {
 		return m.applyTurnAccepted(msg.value)
 	case "initialize":
 		return m.applyInitialize(msg.value)
-	case "settings":
-		return m.applySettings(msg.value)
-	case "settingsSave":
-		return m.applySettingsSaved(msg)
+	case "latest":
+		return m.applyLatestResult(msg)
+	case "settings", "settingsSave":
+		return m.applyConfigResult(msg)
 	case "rewind":
 		m.applyRewind(msg.text)
 		return nil
 	default:
 		return m.applyConfirmation(msg)
 	}
+}
+
+func (m *model) applyLatestResult(msg resultMsg) tea.Cmd {
+	result, ok := msg.value.(*rpc.ThreadListResponse)
+	if !ok {
+		return m.unexpectedResult("thread list")
+	}
+	if len(result.Data) == 0 {
+		m.errorf("No earlier thread on this machine; use /new to start one")
+		return nil
+	}
+	return m.resumeThread(result.Data[0].ID)
+}
+
+func (m *model) applyConfigResult(msg resultMsg) tea.Cmd {
+	if msg.op == "settings" {
+		return m.applySettings(msg.value)
+	}
+	return m.applySettingsSaved(msg)
 }
 
 func (m *model) applyInitialize(value any) tea.Cmd {
@@ -590,7 +677,7 @@ func (m *model) applyInterrupt(msg resultMsg) tea.Cmd {
 }
 
 func (m *model) applyRewind(label string) {
-	if m.input.composer.Value() != "" {
+	if !m.input.composer.empty() {
 		m.noticef("Rewound; the editor holds a draft, so the prompt was not restored")
 		return
 	}
@@ -611,6 +698,9 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 	if m.panelFailed(msg) {
 		return nil
 	}
+	if m.uncertainPrompt(msg) {
+		return nil
+	}
 	m.restorePrompt(msg)
 	if msg.op == "keywords" {
 		m.errorf("keyword highlighting unavailable: %v; prompting is ready, restart to retry", msg.err)
@@ -618,6 +708,19 @@ func (m *model) applyResultError(msg resultMsg) tea.Cmd {
 	}
 	m.errorf("%s failed: %v; retry, %s, or /new", resultLabel(msg.op), msg.err, m.resumeHint())
 	return nil
+}
+
+func (m *model) uncertainPrompt(msg resultMsg) bool {
+	if m.conn.link.Endpoint == "" || (msg.op != "send" && msg.op != "steer" && msg.op != "followup") {
+		return false
+	}
+	if _, rejected := errors.AsType[*rpc.RPCError](msg.err); rejected {
+		return false
+	}
+	m.setState(stateFailed)
+	m.thread.turnStartedAt = time.Time{}
+	m.errorf("%s outcome unknown; inspect the thread before sending again. The text is in history.", resultLabel(msg.op))
+	return true
 }
 
 func (m *model) restorePrompt(msg resultMsg) {
@@ -643,6 +746,9 @@ func resultLabel(op string) string {
 }
 
 func (m *model) restoreComposer(text string) {
+	if text == "" {
+		return
+	}
 	verbatim := slashStart([]rune(text)) >= 0
 	current := m.input.composer.Expanded()
 	if current != "" {
@@ -704,6 +810,7 @@ func (m *model) claimPendingResume(response *resumedThread) ([]notificationMsg, 
 
 func (m *model) adoptResumed(response *resumedThread) {
 	m.setThread(response.Thread.ID)
+	m.conn.threadOpen = true
 	m.thread.cwd = response.cwd
 	m.thread.approvalMode = approvalFromPolicy(response.approval)
 	m.thread.effort = response.effort
@@ -787,6 +894,7 @@ func (m *model) applyNewThread(value any) tea.Cmd {
 	}
 	m.resetPendingResume("")
 	m.setThread(response.Thread.ID)
+	m.conn.threadOpen = true
 	m.thread.cwd = response.Cwd
 	m.thread.approvalMode = approvalFromPolicy(response.ApprovalPolicy)
 	m.thread.turnEffort = nil
@@ -887,6 +995,12 @@ func (m *model) runShell() tea.Cmd {
 	if textinput.Blank(command) {
 		return nil
 	}
+	if m.machineOffline() {
+		return nil
+	}
+	if m.conn.link.Endpoint != "" && m.thread.id != "" && !m.threadReady() {
+		return nil
+	}
 	m.input.composer.SetValue("")
 	m.input.shells++
 	return m.shellCommand(m.input.shells, command)
@@ -899,7 +1013,7 @@ func (m *model) shellCommand(n int, command string) tea.Cmd {
 	}
 	params := shellParams{Command: argv, Cwd: m.workDir(), TimeoutMS: shellTimeoutMS, OutputBytesCap: shellOutputCap}
 	client, done, clock := m.conn.client, m.conn.done, m.conn.clock
-	return func() tea.Msg {
+	return m.conn.link.scope(func() tea.Msg {
 		if client == nil {
 			return shellResultMsg{n: n, command: command, err: errors.New("rpc client is not connected")}
 		}
@@ -909,7 +1023,7 @@ func (m *model) shellCommand(n int, command string) tea.Cmd {
 		var result rpc.CommandExecResponse
 		err := client.Call(ctx, "command/exec", params, &result)
 		return shellResultMsg{n: n, command: command, result: result, err: err, elapsed: clock().Sub(started)}
-	}
+	})
 }
 
 func (m *model) applyShell(msg shellResultMsg) {
@@ -939,10 +1053,10 @@ func (m *model) applyShell(msg shellResultMsg) {
 
 func (m *model) draftHoldsOnlyShellOutput() bool {
 	composer := &m.input.composer
-	return !slices.ContainsFunc(composer.text, func(r rune) bool {
-		ch, ok := composer.chipOf(r)
-		return !ok || !ch.shell
-	})
+	if len(composer.text) > 0 {
+		return false
+	}
+	return !slices.ContainsFunc(composer.chips, func(ch chip) bool { return !ch.shell })
 }
 
 func shellOutput(result rpc.CommandExecResponse) string {

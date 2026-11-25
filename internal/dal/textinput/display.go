@@ -106,7 +106,7 @@ func Eligible(s string) bool {
 			continue
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if !IsWhiteSpace(r) && !isControl(r) && !lookup(r).ignorable {
+		if !IsWhiteSpace(r) && !isControl(r) && lookup(r).property&defaultIgnorable == 0 {
 			return true
 		}
 		i += size
@@ -235,7 +235,7 @@ func DistinctLines(sources []string) []string {
 
 func visibleKey(line string) string {
 	return strings.Map(func(r rune) rune {
-		if lookup(r).ignorable {
+		if lookup(r).property&defaultIgnorable != 0 {
 			return -1
 		}
 		return r

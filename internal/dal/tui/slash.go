@@ -14,23 +14,50 @@ import (
 )
 
 func (m *model) executeSlash(name, argument string) tea.Cmd {
+	if cmd, handled := m.machineSlashCommand(name, argument); handled {
+		return cmd
+	}
+	if name != "help" && m.machineOffline() {
+		return nil
+	}
+	if cmd, handled := m.slashPanelCommand(name, argument); handled {
+		return cmd
+	}
 	switch name {
 	case "model":
 		return m.modelCommand(argument)
 	case "resume":
 		return m.resumeCommand(argument)
-	case "login":
-		return m.openLogin(argument)
-	case "advisor":
-		return m.advisorCommand(argument)
-	case "settings":
-		m.openSettings()
-		return nil
-	case "help":
-		m.openHelp()
-		return nil
 	default:
 		return m.executeThreadCommand(name)
+	}
+}
+
+func (m *model) machineSlashCommand(name, argument string) (tea.Cmd, bool) {
+	if name != "machines" {
+		return nil, false
+	}
+	action := parseMachineAction(argument)
+	if action.id == "" && (action.verb == "connect" || action.verb == "disconnect") {
+		action.id = m.conn.link.Endpoint
+	}
+	return func() tea.Msg { return action }, true
+}
+
+func (m *model) slashPanelCommand(name, argument string) (tea.Cmd, bool) {
+	switch name {
+	case "login":
+		return m.openLogin(argument), true
+	case "advisor":
+		return m.advisorCommand(argument), true
+	case "settings":
+		m.openSettings()
+		return nil, true
+	case "help":
+		m.openHelp()
+		return nil, true
+	default:
+		return nil, false
 	}
 }
 
@@ -146,19 +173,20 @@ func (m *model) resumeCommand(argument string) tea.Cmd {
 
 func (m *model) resumeThread(id string) tea.Cmd {
 	target := ""
-	if id != m.thread.id {
+	if id != m.thread.id || (m.conn.link.Endpoint != "" && !m.conn.threadOpen) {
 		target = id
 	}
 	seq := m.resetPendingResume(target)
 	revision := m.thread.turnRevision
-	return func() tea.Msg {
-		if m.conn.client == nil {
+	client, done := m.conn.client, m.conn.done
+	return m.conn.link.scope(func() tea.Msg {
+		if client == nil {
 			return resultMsg{op: "resumed", seq: seq, err: errors.New("rpc client is not connected")}
 		}
-		ctx, cancel := requestContext(m.conn.done)
+		ctx, cancel := requestContext(done)
 		defer cancel()
 		var resumed rpc.ThreadResumeResponse
-		if err := m.conn.client.Call(ctx, "thread/resume", rpc.ThreadResumeParams{ThreadID: id}, &resumed); err != nil {
+		if err := client.Call(ctx, "thread/resume", rpc.ThreadResumeParams{ThreadID: id}, &resumed); err != nil {
 			return resultMsg{op: "resumed", seq: seq, err: err}
 		}
 		return resultMsg{op: "resumed", seq: seq, value: &resumedThread{
@@ -166,16 +194,11 @@ func (m *model) resumeThread(id string) tea.Cmd {
 			effort:             resumed.ReasoningEffort, turnEffort: resumed.TurnEffort, turnRevision: &revision,
 			approval: resumed.ApprovalPolicy, model: resumed.Model, cwd: resumed.Cwd, resumeSeq: seq,
 		}}
-	}
+	})
 }
 
 func (m *model) callSeq(seq int, op, method string, params, result any) tea.Cmd {
-	command := m.call(op, method, params, result, "")
-	return func() tea.Msg {
-		reply, _ := command().(resultMsg)
-		reply.seq = seq
-		return reply
-	}
+	return m.callRPC(method, params, resultMsg{op: op, seq: seq, value: result})
 }
 
 func (m *model) listCall(op, method string, params, result any) tea.Cmd {
@@ -224,6 +247,7 @@ type command struct {
 var commands = []command{
 	{name: "model", args: "[id]", summary: "Choose a model, or set one by id"},
 	{name: "resume", args: "[id]", summary: "Search earlier conversations, or open a thread by id"},
+	{name: "machines", args: "[action]", summary: "Browse, connect, select, or add machines"},
 	{name: "new", summary: "Start a new thread"},
 	{name: "compact", summary: "Compact the context of this thread"},
 	{name: "login", args: "[provider]", summary: "Sign in to a provider"},
@@ -249,26 +273,31 @@ func (c editor) slashParts() (name, arg string, kind slashKind) {
 	if start < 0 {
 		return "", c.Expanded(), slashPrompt
 	}
-	body := c.text[start+1:]
-	if len(body) > 0 && body[0] == '/' {
-		return "", c.expand(slices.Concat(c.text[:start], body)), slashPrompt
+	if len(c.text) > start+1 && c.text[start+1] == '/' {
+		return "", c.expandRange(0, start) + c.expandRange(start+1, len(c.text)), slashPrompt
 	}
-	end := slices.IndexFunc(body, c.tokenBreak)
-	if end < 0 {
-		end = len(body)
-	}
-	name = string(body[:end])
+	end := slashTokenEnd(c, start+1)
+	name = string(c.text[start+1 : end])
 	switch {
 	case strings.Contains(name, "/"):
 		return "", c.Expanded(), slashPrompt
 	case !slices.ContainsFunc(commands, func(c command) bool { return c.name == name }):
 		return name, "", slashUnknown
 	}
-	rest, ok := slashArgument(body[end:])
+	rest, ok := slashArgument(c.text[end:])
 	if !ok {
 		return name, "", slashUnknown
 	}
-	return name, c.expand(rest), slashCommand
+	return name, c.expandRange(len(c.text)-len(rest), len(c.text)), slashCommand
+}
+
+func slashTokenEnd(c editor, from int) int {
+	for i := from; i < len(c.text); i++ {
+		if textinput.IsWhiteSpace(c.text[i]) || c.hasChipsAt(i) {
+			return i
+		}
+	}
+	return len(c.text)
 }
 
 func slashArgument(rest []rune) ([]rune, bool) {
@@ -292,4 +321,12 @@ func slashStart(text []rune) int {
 		return -1
 	}
 	return start
+}
+
+func (c editor) slashStart() int {
+	i := 0
+	for i < len(c.text) && c.text[i] == ' ' && !c.hasChipsAt(i) {
+		i++
+	}
+	return i
 }

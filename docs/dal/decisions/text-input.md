@@ -17,6 +17,8 @@ The Go package MUST import only the Go standard library.
 Core, server, lifecycle, and client packages MAY import it.
 `internal/dal/tui` MAY import it beside `internal/dal/rpc`.
 `internal/dal/rpc` MUST NOT import it. The wire package rejects malformed encoding with the standard library alone.
+`internal/dal/tui` MUST validate single-line fields, the composer, question answers, and resume eligibility through `internal/dal/textinput`.
+It MUST NOT keep its own line-break sets, grapheme-boundary loops, quota counts, or NUL checks.
 
 ## Scope
 
@@ -24,12 +26,13 @@ This decision applies to `internal/dal/textinput`, `web/src/lib/text`, their imp
 The `core` rule lists `**/internal/dal/textinput/**`.
 The `tui-imports-only-rpc` rule allows `internal/dal/textinput` beside `internal/dal/rpc`.
 The `text-input-leaf` rule denies every module-internal import from the package.
+The `gui-imports`, `gui-terminal-imports`, `gui-root-imports`, and `gui-root-test-imports` rules allow `internal/dal/textinput` for the desktop client.
+The TUI adoption covers `paste_routes.go`, `input.go`, `dock.go`, `pickers.go`, `question.go`, `resume_search.go`, `update.go`, `commands.go`, and `login.go`.
 
-`go generate ./internal/dal/textinput` runs `gen.go`.
-It downloads `GraphemeBreakProperty.txt`, `emoji-data.txt`, `DerivedCoreProperties.txt`, and `PropList.txt` from `https://www.unicode.org/Public/18.0.0/ucd/`.
-It writes `tables.go` and `web/src/lib/text/tables.ts`.
-`pnpm -C web exec biome format --write src/lib/text/tables.ts` then gives the committed TypeScript layout.
-The tables pack `Grapheme_Cluster_Break`, `Extended_Pictographic`, `Indic_Conjunct_Break`, `Default_Ignorable_Code_Point`, and `White_Space`.
+`go generate ./internal/dal/textinput` runs `ucdgen.go`.
+It reads the pinned 18.0.0 files in `testdata/`: `DerivedCoreProperties.txt`, `GraphemeBreakProperty.txt`, `PropList.txt`, `WordBreakProperty.txt`, `SentenceBreakProperty.txt`, and `emoji-data.txt`, each checked against its SHA-256.
+It writes `property_table.go` and `web/src/lib/text/tables.ts` in their committed layout, so no formatter run follows.
+The tables pack `Grapheme_Cluster_Break`, `Extended_Pictographic`, `Indic_Conjunct_Break`, `Default_Ignorable_Code_Point`, `White_Space`, `Word_Break`, and `Sentence_Break`.
 
 `testdata/GraphemeBreakTest-18.0.0.txt` is the upstream conformance file at its pinned SHA-256.
 The [shared corpus](../spec/input-text-cases.json) supplies the product vectors.
@@ -42,6 +45,7 @@ The Unicode License V3 notice for the data files is in `THIRD_PARTY_NOTICES.md`.
 `web/src/lib/text/text.test.ts` checks the same lines and the same pinned hash in TypeScript.
 `TestCorpusVectorsKeepTheirCountsAndBoundaries` and its TypeScript peer check the shared corpus in both languages.
 `TestEscapeEndFollowsTheRecognitionProfile` and `TestEligibleIgnoresOnlyInvisibleScalarsAndCompleteEscapes` check the recognition rows of the ask acceptance table.
+`TestFieldPasteRefusalNamesTheReason`, `TestSingleLineFieldsRefuseMultilinePaste`, `TestChipKeysActOnTheChipBesideTheCaret`, `TestFieldWindowShowsWholeClustersAndEscapes`, `TestPromptHistoryRowCutsAtAClusterAndEscapesControls`, `TestQuestionAnswerPreservesCanonicalText`, `TestQuestionAnswerOverLimitRefusedWhole`, and `TestQuestionOptionLabelSentByteExact` check the TUI adoption.
 A table change without a matching generator run fails one of those tests or shows in review as a hand edit.
 
 ## Rejected alternatives
@@ -49,3 +53,6 @@ A table change without a matching generator run fails one of those tests or show
 - `github.com/rivo/uniseg`. It lost because its release implements an older Unicode version, and the contract pins 18.0.0.
 - `Intl.Segmenter` in the web client. It lost because each browser ships its own Unicode version, and the contract forbids trusting an advertised runtime version.
 - Separate generators for Go and TypeScript. It lost because two generators can read different data and split one text differently.
+- A TUI-local line-break set. It lost because the shared set already encodes the I03 separators, so a second set drifts.
+- TUI-local grapheme loops over the renderer method. They lost because editing boundaries MUST follow the pinned UAX data, not the width profile.
+- Per-call-site quota counts. They lost because one `Field` quota keeps the 2000-scalar quota identical for typing, paste, and response validation.

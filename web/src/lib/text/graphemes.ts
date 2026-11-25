@@ -1,4 +1,4 @@
-import { propRanges } from "./tables";
+import { paletteBits, scalarPalette, scalarRuns } from "./tables";
 
 const CR = 1;
 const LF = 2;
@@ -28,19 +28,23 @@ const hangulNext: Readonly<Record<number, number>> = {
 	[LVT]: 1 << T,
 };
 
-const range = (i: number): number => propRanges[i] ?? 0;
-
-function packed(cp: number): number {
+function propertyOf(cp: number): number {
+	if (cp < 0 || cp > 0x10ffff) return 0;
+	const target = (cp + 1) << paletteBits;
 	let lo = 0;
-	let hi = propRanges.length / 3;
+	let hi = scalarRuns.length;
 	while (lo < hi) {
 		const mid = (lo + hi) >>> 1;
-		if (range(mid * 3 + 1) < cp) lo = mid + 1;
+		if ((scalarRuns[mid] ?? 0) < target) lo = mid + 1;
 		else hi = mid;
 	}
-	return lo * 3 < propRanges.length && range(lo * 3) <= cp
-		? range(lo * 3 + 2)
-		: 0;
+	if (lo === 0) return 0;
+	const palette = (scalarRuns[lo - 1] ?? 0) & ((1 << paletteBits) - 1);
+	return (scalarPalette[palette] ?? [0, 0, 0])[0] ?? 0;
+}
+
+function packed(cp: number): number {
+	return propertyOf(cp);
 }
 
 class Segmenter {

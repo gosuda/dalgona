@@ -232,7 +232,7 @@ func TestPasteAtByteLimitRefusesMalformedUTF8Whole(t *testing.T) {
 		{"limit exact CJK plus ascii", cjk + "a", cjk + "a", ""},
 		{"limit exact emoji", emoji, emoji, ""},
 		{"limit plus one refused", cjk + "ab", "", "1 MiB"},
-		{"truncated sequence at limit", truncated, "", "Prompt needs valid UTF-8; nothing was inserted"},
+		{"truncated sequence at limit", truncated, "", "Paste holds invalid UTF-8. Nothing was pasted."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -83,7 +83,18 @@ func (m *model) bandSegments() (left, right []segment) {
 		}
 		return append(list, segment{id: id, text: text, rank: rank})
 	}
-	left = []segment{{id: "model", text: cmp.Or(sanitizeText(m.thread.modelName), "default")}}
+	if m.conn.machine != "" {
+		suffix := " [" + m.conn.machinePhase + "]"
+		name := m.conn.machine
+		if m.conn.remote != "" {
+			name = "@" + sanitizeText(m.conn.remote)
+		}
+		if cells := terminalWidth(m.screen.width) - len(suffix); cells >= 4 {
+			name = m.screen.fit(name, cells)
+		}
+		left = append(left, segment{id: "machine", text: name + suffix})
+	}
+	left = append(left, segment{id: "model", text: cmp.Or(sanitizeText(m.thread.modelName), "default")})
 	left = add(left, "effort", m.effortText(icons), 6)
 	left = add(left, "approval", icons.approval[m.thread.approvalMode], 0)
 	left = add(left, "sandbox", icons.sandbox[m.thread.sandbox], 0)
@@ -179,6 +190,9 @@ func renderBand(s *screenState, left, right []segment, width int) string {
 	}
 	if bandCells(s, left, right) > room {
 		left = cutModel(s, left, right, room)
+		if len(left) > 0 && left[0].id == "machine" && bandCells(s, left, right) > room {
+			return s.fit(left[0].text, room)
+		}
 	}
 	return s.fit(bandJoin(s, left, right, room), room)
 }

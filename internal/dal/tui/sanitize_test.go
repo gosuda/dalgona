@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func TestSanitizeTextStripsControlsAndEscapes(t *testing.T) {
@@ -68,5 +70,52 @@ func TestRenderApprovalShowsEveryEscape(t *testing.T) {
 		if !found {
 			t.Fatalf("approval view lacks visible line %q: %q", want, view)
 		}
+	}
+}
+
+func TestDisplayTextEscapesControls(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"line\nkeep\ttab", "line\nkeep\ttab"},
+		{"a\x01b\x7fc", "a<U+0001>b<U+007F>c"},
+		{"x\u0080y", "x<U+0080>y"},
+		{"\x1b[8mhidden\x1b[0m shown", "<U+001B>[8mhidden<U+001B>[0m shown"},
+		{"x\x1b]0;pwn\x07y", "x<U+001B>]0;pwn<U+0007>y"},
+		{"lone\x1b", "lone<U+001B>"},
+		{"naïve", "naïve"},
+		{"é", "é"},
+		{"한", "한"},
+		{"a\u200eb", "a<U+200E>b"},
+		{"a b", "a b"},
+		{"a\U000F0001b", "a\U000F0001b"},
+		{"a￾b", "a￾b"},
+		{"👨\u200d👩", "👨\u200d👩"},
+		{"1️⃣", "1️⃣"},
+	}
+	for _, tc := range cases {
+		if got := displayText(tc.in); got != tc.want {
+			t.Errorf("displayText(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDisplayTextIsIdempotent(t *testing.T) {
+	t.Parallel()
+	for _, text := range []string{"a\x01b", "x\x1b[31mred\x1b[0m", "plain", "a\U000F0001b"} {
+		once := displayText(text)
+		if twice := displayText(once); twice != once {
+			t.Errorf("displayText(%q) applied twice = %q, want %q", text, twice, once)
+		}
+	}
+}
+
+func TestContainsNUL(t *testing.T) {
+	t.Parallel()
+	if !errors.Is(fieldPolicy.Check("a\x00b"), textinput.DisallowedControl) {
+		t.Error("field policy missed an embedded NUL")
+	}
+	if err := fieldPolicy.Check("plain"); err != nil {
+		t.Errorf("field policy flagged clean text: %v", err)
 	}
 }

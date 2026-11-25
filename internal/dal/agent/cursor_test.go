@@ -150,3 +150,93 @@ func TestCursorInBandExecRunsThroughTheGate(t *testing.T) {
 		t.Fatalf("events = %v", h.types(thread.ID()))
 	}
 }
+
+func (c *cursorConn) invoke(id uint32, callID, name, arg, value string) string {
+	encoded, err := wire.AppendValueFromJSON(nil, jsonString(value))
+	if err != nil {
+		c.t.Errorf("encode Cursor argument: %v", err)
+		return ""
+	}
+	c.send(&wire.AgentServerMessage{Exec: &wire.ExecServerMessage{
+		ID: id, Mcp: &wire.McpArgs{
+			ToolNameView: []byte(name), ToolCallIDView: []byte(callID),
+			Args: []wire.McpArgument{{NameView: []byte(arg), ValueView: encoded}},
+		},
+	}})
+	reply := c.awaitExecReply()
+	if reply == nil || reply.McpResult == nil || reply.McpResult.Success == nil || len(reply.McpResult.Success.Content) != 1 {
+		c.t.Errorf("Cursor reply to %s = %+v", callID, reply)
+		return ""
+	}
+	text, err := wire.ConsumeTextMessage(reply.McpResult.Success.Content[0].ContentView)
+	if err != nil {
+		c.t.Errorf("decode Cursor reply: %v", err)
+	}
+	return string(text)
+}
+
+func TestCursorRepeatedHashlineCallCompletesTurn(t *testing.T) {
+	t.Parallel()
+	h := newProfileHarness(t, "hashline-light", withCursor(t, func(c *cursorConn) {
+		first := c.invoke(1, "p1", "patch", "input", createBody)
+		second := c.invoke(2, "p1", "patch", "input", createBody)
+		if first == "" || second != first {
+			t.Errorf("Cursor replies to original and replay = %q and %q", first, second)
+		}
+		c.endTurn("done")
+	}))
+	thread := h.idleThread("create a file")
+	events := h.events(thread.ID())
+	if end := lastTurn(events); end.Status != statusCompleted {
+		t.Fatalf("turn did not complete: %+v", end)
+	}
+	if startsOf(events, "p1") != 1 || approvalsOf(events, "p1") != 1 || !completedOutputs(events)["p1"].OK {
+		t.Fatalf("expected one successful execution: %v", h.types(thread.ID()))
+	}
+}
+
+func TestCursorInBandEditUsesStreamingRequestCutoff(t *testing.T) {
+	t.Parallel()
+	h := newProfileHarness(t, "hashline-light", withCursor(t, func(c *cursorConn) {
+		read := c.invoke(1, "r1", "read", "path", "a.txt")
+		ref := headerReference([]byte(read), "a.txt", "")
+		if ref == "" {
+			t.Errorf("Cursor read reply has no reference: %q", read)
+			c.endTurn("done")
+			return
+		}
+		c.invoke(2, "p1", "patch", "input", "[a.txt@"+ref+"]\nPUT 1:\n+after\n")
+		c.endTurn("done")
+	}))
+	h.write("a.txt", "before\n")
+	thread := h.idleThread("read and edit a file")
+	events := h.events(thread.ID())
+	edit := completedOutputs(events)["p1"]
+	requireHashlineRecovery(t, edit.Meta, hashlineWant{"hashline-light", "needs_context", "none", "reference_unknown", "proof"}, unknownRead)
+	if edit.OK || startsOf(events, "p1") != 0 || h.read("a.txt") != "before\n" {
+		t.Fatalf("the late reference authorized a write: %+v", edit)
+	}
+	_, readCarrier := carrierOf(t, events, "r1")
+	_, editCarrier := carrierOf(t, events, "p1")
+	if editCarrier.ContextSeq != readCarrier.ContextSeq || editCarrier.ContextSeq >= completionSeq(t, events, "r1") {
+		t.Fatalf("in-band cutoffs read=%d, edit=%d; want the same cutoff before the read delivery", readCarrier.ContextSeq, editCarrier.ContextSeq)
+	}
+}
+
+func TestRecoverCursorTurnReviewsNewInBandEdit(t *testing.T) {
+	t.Parallel()
+	judge := &judgeStub{}
+	h := newProfileHarness(t, "hashline-light", withCursor(t, func(c *cursorConn) {
+		c.invoke(1, "p1", "patch", "input", createBody)
+		c.endTurn("done")
+	}), func(h *harness) {
+		h.cfg.EditJudge = judgeFor(judge)
+		h.cfg.Config.EditReview.Enabled = true
+	})
+	h.seed(openTurn("create a file")...)
+	events := h.recoverSession()
+	judged := judgedOf(events)
+	if end := lastTurn(events); end.Status != statusCompleted || len(judged) != 1 || judged[0].CallID != "p1" || len(editStatesOf(judge)) != 1 {
+		t.Fatalf("turn ended %+v with %v reviews and %d judge requests", end, judged, len(editStatesOf(judge)))
+	}
+}

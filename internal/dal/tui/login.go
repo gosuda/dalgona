@@ -179,7 +179,7 @@ func (m *model) loginBodyWidth() int {
 }
 
 func (m *model) loginURLRows(url string) []string {
-	return strings.Split(m.screen.method.Hardwrap(m.screen.nfc(m.screen.expand(url)), m.loginBodyWidth(), true), "\n")
+	return strings.Split(m.screen.method.Hardwrap(m.screen.expand(url), m.loginBodyWidth(), true), "\n")
 }
 
 func (m *model) loginCodeRows(code string) []string {

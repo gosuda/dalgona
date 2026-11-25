@@ -622,13 +622,11 @@ func writeBlob(path string, data []byte) (retErr error) {
 }
 
 func (s *Store) Blob(sha string) ([]byte, error) {
-	if len(sha) != hexHashLen || sha != strings.ToLower(sha) {
-		return nil, fmt.Errorf("journal: bad blob id %q", sha)
+	path, err := s.blobPath(sha)
+	if err != nil {
+		return nil, err
 	}
-	if _, err := hexDecode(sha); err != nil {
-		return nil, fmt.Errorf("journal: bad blob id %q", sha)
-	}
-	data, err := os.ReadFile(filepath.Join(s.blobsDir(), sha))
+	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("journal: blob %s not found", sha)
 	}
@@ -636,6 +634,16 @@ func (s *Store) Blob(sha string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+func (s *Store) blobPath(sha string) (string, error) {
+	if len(sha) != hexHashLen || sha != strings.ToLower(sha) {
+		return "", fmt.Errorf("journal: bad blob id %q", sha)
+	}
+	if _, err := hexDecode(sha); err != nil {
+		return "", fmt.Errorf("journal: bad blob id %q", sha)
+	}
+	return filepath.Join(s.blobsDir(), sha), nil
 }
 
 func (s *Store) Status(session string) (SessionHead, error) {

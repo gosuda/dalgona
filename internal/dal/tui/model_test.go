@@ -23,11 +23,6 @@ type fakeCaller struct {
 	calls []callRecord
 }
 
-func (f *fakeCaller) Notify(method string, params any) error {
-	f.calls = append(f.calls, callRecord{method: method, params: params})
-	return nil
-}
-
 func (f *fakeCaller) Call(_ context.Context, method string, params, result any) error {
 	f.calls = append(f.calls, callRecord{method: method, params: params})
 	switch out := result.(type) {
@@ -44,20 +39,20 @@ func (f *fakeCaller) Call(_ context.Context, method string, params, result any) 
 	return nil
 }
 
-func TestModelInitializeHandshake(t *testing.T) {
+func TestModelUsesConnectionOwnerInitialization(t *testing.T) {
 	t.Parallel()
 	caller := new(fakeCaller)
 	m := newModel(caller, Options{}, nil)
-	if msg, ok := m.initialize()().(resultMsg); !ok || msg.err != nil {
-		t.Fatalf("initialize result = %#v", msg)
+	initialized := rpc.InitializeResult{UserAgent: "dalgona/fixture-version", PlatformFamily: "windows"}
+	m, _ = drive(t, m, resultMsg{op: "initialize", value: &initialized})
+	if len(caller.calls) != 0 {
+		t.Fatalf("initialized event caused another RPC handshake: %#v", caller.calls)
 	}
-	if len(caller.calls) != 2 || caller.calls[0].method != "initialize" || caller.calls[1].method != "initialized" {
-		t.Fatalf("handshake calls = %#v", caller.calls)
+	if m.conn.platformFamily != "windows" {
+		t.Fatalf("platform from handshake was lost: %q", m.conn.platformFamily)
 	}
-	params, ok := caller.calls[0].params.(rpc.InitializeParams)
-	if !ok || params.ClientInfo.Name != "dalgona" {
-		t.Fatalf("initialize params = %#v", caller.calls[0].params)
-	}
+	assertShown(t, m, "dalgona")
+	assertShown(t, m, "fixture-version")
 }
 
 func TestModelShowsConnectionLoss(t *testing.T) {

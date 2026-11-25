@@ -288,6 +288,9 @@ func TestExecMissingCommandFails(t *testing.T) {
 	if result.OK || result.ExitCode == nil || *result.ExitCode == 0 {
 		t.Fatalf("missing binary result ok=%v exit=%v", result.OK, result.ExitCode)
 	}
+	if result.Failure != tool.FailureNone {
+		t.Fatalf("failure = %q, want a nonzero exit to stay ordinary", result.Failure)
+	}
 }
 
 func TestExecUsesWorkspaceDirectory(t *testing.T) {
@@ -307,11 +310,15 @@ func TestExecRejectsBadArguments(t *testing.T) {
 	defer closeRunner()
 	toolExec := New()
 
-	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-6", Args: jsontext.Value(`{"cwd":"."}`)}, env); err == nil {
+	missing, err := toolExec.Run(t.Context(), tool.Call{ID: "run-6", Args: jsontext.Value(`{"cwd":"."}`)}, env)
+	if err == nil {
 		t.Fatal("missing command accepted")
 	}
+	if missing.Failure != tool.FailureNone {
+		t.Fatalf("failure = %q, want invalid arguments to stay ordinary", missing.Failure)
+	}
 
-	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-7", Args: jsontext.Value(`{"command":"true","timeout_ms":0}`)}, env); err == nil {
+	if _, runErr := toolExec.Run(t.Context(), tool.Call{ID: "run-7", Args: jsontext.Value(`{"command":"true","timeout_ms":0}`)}, env); runErr == nil {
 		t.Fatal("zero timeout accepted")
 	}
 
@@ -359,8 +366,12 @@ func TestExecEscalateRunsUnsandboxed(t *testing.T) {
 
 func TestExecRequiresRunner(t *testing.T) {
 	toolExec := New()
-	if _, err := toolExec.Run(t.Context(), tool.Call{ID: "run-10", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{}); err == nil {
+	result, err := toolExec.Run(t.Context(), tool.Call{ID: "run-10", Args: jsontext.Value(`{"command":"true"}`)}, tool.Env{})
+	if err == nil {
 		t.Fatal("missing runner accepted")
+	}
+	if result.Failure != tool.FailureInternal {
+		t.Fatalf("failure = %q, want a missing runner marked internal", result.Failure)
 	}
 }
 

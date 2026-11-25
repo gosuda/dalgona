@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dalgona/failures/read result",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "time",
+    "product",
+    "version",
+    "os",
+    "arch",
+    "class",
+    "tool",
+    "error",
+    "stack",
+    "args",
+    "output",
+    "fingerprint",
+    "contentFree",
+    "reportable",
+    "failingStep"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "product": {
+      "enum": [
+        "dal",
+        "dalgona"
+      ]
+    },
+    "version": {
+      "type": "string"
+    },
+    "os": {
+      "type": "string"
+    },
+    "arch": {
+      "type": "string"
+    },
+    "class": {
+      "enum": [
+        "panic",
+        "tool",
+        "model",
+        "journal",
+        "runtime"
+      ]
+    },
+    "tool": {
+      "type": "string"
+    },
+    "error": {
+      "type": "string"
+    },
+    "stack": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": [
+          "function",
+          "file",
+          "line"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "function": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "args": {
+      "type": "string"
+    },
+    "output": {
+      "type": "string"
+    },
+    "fingerprint": {
+      "type": "string"
+    },
+    "contentFree": {
+      "type": "boolean"
+    },
+    "reportable": {
+      "type": "boolean"
+    },
+    "failingStep": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

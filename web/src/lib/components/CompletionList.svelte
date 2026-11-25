@@ -1,4 +1,6 @@
 <script lang="ts">
+import EscapedText from "#lib/components/EscapedText.svelte";
+
 interface CompletionItem {
 	readonly id: string;
 	readonly primary: string;
@@ -23,8 +25,8 @@ let { id, label, items, active }: Props = $props();
 			aria-selected={index === active ? "true" : "false"}
 			class:active={index === active}
 		>
-			<span class="primary">{item.primary}</span>
-			<span class="secondary">{item.secondary}</span>
+			<span class="primary"><EscapedText text={item.primary} /></span>
+			<span class="secondary"><EscapedText text={item.secondary} /></span>
 		</li>
 	{/each}
 </ul>

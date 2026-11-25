@@ -43,7 +43,7 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 		return tool.Result{}, err
 	}
 	if env.Runner == nil {
-		return tool.Result{}, errors.New("exec: runner is required")
+		return tool.Result{Failure: tool.FailureInternal}, errors.New("exec: runner is required")
 	}
 	command := args.command
 	if env.Masker != nil {
@@ -68,16 +68,19 @@ func (t *Tool) Run(ctx context.Context, call tool.Call, env tool.Env) (tool.Resu
 		Sandbox: runner.Sandbox{Mode: mode, WritableRoots: env.Sandbox.WritableRoots, DeniedSockets: env.Sandbox.DeniedSockets},
 	}
 	if err := env.Runner.Start(ctx, spec); err != nil {
-		return startFailure(err)
+		return startFailure(ctx, err)
 	}
 	return t.wait(ctx, env.Runner, call.ID, args.timeout)
 }
 
-func startFailure(err error) (tool.Result, error) {
+func startFailure(ctx context.Context, err error) (tool.Result, error) {
 	if errors.Is(err, runner.ErrProcessKillGuard) {
 		return tool.Result{OK: false, Output: []byte("refused: process-kill guard prevents signaling daemon or parent")}, nil
 	}
-	return tool.Result{}, fmt.Errorf("exec: start: %w", err)
+	if errors.Is(err, runner.ErrSandboxDowngrade) {
+		return tool.Result{}, fmt.Errorf("exec: start: %w", err)
+	}
+	return tool.Result{Failure: tool.MachineryFailure(ctx, err)}, fmt.Errorf("exec: start: %w", err)
 }
 
 type arguments struct {
@@ -295,12 +298,18 @@ func (s *waitState) appendOutput(data []byte) {
 	}
 }
 
-func projectBounded(tail []byte, total int64, spill string) (string, bool) {
+func (s *waitState) take(out runner.Output) {
+	s.appendOutput(out.Data)
+	s.offset = out.Next
+	s.path = out.Path
+}
+
+func projectBounded(tail []byte, total int64, spill string) string {
 	if total <= execOutputKeep {
-		return string(tail), false
+		return string(tail)
 	}
 	window := trimTailStart(tail)
-	return string(window) + "\n[output truncated: " + strconv.FormatInt(total, 10) + " bytes total; full output: " + spill + "; page it with read offset/limit]", true
+	return string(window) + "\n[output truncated: " + strconv.FormatInt(total, 10) + " bytes total; full output: " + spill + "; page it with read offset/limit]"
 }
 
 func trimTailStart(data []byte) []byte {
@@ -318,14 +327,18 @@ func (t *Tool) wait(ctx context.Context, run runner.Runner, id string, timeout t
 	state := waitState{}
 	delay := 10 * time.Millisecond
 	for {
-		current, readErr := run.Read(waitCtx, id, state.offset)
+		current, readErr := runner.ReadProcessPage(waitCtx, run, id, state.offset, runner.MaxProcessPageBytes)
 		if readErr != nil {
-			readErr = timeoutCauseOr(readErr, waitCtx, ctx)
-			return t.terminate(run, id, state, readErr)
+			failure := tool.MachineryFailure(waitCtx, readErr)
+			result, err := t.terminate(run, id, state, timeoutCauseOr(readErr, waitCtx, ctx))
+			result.Failure = failure
+			return result, err
 		}
-		state.appendOutput(current.Data)
-		state.offset = current.Next
-		state.path = current.Path
+		more := len(current.Data) == runner.MaxProcessPageBytes && current.Next > state.offset
+		state.take(current)
+		if more {
+			continue
+		}
 		if current.Exit != nil {
 			return projectedResult(state, current.Exit), nil
 		}
@@ -357,13 +370,26 @@ func (t *Tool) terminate(run runner.Runner, id string, state waitState, cause er
 	termErr := signalProcess(run, id, runner.SignalTerm)
 	current, waitErr := t.awaitExit(run, id, state.offset, termErr)
 	if current.Path != "" {
-		state.appendOutput(current.Data)
-		state.offset = current.Next
-		state.path = current.Path
+		waitErr = errors.Join(waitErr, state.drainExit(run, id, current))
 	}
 	result := projectedResult(state, current.Exit)
 	result.OK = false
 	return result, errors.Join(cause, termErr, waitErr)
+}
+
+func (s *waitState) drainExit(run runner.Runner, id string, out runner.Output) error {
+	for {
+		more := out.Exit != nil && len(out.Data) == runner.MaxProcessPageBytes && out.Next > s.offset
+		s.take(out)
+		if !more {
+			return nil
+		}
+		next, err := readOnce(run, id, s.offset)
+		if err != nil {
+			return err
+		}
+		out = next
+	}
 }
 
 var errNoExit = errors.New("exec: process did not report an exit after SIGKILL")
@@ -401,7 +427,7 @@ func (t *Tool) killAndAwait(run runner.Runner, id string, offset int64) (runner.
 func readOnce(run runner.Runner, id string, offset int64) (runner.Output, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	return run.Read(ctx, id, offset)
+	return runner.ReadProcessPage(ctx, run, id, offset, runner.MaxProcessPageBytes)
 }
 
 func signalProcess(run runner.Runner, id string, signal runner.Signal) error {
@@ -414,8 +440,11 @@ func signalProcess(run runner.Runner, id string, signal runner.Signal) error {
 }
 
 func projectedResult(state waitState, exit *runner.Exit) tool.Result {
-	projection, _ := projectBounded(state.tail, state.total, state.path)
-	result := tool.Result{Output: []byte(projection), OK: false, Path: state.path}
+	projection := projectBounded(state.tail, state.total, state.path)
+	result := tool.Result{
+		Output: []byte(projection), Path: state.path, ObservedOutputBytes: max(state.total, state.offset),
+		OutputTruncated: state.total > execOutputKeep,
+	}
 	if exit != nil {
 		result.OK = exit.Code == 0
 		result.ExitCode = new(int)

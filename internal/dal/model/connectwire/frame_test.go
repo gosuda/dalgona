@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"testing"
 	"testing/iotest"
 
@@ -83,5 +86,131 @@ func TestTrailerError(t *testing.T) {
 		if err := connectwire.TrailerError([]byte(payload)); err == nil {
 			t.Fatalf("%s was accepted", payload)
 		}
+	}
+}
+
+func frameBytes(size int) []byte {
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte((i*31 + size + 7) & 0xff)
+	}
+	return payload
+}
+
+func mustFrameLen(t *testing.T, size int) uint32 {
+	t.Helper()
+	if size >= 0 && size <= math.MaxUint32 {
+		return uint32(size)
+	}
+	t.Fatalf("frame size %d exceeds uint32 range", size)
+	panic("unreachable")
+}
+
+func TestFrameRoundTripProperty(t *testing.T) {
+	t.Parallel()
+	const limit = 1024
+	r := rand.New(rand.NewSource(1))
+	sizes := []int{0, 1, 2, 7, 127, 255, 256, limit - 1, limit}
+	for i := 0; i < 24; i++ {
+		sizes = append(sizes, r.Intn(limit+1))
+	}
+	flags := []byte{0, connectwire.Compressed, connectwire.EndStream, connectwire.Compressed | connectwire.EndStream}
+	wraps := []func(io.Reader) io.Reader{iotest.OneByteReader, iotest.HalfReader}
+	for _, size := range sizes {
+		checkFrameRoundTrip(t, size, flags, wraps)
+	}
+}
+
+func checkFrameRoundTrip(t *testing.T, size int, flags []byte, wraps []func(io.Reader) io.Reader) {
+	t.Helper()
+	payload := frameBytes(size)
+	for _, flag := range flags {
+		checkFrameFlag(t, flag, payload, size, wraps)
+	}
+}
+
+type frameCase struct {
+	frame   []byte
+	flag    byte
+	payload []byte
+	size    int
+	length  uint32
+	wraps   []func(io.Reader) io.Reader
+}
+
+func checkFrameFlag(t *testing.T, flag byte, payload []byte, size int, wraps []func(io.Reader) io.Reader) {
+	t.Helper()
+	frame := connectwire.AppendFrame(nil, flag, payload)
+	length := mustFrameLen(t, size)
+	if frame[0] != flag || binary.BigEndian.Uint32(frame[1:5]) != length || !bytes.Equal(frame[5:], payload) {
+		t.Fatalf("frame header mismatch size %d flag %d", size, flag)
+	}
+	checkFrameWraps(t, frameCase{frame: frame, flag: flag, payload: payload, size: size, length: length, wraps: wraps})
+	if size > 0 {
+		checkFrameOverCap(t, frame, flag, size)
+	}
+}
+
+func checkFrameWraps(t *testing.T, c frameCase) {
+	t.Helper()
+	for ri, wrap := range c.wraps {
+		got, err := connectwire.ReadFrame(wrap(bytes.NewReader(c.frame)), nil, c.length)
+		if err != nil {
+			t.Fatalf("size %d flag %d reader %d: %v", c.size, c.flag, ri, err)
+		}
+		if got.Flags != c.flag || !bytes.Equal(got.Payload, c.payload) {
+			t.Fatalf("round trip mismatch size %d flag %d reader %d", c.size, c.flag, ri)
+		}
+	}
+}
+
+func checkFrameOverCap(t *testing.T, frame []byte, flag byte, size int) {
+	t.Helper()
+	over := mustFrameLen(t, size-1)
+	want := fmt.Sprintf("connect frame length %d exceeds %d", size, size-1)
+	if _, err := connectwire.ReadFrame(bytes.NewReader(frame), nil, over); err == nil || err.Error() != want {
+		t.Fatalf("over cap size %d flag %d error = %v, want %q", size, flag, err, want)
+	}
+}
+
+func TestFrameCapRoundTripAndRefusal(t *testing.T) {
+	t.Parallel()
+	const frameCap = 16 << 20
+	payload := make([]byte, frameCap)
+	for i := range payload {
+		payload[i] = byte((i * 7) & 0xff)
+	}
+	for _, flag := range []byte{0, connectwire.Compressed, connectwire.EndStream, connectwire.Compressed | connectwire.EndStream} {
+		checkCapFlag(t, flag, payload, frameCap)
+	}
+	checkBigFrame(t, frameCap)
+}
+
+func checkCapFlag(t *testing.T, flag byte, payload []byte, frameCap int) {
+	t.Helper()
+	frame := connectwire.AppendFrame(nil, flag, payload)
+	if binary.BigEndian.Uint32(frame[1:5]) != mustFrameLen(t, frameCap) {
+		t.Fatalf("cap header = %x", frame[:5])
+	}
+	got, err := connectwire.ReadFrame(iotest.HalfReader(bytes.NewReader(frame)), nil, mustFrameLen(t, frameCap))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Flags != flag || !bytes.Equal(got.Payload, payload) {
+		t.Fatalf("cap round trip flag %d mismatch", flag)
+	}
+	over := mustFrameLen(t, frameCap-1)
+	want := fmt.Sprintf("connect frame length %d exceeds %d", frameCap, frameCap-1)
+	if _, err := connectwire.ReadFrame(bytes.NewReader(frame), nil, over); err == nil || err.Error() != want {
+		t.Fatalf("cap over limit error = %v, want %q", err, want)
+	}
+}
+
+func checkBigFrame(t *testing.T, frameCap int) {
+	t.Helper()
+	big := connectwire.AppendFrame(nil, 0, make([]byte, frameCap+1))
+	want := fmt.Sprintf("connect frame length %d exceeds %d", frameCap+1, frameCap)
+	if _, err := connectwire.ReadFrame(bytes.NewReader(big), nil, mustFrameLen(t, frameCap)); err == nil || err.Error() != want {
+		t.Fatalf("big frame error = %v, want %q", err, want)
 	}
 }

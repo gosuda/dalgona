@@ -71,6 +71,13 @@ const (
 	FailureInternal FailureKind = "internal"
 )
 
+func MachineryFailure(ctx context.Context, err error) FailureKind {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return FailureNone
+	}
+	return FailureInternal
+}
+
 type OrdinaryError struct{ Err error }
 
 func (e *OrdinaryError) Error() string { return e.Err.Error() }
@@ -90,12 +97,14 @@ func IsOrdinary(err error) bool {
 }
 
 type Result struct {
-	Output   []byte
-	OK       bool
-	Meta     jsontext.Value
-	ExitCode *int
-	Path     string
-	Failure  FailureKind
+	Output              []byte
+	OK                  bool
+	Meta                jsontext.Value
+	ExitCode            *int
+	Path                string
+	Failure             FailureKind
+	ObservedOutputBytes int64 `json:"-"`
+	OutputTruncated     bool  `json:"-"`
 }
 
 type Tool interface {
@@ -114,9 +123,10 @@ type FileChange struct {
 }
 
 type Plan struct {
-	Files   []FileChange
-	Apply   func(ctx context.Context) (Result, error)
-	Discard func()
+	Files          []FileChange
+	RequestedPaths []string
+	Apply          func(ctx context.Context) (Result, error)
+	Discard        func()
 }
 
 type Editor interface {

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	"path/filepath"
@@ -64,9 +63,7 @@ func (w *worker) gate(ctx context.Context, gc gateCall) (verdict, error) {
 		}
 	}
 	v := w.decide(ctx, gc, requestID)
-	resolved := event.ApprovalResolved{RequestID: requestID, Decision: v.decision, By: v.by, Reason: v.reason, Scores: v.scores}
-	_, err := w.t.appendEvents(ctx, resolved)
-	return v, err
+	return w.gateCommit(ctx, requestID, v)
 }
 
 func summary(gc gateCall) string {
@@ -142,26 +139,6 @@ func walkJSONObject(decoder *jsontext.Decoder, out *[]string) {
 	_, _ = decoder.ReadToken()
 }
 
-func (w *worker) automated(ctx context.Context, gc gateCall) verdict {
-	decider := w.t.host.cfg.Decider
-	if decider == nil {
-		return decline("decider", "declined by decider: no decider is configured")
-	}
-	decision, err := decider.Decide(ctx, w.action(gc))
-	if err != nil {
-		return decline("decider", "declined by decider: "+err.Error())
-	}
-	by := cmp.Or(decision.By, "decider")
-	if !decision.Allow {
-		v := decline(by, cmp.Or(decision.Reason, "declined by decider"))
-		v.scores = decision.Scores
-		return v
-	}
-	v := accept(by)
-	v.reason, v.scores, v.unsandboxed = cmp.Or(decision.Reason, v.reason), decision.Scores, gc.escalate
-	return v
-}
-
 func (w *worker) action(gc gateCall) Action {
 	a := Action{
 		Thread: w.t.id, Tool: gc.call.Name, Class: gc.class, Paths: gc.paths, Project: w.t.created.Cwd,
@@ -208,53 +185,11 @@ func (w *worker) task() string {
 }
 
 func (w *worker) human(ctx context.Context, gc gateCall, requestID string) verdict {
-	if w.t.created.Advisor != "" {
-		return w.automated(ctx, gc)
-	}
-	if prefix := w.matchingGrant(gc); prefix != "" {
-		return accept("grant:" + prefix)
-	}
-	return w.askUser(ctx, gc, requestID)
+	return w.gateHuman(ctx, gc, requestID)
 }
 
 func (w *worker) humanSkippingGrants(ctx context.Context, gc gateCall, requestID string) verdict {
-	if w.t.created.Advisor != "" {
-		return w.automated(ctx, gc)
-	}
-	return w.askUser(ctx, gc, requestID)
-}
-
-func (w *worker) askUser(ctx context.Context, gc gateCall, requestID string) verdict {
-	replies := make(chan Reply, 1)
-	prompt, ok := w.approvalPrompt(gc, requestID)
-	if !ok {
-		return decline("mode:ask", "declined: secret masking failed")
-	}
-	offered, err := ask(ctx, w.t, func(a *actor) bool { return a.offerApproval(prompt, replies) })
-	forwarded, linked := w.t.forwardApproval(prompt, replies)
-	if err != nil {
-		w.t.discardApproval(requestID)
-		if forwarded {
-			prompt.Resolved = true
-			prompt.Resolution = ApprovalResolution("cancel", interruptedReason)
-			w.t.forwardApproval(prompt, nil)
-		}
-		if ctx.Err() != nil {
-			return verdict{decision: "cancel", by: "user", reason: interruptedReason}
-		}
-		return decline("mode:ask", declineNoClient)
-	}
-	v := decline("mode:ask", declineNoClient)
-	if forwarded || (offered && !linked) {
-		v = awaitReply(ctx, replies)
-	}
-	if forwarded {
-		prompt.Resolved = true
-		prompt.Resolution = ApprovalResolution(v.decision, v.reason)
-		w.t.forwardApproval(prompt, nil)
-		w.t.discardApproval(prompt.RequestID)
-	}
-	return v
+	return w.gateHumanSkippingGrants(ctx, gc, requestID)
 }
 
 func (w *worker) approvalPrompt(gc gateCall, requestID string) (ApprovalPrompt, bool) {
@@ -266,6 +201,7 @@ func (w *worker) approvalPrompt(gc gateCall, requestID string) (ApprovalPrompt, 
 	if gc.class == tool.ClassExec {
 		prompt.Command = gc.command
 		prompt.Commands = shellargs.Split(gc.command)
+		prompt.Escalated = gc.escalate
 	}
 	if gc.class != tool.ClassEdit {
 		return prompt, true

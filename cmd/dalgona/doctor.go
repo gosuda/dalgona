@@ -20,7 +20,7 @@ func runDoctor(ctx context.Context, args []string, std stdio) int {
 	return doctor.Run(ctx, doctor.Env{
 		Home:   home,
 		Dial:   func(context.Context) (net.Conn, error) { return client.DialHome(home) },
-		Own:    client.Build(),
+		Own:    config.Build(),
 		Now:    time.Now,
 		Out:    std.out,
 		Online: online,

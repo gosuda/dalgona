@@ -36,5 +36,6 @@ func (a *actor) abandonTurn(ctx context.Context, turnID string) error {
 		return fmt.Errorf("agent: journal turn.completed for %s: %w", turnID, err)
 	}
 	a.t.host.log.Warn(recoveryHalted, "thread", a.t.id, "turn", turnID)
+	a.captureRecoveryHalt(ctx, turnID)
 	return nil
 }

@@ -150,6 +150,9 @@ func TestCtrlCSavesChipDraftExpanded(t *testing.T) {
 	if got := m.input.composer.Expanded(); got != want {
 		t.Fatalf("recalled draft = %q, want %q", got, want)
 	}
+	if got := len(m.input.composer.chips); got != 0 {
+		t.Fatalf("recalled prompt holds %d chips, want plain text", got)
+	}
 	if leaksChipAtom(m.input.composer.Value()) {
 		t.Fatalf("recalled draft holds a chip atom: %q", m.input.composer.Value())
 	}
@@ -398,7 +401,7 @@ func TestChipDraftSavedTwiceStaysSentUnchanged(t *testing.T) {
 func TestHistoryRepeatSetsTheIntentAndASavedDraftReplacesIt(t *testing.T) {
 	t.Parallel()
 	const pasted = "/new now\nb"
-	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	chipFirst := editor{chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
 	typed := editor{text: []rune(pasted)}
 	tests := []struct {
 		name   string
@@ -585,7 +588,7 @@ func TestRecalledDraftMarkIsComparedWithoutCopyingTheDraft(t *testing.T) {
 func TestHistoryEntryPasteIntentUpgradesAnEarlierTypedEntry(t *testing.T) {
 	t.Parallel()
 	const pasted = "// a\nb"
-	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	chipFirst := editor{chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
 	typed := editor{text: []rune(pasted)}
 	var h history
 	h.saveDraft(typed, pasted)
@@ -928,7 +931,7 @@ func TestFailedSendReturnsAheadOfANewerDraftAndStaysSentUnchanged(t *testing.T) 
 
 func TestSavedDraftRecordsTheIntentOfItsDraft(t *testing.T) {
 	t.Parallel()
-	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +11 lines]", text: "// a\nb"}}}
+	chipFirst := editor{chips: []chip{{label: "[Paste #1 +11 lines]", text: "// a\nb"}}}
 	recalled := newEditor()
 	recalled.recall("// a\nb", true)
 	edited := recalled
@@ -992,7 +995,7 @@ func assertComposer(t *testing.T, composer editor, value string, verbatim bool) 
 func TestHistoryRecallCarriesPasteIntentThroughDraftRestore(t *testing.T) {
 	t.Parallel()
 	const pasted = "// a\nb"
-	chipFirst := editor{text: []rune{chipAtom(0)}, chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
+	chipFirst := editor{chips: []chip{{label: "[Paste #1 +2 lines]", text: pasted}}}
 	var h history
 	h.saveDraft(chipFirst, pasted)
 	h.add("other", "")
@@ -1420,6 +1423,26 @@ func TestPromptHistoryLoadsFullPrompt(t *testing.T) {
 	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 	if got := m.input.composer.Value(); got != full {
 		t.Fatalf("composer holds %d bytes, want the full %d byte prompt", len(got), len(full))
+	}
+}
+
+func TestPromptHistoryRowCutsAtAClusterAndStripsControls(t *testing.T) {
+	t.Parallel()
+	head := strings.Repeat("a", 1023)
+	hostile := "x\u001b]0;pwn\u0007y\u202e"
+	m := historyPanel(t, head+"e\u0301 tail", hostile)
+	labels := make([]string, 0, len(m.list.items))
+	for _, item := range m.list.items {
+		labels = append(labels, item.label)
+	}
+	if len(labels) != 2 || labels[1] != head {
+		t.Fatalf("row of the long prompt = %q, want its 1023 bytes before the cluster that crosses byte 1024", labels)
+	}
+	if strings.ContainsAny(labels[0], "\u001b\u0007\u202e") {
+		t.Fatalf("row of the control prompt = %q, want no raw controls", labels[0])
+	}
+	if got := historyTexts(m); got[1] != hostile {
+		t.Fatalf("history holds %q, want the prompt unchanged %q", got[1], hostile)
 	}
 }
 

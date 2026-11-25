@@ -48,9 +48,56 @@ In both lines `<addr>` is the bound listener address. The token stays in the URL
 
 If the listener cannot bind, startup MUST fail with `web: listen on <addr>: <error>`.
 
+## Device pairing
+
+Device pairing MUST use the explicit local daemon home for discovery, grant exchange, and device RPC, not a configured remote through the legacy web session.
+The owner MUST enable the TLS listener explicitly.
+SSH onboarding MUST NOT enable a public listener.
+
+The pairing card MUST contain the canonical TLS origin, persistent machine identity, and relay-specific TLS public-key pin.
+The one-use code MUST be displayed separately from that card.
+The client MUST verify TLS and the expected machine identity before sending the code.
+Every subsequent secret-bearing connection MUST retain those checks.
+The client MUST NOT follow redirects.
+Grant exchange MUST read `/pairing/v1/identity` on the verified connection before it sends the code.
+A device RPC connection MUST first send an unauthenticated upgrade request to `/pairing/v1/rpc`.
+That request MUST return `401` with a bearer challenge and the daemon machine identity, without starting RPC.
+The client MUST check that identity before it sends the credential on the same TLS connection.
+A closed verified connection MUST fail the attempt without retrying the credential on another connection.
+Grant exchange MUST POST one machine frame to `/pairing/v1/exchange` with version 1, a two-byte big-endian length prefix, and a body of at most 1024 bytes.
+
+The daemon MUST own grant exchange, device admission, and revocation.
+An exchange MUST check expiry and machine identity before it consumes the grant.
+Only one concurrent exchange MAY succeed.
+The daemon MUST commit the device credential digest before it returns the credential.
+A failed or uncertain exchange MUST NOT automatically issue another credential.
+Unused grants MUST expire after five minutes and MUST be lost on daemon restart.
+
+The device RPC route MUST accept the credential only in the authorization header.
+It MUST NOT accept the legacy query-token fallback.
+Rejected credentials MUST NOT start an RPC session.
+Device admission MUST complete before the websocket upgrade.
+The daemon MUST associate each admitted stream with its device.
+Revocation MUST prevent new admissions and request dispatch for that device.
+It MUST durably disable the credential and close all registered device streams before it returns success.
+The ordinary device RPC surface MUST exclude grant issuance, device administration, and daemon retirement.
+These API restrictions MUST NOT be described as an operating-system isolation boundary.
+
+The consent surface MUST state that a paired device receives full access to the daemon account.
+Revocation MUST NOT claim to reverse prior actions or remove independently created access.
+Codes and device credentials MUST NOT enter URLs, command arguments, logs, or restored frontend state.
+Unauthenticated exchange requests MUST have bounded input size and execution time.
+
 ## RPC relay
 
-`/rpc` MUST require the query parameter `token`. A missing or wrong token MUST get status 401. The server MUST NOT dial the daemon for a rejected request.
+`/rpc` MUST accept `Authorization: Bearer <token>` from native clients.
+The scheme name `Bearer` is case-insensitive.
+When an `Authorization` header is present, it alone decides acceptance and the query token is ignored.
+Without that header, the existing query parameter `token` decides acceptance for the browser client.
+The server MUST use the digest comparison defined above for the selected credential.
+A missing token, unsupported authorization scheme, or wrong selected token MUST get status 401.
+The server MUST NOT dial the daemon for a rejected request.
+The relay MUST NOT copy a bearer token into a URL or log.
 
 For an accepted token, the server MUST dial the daemon with a 10 second limit before the websocket upgrade.
 A dial failure MUST get status 502 and MUST write `web: dial daemon: <error>`. A dial failure MUST return the body `daemon unavailable`.
@@ -85,7 +132,15 @@ The client in `web/` reads the token from the URL fragment and opens `/rpc`. It 
 The page holds one `Session`, which owns the connection and the page state.
 
 Text input MUST follow [input-text.md](../../dal/spec/input-text.md).
-That contract defines required adapter changes. These requirements do not assert that the existing browser client already conforms.
+`web/src/lib/text/` and `web/src/lib/ime.ts` are the browser input adapters for that contract.
+The composer, the question answers, the resume filter, the API key field, and the review target fields use these adapters.
+The adapter tests read the shared [corpus](../../dal/spec/input-text-cases.json) and the pinned upstream Unicode 18.0.0 GraphemeBreakTest.
+The web client has no free-text settings, title, or path field. The settings panel offers fixed choices only.
+Cluster deletion uses the UAX #29 revision 49 rules in `web/src/lib/text/graphemes.ts` with the property table `web/src/lib/text/tables.ts`.
+`internal/dal/textinput/ucdgen.go` writes that table from the pinned Unicode 18.0.0 data files and checks their SHA-256 hashes first.
+Question text, chips, and file completions show non-layout controls and bidirectional controls as visible code-point marks. The marks are CSS content, so a copy keeps the source text. No real browser copy test is recorded.
+The question card keeps a submitted answer until `serverRequest/resolved`. A `warning` that names `requestId`, `reason`, and `field` MUST restore editing for one corrected response with the same request id.
+No real browser or IME evidence is recorded.
 
 ### Layout
 
@@ -204,6 +259,7 @@ Each file change MUST show its edit review as one line under its diff cards, for
 - `Ctrl+O` MUST open the review for the latest finished row when focus is in the transcript or the composer.
 - The review MUST close on Escape and MUST return focus to the control that opened it.
 - The review MUST load spilled command output one page at a time from `dalgona/item/output/read`.
+- A spill descriptor with the wrong JSON type for path, bytes, or sha256 MUST fail validation without counting as no spill.
 - The rules and the summary text MUST match the Verbosity section of `docs/dal/spec/tui.md`.
 
 ### Markdown

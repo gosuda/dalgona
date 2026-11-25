@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 //go:embed all:dist
@@ -36,20 +38,23 @@ const (
 var errPartialTLS = errors.New("web: cert_file and key_file must both be set")
 
 type Config struct {
-	Listen   string
-	Token    string
-	CertFile string
-	KeyFile  string
+	Listen      string
+	Token       string
+	CertFile    string
+	KeyFile     string
+	PairingDial Dialer
 }
 
 type Dialer func(ctx context.Context) (net.Conn, error)
 
 type server struct {
-	tokenDigest [sha256.Size]byte
-	dial        Dialer
-	logMu       sync.Mutex
-	relays      sync.WaitGroup
-	log         io.Writer
+	tokenDigest  [sha256.Size]byte
+	dial         Dialer
+	pairingDial  Dialer
+	pairingSlots chan struct{}
+	logMu        sync.Mutex
+	relays       sync.WaitGroup
+	log          io.Writer
 }
 
 func Serve(ctx context.Context, cfg Config, dial Dialer, log io.Writer) error {
@@ -81,7 +86,7 @@ func serve(ctx context.Context, cfg Config, site fs.FS, dial Dialer, log io.Writ
 	if err != nil {
 		return err
 	}
-	s := &server{tokenDigest: sha256.Sum256([]byte(token)), dial: dial, log: log}
+	s := &server{tokenDigest: sha256.Sum256([]byte(token)), dial: dial, pairingDial: cfg.PairingDial, pairingSlots: make(chan struct{}, maxPairingRequests), log: log}
 	addr := ln.Addr().String()
 	scheme := "http"
 	if tlsConfig != nil {
@@ -181,6 +186,11 @@ func (s *server) logf(format string, args ...any) {
 func (s *server) run(ctx context.Context, ln net.Listener, pages http.Handler) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/rpc", s.rpc)
+	if s.pairingDial != nil {
+		mux.HandleFunc("GET "+rpc.MachineIdentityPath, s.pairingIdentity)
+		mux.HandleFunc("POST "+rpc.MachineExchangePath, s.pairingExchange)
+		mux.HandleFunc("GET "+rpc.MachineDevicePath, s.deviceRPC)
+	}
 	mux.Handle("/", pages)
 	relayCtx, stopRelays := context.WithCancel(ctx)
 	defer stopRelays()

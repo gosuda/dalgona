@@ -240,6 +240,7 @@ func TestResumeSearchOnlyUsesTheVisibleFilter(t *testing.T) {
 		m = runResumeInput(t, m, tea.PasteMsg{Content: "unrelated answer"})
 		m, _ = runCommands(t, m, pending)
 		m = runResumeInput(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+		m, _ = drive(t, m, requestResolved("t1", "req-1", "cancelled"))
 		if m.textMode() != inputFilter || m.input.field.value() != "" {
 			t.Fatal("dismissing the question did not restore an empty resume filter")
 		}

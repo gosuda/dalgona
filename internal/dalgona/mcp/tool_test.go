@@ -1,7 +1,12 @@
 package mcp
 
 import (
+	"context"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"testing"
+
+	"github.com/gosuda/dalgona/internal/dal/tool"
 )
 
 func TestDecodeToolResult(t *testing.T) {
@@ -51,5 +56,59 @@ func assertToolResult(t *testing.T, testCase toolResultCase, output []byte, ok b
 	}
 	if ok != testCase.wantOK || string(output) != testCase.wantOutput {
 		t.Fatalf("result = (%q, %v), want (%q, %v)", output, ok, testCase.wantOutput, testCase.wantOK)
+	}
+}
+
+type captureTransport struct {
+	method string
+	name   string
+	result string
+}
+
+func (c *captureTransport) request(_ context.Context, _ uint64, method string, params jsontext.Value) (jsontext.Value, error) {
+	c.method = method
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(params, &body); err != nil {
+		return nil, err
+	}
+	c.name = body.Name
+	return jsontext.Value(c.result), nil
+}
+
+func (c *captureTransport) notify(context.Context, string) error { return nil }
+
+func (c *captureTransport) Close() error { return nil }
+
+func TestRewrittenToolKeepsOriginalCallName(t *testing.T) {
+	transport := &captureTransport{result: `{"content":[{"type":"text","text":"ok"}]}`}
+	client := &Client{cfg: Config{Name: "plug:srv"}, transport: transport}
+	adapted, err := client.adaptTool([]byte(`{"name":"a:b","inputSchema":{"type":"object"}}`))
+	if err != nil {
+		t.Fatalf("adapt: %v", err)
+	}
+	requireAdaptedToolName(t, adapted)
+	requireRewrittenToolCall(t, transport, adapted)
+}
+
+func requireAdaptedToolName(t *testing.T, adapted tool.Tool) {
+	t.Helper()
+	if got := adapted.Spec().Name; !safeNamePattern.MatchString(got) || len(got) > maxToolName || got == "plug:srv__a:b" {
+		t.Fatalf("spec name = %q, want a rewritten provider-safe name", got)
+	}
+	if got := LocalToolName(adapted); got != "a:b" {
+		t.Fatalf("local name = %q, want the original", got)
+	}
+}
+
+func requireRewrittenToolCall(t *testing.T, transport *captureTransport, adapted tool.Tool) {
+	t.Helper()
+	result, err := adapted.Run(t.Context(), tool.Call{Args: jsontext.Value(`{}`)}, tool.Env{})
+	if err != nil || !result.OK || string(result.Output) != "ok" {
+		t.Fatalf("run = (%q, %v, %v), want (ok, true, nil)", result.Output, result.OK, err)
+	}
+	if transport.method != "tools/call" || transport.name != "a:b" {
+		t.Fatalf("call = %s %q, want tools/call a:b", transport.method, transport.name)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent/prompt"
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/failure"
 	"github.com/gosuda/dalgona/internal/dal/journal"
 	"github.com/gosuda/dalgona/internal/dal/model"
 	"github.com/gosuda/dalgona/internal/dal/runner"
@@ -27,11 +28,27 @@ type SkillSet func(cwd string) ([]prompt.Skill, error)
 type MemorySource func(ctx context.Context, cwd string) (string, error)
 
 type MCPServerStatus struct {
-	Name       string
-	AuthStatus string
-	Status     string
-	Error      string
-	Tools      []MCPToolStatus
+	Name         string
+	Source       string
+	ConfigDigest string
+	AuthStatus   string
+	Status       string
+	Error        string
+	Tools        []MCPToolStatus
+}
+
+type MCPInventory struct {
+	Version          string
+	TrustedWorkspace bool
+	Servers          []MCPInventoryServer
+}
+
+type MCPInventoryServer struct {
+	Name         string
+	Source       string
+	Effective    bool
+	ConfigDigest string
+	Config       config.MCPServerSpec
 }
 
 type MCPToolStatus struct {
@@ -83,6 +100,7 @@ type HostConfig struct {
 	Providers        ProviderFactory
 	ProvidersWithKey func(provider, key string) (*model.Registry, error)
 	Tools            ToolSet
+	ToolsGeneration  func() uint64
 	Runner           RunnerFactory
 	Decider          Decider
 	Extension        ExtensionFactory
@@ -93,10 +111,13 @@ type HostConfig struct {
 	Skills           SkillSet
 	MemorySource     MemorySource
 	MCPStatus        func(ctx context.Context, cwd string) []MCPServerStatus
+	MCPInventory     func(ctx context.Context, cwd string) (MCPInventory, error)
 	SandboxCause     func() string
 	ToolNotes        []string
 	ProviderIDs      []string
 	ShellEnv         *runner.ShellEnvSnapshot
+	Failures         *failure.Store
+	FailureSink      func(failure.Record)
 }
 
 type Overrides struct {
@@ -113,6 +134,8 @@ type ThreadSpec struct {
 	Runner   string
 	Parent   string
 	Advisor  string
+	ReadOnly bool
+	Profile  string
 	Overrides
 }
 
@@ -174,6 +197,7 @@ type ApprovalPrompt struct {
 	Reason     string
 	Command    string
 	Commands   []string
+	Escalated  bool
 	Paths      []string
 	Files      []ApprovalFile
 	Resolved   bool

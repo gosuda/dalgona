@@ -297,7 +297,7 @@ func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontex
 	if err := decodeParams(params, stringMembers(fields)); err != nil {
 		return nil, err
 	}
-	if err := (textinput.Field{Name: "apiKey"}).Check(p.APIKey); err != nil {
+	if err := (textinput.Field{Name: "apiKey", SingleLine: true}).Check(p.APIKey); err != nil {
 		return nil, invalidParams(err.Error())
 	}
 	if _, err := s.credentials(); err != nil {
@@ -535,8 +535,6 @@ func (s *server) keywordsList(context.Context, jsontext.Value) (jsontext.Value, 
 	}
 	return rpc.Marshal(list)
 }
-
-const maxKeywordText = 64 << 10
 
 func (s *server) keywordsMatch(_ context.Context, params jsontext.Value) (jsontext.Value, error) {
 	var p rpc.KeywordsMatchParams

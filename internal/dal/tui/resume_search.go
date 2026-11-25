@@ -74,7 +74,7 @@ func (m *model) fetchResumeMatches(search *resumeSearch, delay time.Duration) te
 	search.err = ""
 	params := rpc.ThreadSearchParams{Query: search.query, Cursor: search.nextCursor, Limit: 50}
 	conn := m.conn
-	return func() tea.Msg {
+	return conn.link.scope(func() tea.Msg {
 		defer cancel()
 		if delay > 0 {
 			select {
@@ -85,7 +85,7 @@ func (m *model) fetchResumeMatches(search *resumeSearch, delay time.Duration) te
 		reply := &resumeSearchPage{search: search}
 		err := conn.searchResumePage(ctx, params, &reply.page)
 		return resultMsg{op: "resumeSearch", value: reply, err: err}
-	}
+	})
 }
 
 func (c connInfo) searchResumePage(ctx context.Context, params rpc.ThreadSearchParams, page *rpc.ThreadSearchResponse) error {

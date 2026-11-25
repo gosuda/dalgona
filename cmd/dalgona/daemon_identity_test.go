@@ -47,15 +47,15 @@ func servePipe(t *testing.T, extensions map[string]rpcserver.Extension) net.Conn
 }
 
 func TestDaemonIdentityAnswersBeforeInitialize(t *testing.T) {
-	conn := servePipe(t, map[string]rpcserver.Extension{client.MethodIdentity: identityExtension(client.Build(), time.Now())})
+	conn := servePipe(t, map[string]rpcserver.Extension{client.MethodIdentity: identityExtension(config.Build(), time.Now())})
 	peer := rpc.Dial(t.Context(), conn, quietClient{})
 	defer func() { _ = peer.Close() }()
 	var info client.Info
 	if err := peer.Call(t.Context(), client.MethodIdentity, nil, &info); err != nil {
 		t.Fatalf("identity as first message: %v", err)
 	}
-	if info.Build != client.Build() {
-		t.Fatalf("identity build = %q, want %q", info.Build, client.Build())
+	if info.Build != config.Build() {
+		t.Fatalf("identity build = %q, want %q", info.Build, config.Build())
 	}
 	if info.PID != os.Getpid() {
 		t.Fatalf("identity pid = %d, want %d", info.PID, os.Getpid())
@@ -161,7 +161,7 @@ func TestEnsureRefusesOtherBuild(t *testing.T) {
 	if !ok {
 		t.Fatalf("connect error = %v, want BuildMismatchError", err)
 	}
-	want := fmt.Sprintf("daemon runs build %s, this client is build %s; run dalgona restart", otherBuild, client.Build())
+	want := fmt.Sprintf("daemon runs build %s, this client is build %s; run dalgona restart", otherBuild, config.Build())
 	if mismatch.Error() != want {
 		t.Fatalf("connect message = %q, want %q", mismatch.Error(), want)
 	}
@@ -183,7 +183,7 @@ func TestEnsureDeclinedRestartRefuses(t *testing.T) {
 		t.Fatalf("declined restart error = %v", err)
 	}
 	prompt := fmt.Sprintf("daemon %s runs build %s; this client is build %s. Restart the daemon? Running turns stop and recover. [y/N] ",
-		home, otherBuild, client.Build())
+		home, otherBuild, config.Build())
 	if !strings.HasPrefix(out.String(), prompt) {
 		t.Fatalf("prompt = %q, want prefix %q", out.String(), prompt)
 	}
@@ -217,8 +217,8 @@ func TestEnsureAcceptedRestartStartsTheSelectedBackend(t *testing.T) {
 	if err != nil || probe != client.ProbeReady {
 		t.Fatalf("probe after restart = %v, %v", probe, err)
 	}
-	if info.Build != client.Build() || info.PID == os.Getpid() {
-		t.Fatalf("restarted daemon = %+v, want the selected backend build %s in another process", info, client.Build())
+	if info.Build != config.Build() || info.PID == os.Getpid() {
+		t.Fatalf("restarted daemon = %+v, want the selected backend build %s in another process", info, config.Build())
 	}
 }
 
@@ -259,7 +259,7 @@ func serveTestBackend(home string) int {
 }
 
 func testBackendHandler(retire context.CancelFunc) rpc.Handler {
-	identity, retirement := identityExtension(client.Build(), time.Now()), retireExtension(retire)
+	identity, retirement := identityExtension(config.Build(), time.Now()), retireExtension(retire)
 	return func(ctx context.Context, method string, params jsontext.Value) (jsontext.Value, error) {
 		switch method {
 		case client.MethodIdentity:

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
+	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpcserver"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 )
@@ -68,7 +69,7 @@ func TestCheckBuildTreatsMethodNotFoundAsUnknownBuild(t *testing.T) {
 		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{})
 	})
 	defer stopRun(t, cancel, done)
-	_, err := client.CheckBuild(t.Context(), home, client.Build())
+	_, err := client.CheckBuild(t.Context(), home, config.Build())
 	mismatch, ok := errors.AsType[*client.BuildMismatchError](err)
 	if !ok {
 		t.Fatalf("client.CheckBuild error = %v, want client.BuildMismatchError", err)
@@ -83,7 +84,7 @@ func TestRetireCancelsDaemonContext(t *testing.T) {
 	retired := make(chan struct{})
 	ctx, cancelDaemon := context.WithCancel(t.Context())
 	defer cancelDaemon()
-	cancel, done := startServe(t, ctx, home, identityServe(client.Build(), os.Getpid(), func() {
+	cancel, done := startServe(t, ctx, home, identityServe(config.Build(), os.Getpid(), func() {
 		close(retired)
 		cancelDaemon()
 	}))

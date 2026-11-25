@@ -1,8 +1,8 @@
 package textinput
 
 import (
-	"sort"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -33,37 +33,58 @@ type Field struct {
 }
 
 func (f Field) Check(s string) error {
-	reason := f.reason(s)
-	if reason == "" {
-		return nil
+	if reason := checkText(s, f.SingleLine, f.MaxScalars, f.MaxBytes, 0); reason != "" {
+		return &Error{Field: f.Name, Reason: reason}
 	}
-	return &Error{Field: f.Name, Reason: reason}
+	return nil
 }
 
-func (f Field) reason(s string) Reason {
-	switch {
-	case !utf8.ValidString(s):
+func checkText(text string, singleLine bool, maxScalars, maxBytes, maxUTF16 int) Reason {
+	if !utf8.ValidString(text) {
 		return InvalidEncoding
-	case f.MaxBytes > 0 && len(s) > f.MaxBytes:
-		return TextTooLarge
 	}
-	return f.scalarReason(s)
+	if reason := contentReason(text, singleLine); reason != "" {
+		return reason
+	}
+	return quotaReason(text, maxScalars, maxBytes, maxUTF16)
 }
 
-func (f Field) scalarReason(s string) Reason {
-	scalars := 0
-	for _, r := range s {
-		scalars++
-		switch {
-		case f.MaxScalars > 0 && scalars > f.MaxScalars:
-			return TextTooLarge
-		case r == 0:
-			return DisallowedControl
-		case f.SingleLine && IsLineBreak(r):
-			return LineBreakNotAllowed
-		}
+func contentReason(text string, singleLine bool) Reason {
+	switch {
+	case strings.IndexByte(text, 0) >= 0:
+		return DisallowedControl
+	case singleLine && strings.ContainsFunc(text, IsLineBreak):
+		return LineBreakNotAllowed
 	}
 	return ""
+}
+
+func quotaReason(text string, maxScalars, maxBytes, maxUTF16 int) Reason {
+	if maxBytes > 0 && len(text) > maxBytes {
+		return TextTooLarge
+	}
+	if overQuota(text, maxScalars, maxUTF16) {
+		return TextTooLarge
+	}
+	return ""
+}
+
+func overQuota(text string, maxScalars, maxUTF16 int) bool {
+	if maxScalars <= 0 && maxUTF16 <= 0 {
+		return false
+	}
+	scalars, units := 0, 0
+	for _, r := range text {
+		scalars++
+		if maxScalars > 0 && scalars > maxScalars {
+			return true
+		}
+		units += utf16.RuneLen(r)
+		if maxUTF16 > 0 && units > maxUTF16 {
+			return true
+		}
+	}
+	return false
 }
 
 func (f Field) CheckBytes(b []byte) error {
@@ -86,8 +107,7 @@ func NewlinesToLF(s string) string {
 }
 
 func IsWhiteSpace(r rune) bool {
-	i := sort.Search(len(whiteSpaceRanges), func(i int) bool { return whiteSpaceRanges[i].hi >= r })
-	return i < len(whiteSpaceRanges) && whiteSpaceRanges[i].lo <= r
+	return lookup(r).property&whiteSpace != 0
 }
 
 func Blank(s string) bool {
