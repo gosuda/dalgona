@@ -21,6 +21,33 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
+type terminalCheckpointWire struct {
+	CheckpointID  string `json:"checkpointId"`
+	Version       int    `json:"version"`
+	EngineVersion string `json:"engineVersion"`
+	NextOffset    string `json:"nextOffset"`
+	ResizeOrdinal string `json:"resizeOrdinal"`
+	Columns       int    `json:"columns"`
+	Rows          int    `json:"rows"`
+	Total         string `json:"total"`
+	Digest        string `json:"digest"`
+}
+
+type terminalAttachedWire struct {
+	Identity struct {
+		TerminalID       string `json:"terminalId"`
+		DaemonInstanceID string `json:"daemonInstanceId"`
+		ThreadID         string `json:"threadId"`
+	} `json:"identity"`
+	Attachment struct {
+		AttachmentID     string `json:"attachmentId"`
+		WriterLease      string `json:"writerLease"`
+		AcceptedInputSeq string `json:"acceptedInputSeq"`
+	} `json:"attachment"`
+	Checkpoint terminalCheckpointWire `json:"checkpoint"`
+	Status     terminalStatusWire     `json:"status"`
+}
+
 type terminalRig struct {
 	t           *testing.T
 	r           *rig

@@ -56,7 +56,7 @@ func decodeAppKitPasteboard(format ClipboardFormats, data []byte) (ClipboardCont
 		if len(data) == 0 {
 			return ClipboardContent{}, ErrUnsupportedPaste
 		}
-		return ClipboardContent{Image: bytes.Clone(data), ImageType: "image/png"}, nil
+		return ClipboardContent{Image: bytes.Clone(data), ImageType: imagePNGMIME}, nil
 	case ClipboardFiles:
 		files, err := ParseURIList(string(data))
 		if err != nil {

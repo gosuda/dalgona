@@ -11,21 +11,6 @@ import (
 	"github.com/gosuda/dalgona/internal/dalgona/gui/clipboardimage"
 )
 
-func publishTestPNG(t *testing.T, offer clipboardimage.Offer, size image.Point, png []byte) {
-	t.Helper()
-	defer offer.Close()
-	w, _, err := offer.Stage(clipboardimage.Spec{Size: size, PNGBytes: len(png)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := w.Write(png); err != nil {
-		t.Fatal(err)
-	}
-	if err := offer.Publish(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestClipboardPNGOfferRejectsIncompleteOrStalePublication(t *testing.T) {
 	png := testPNG(t, 2, 2)
 	published := []byte("previous clipboard")

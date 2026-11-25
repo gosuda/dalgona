@@ -273,7 +273,7 @@ func (c windowsClipboardCopy) content() (ClipboardContent, error) {
 		if err != nil {
 			return ClipboardContent{}, err
 		}
-		return ClipboardContent{Image: image, ImageType: "image/png"}, nil
+		return ClipboardContent{Image: image, ImageType: imagePNGMIME}, nil
 	case ClipboardFiles:
 		return ClipboardContent{Files: c.files}, nil
 	}
