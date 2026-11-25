@@ -60,23 +60,25 @@ type emitRec struct {
 }
 
 type Store struct {
-	dir        string
-	mirror     *mirrorDB
-	idx        *dbIndex
-	sessions   map[string]*sessionState
-	slocks     map[string]*sync.Mutex
-	lock       *os.File
-	users      *os.File
-	shared     bool
-	syncfsRoot string
-	dirSync    func(string) error
-	mu         sync.Mutex
-	blobMu     sync.Mutex
-	backupStop chan struct{}
-	backupWg   sync.WaitGroup
-	closed     bool
-	ownedMu    sync.Mutex
-	owned      map[string]int
+	dir         string
+	mirror      *mirrorDB
+	idx         *dbIndex
+	sessions    map[string]*sessionState
+	slocks      map[string]*sync.Mutex
+	lock        *os.File
+	users       *os.File
+	shared      bool
+	syncfsRoot  string
+	dirSync     func(string) error
+	rename      func(oldpath, newpath string) error
+	mu          sync.Mutex
+	blobMu      sync.Mutex
+	syncedBlobs map[string]blobFingerprint
+	backupStop  chan struct{}
+	backupWg    sync.WaitGroup
+	closed      bool
+	ownedMu     sync.Mutex
+	owned       map[string]int
 }
 
 var syncfsHook = syncfsDir
@@ -117,12 +119,14 @@ func open(dir string, shared bool) (_ *Store, retErr error) {
 		return nil, errors.New("journal: empty home dir")
 	}
 	s := &Store{
-		dir:      dir,
-		shared:   shared,
-		sessions: map[string]*sessionState{},
-		slocks:   map[string]*sync.Mutex{},
-		owned:    map[string]int{},
-		dirSync:  syncDir,
+		dir:         dir,
+		shared:      shared,
+		sessions:    map[string]*sessionState{},
+		slocks:      map[string]*sync.Mutex{},
+		owned:       map[string]int{},
+		dirSync:     syncDir,
+		rename:      os.Rename,
+		syncedBlobs: map[string]blobFingerprint{},
 	}
 	defer func() {
 		if retErr != nil {
@@ -585,18 +589,20 @@ func (s *Store) PutBlob(data []byte) (string, error) {
 	path := filepath.Join(s.blobsDir(), sha)
 	s.blobMu.Lock()
 	defer s.blobMu.Unlock()
-	if _, err := os.Stat(path); err == nil {
-		return sha, nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	reused, err := s.reuseBlob(path, sha, int64(len(data)))
+	if err != nil {
 		return "", err
 	}
-	if err := writeBlob(path, data); err != nil {
+	if reused {
+		return sha, nil
+	}
+	if err := s.writeBlob(path, sha, data); err != nil {
 		return "", err
 	}
 	return sha, nil
 }
 
-func writeBlob(path string, data []byte) (retErr error) {
+func (s *Store) writeBlob(path, sha string, data []byte) (retErr error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return err
@@ -618,10 +624,7 @@ func writeBlob(path string, data []byte) (retErr error) {
 		return err
 	}
 	closed = true
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(path))
+	return s.renameBlobStage(tmpName, path, sha)
 }
 
 func (s *Store) Blob(sha string) ([]byte, error) {
