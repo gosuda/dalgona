@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func unicodeTextBlock(text string) []uint16 {
@@ -56,15 +56,15 @@ func TestUnicodeTextRefusesMalformedBlocks(t *testing.T) {
 		units []uint16
 		want  error
 	}{
-		{"text after the terminator", []uint16{'a', 0, 'b', 0}, inputtext.DisallowedControl},
-		{"text after terminator padding", []uint16{'a', 0, 0, 0, 'b', 0}, inputtext.DisallowedControl},
-		{"text in the last unit after a NUL", []uint16{'a', 0, 'b'}, inputtext.DisallowedControl},
-		{"no terminator", []uint16{'a', 'b'}, inputtext.InvalidEncoding},
-		{"no code units", nil, inputtext.InvalidEncoding},
-		{"high surrogate before a letter", []uint16{0xD83D, 'a', 0}, inputtext.InvalidEncoding},
-		{"high surrogate before the terminator", []uint16{'a', 0xD83D, 0}, inputtext.InvalidEncoding},
-		{"lone low surrogate", []uint16{0xDE00, 'a', 0}, inputtext.InvalidEncoding},
-		{"reversed surrogate pair", []uint16{0xDE00, 0xD83D, 0}, inputtext.InvalidEncoding},
+		{"text after the terminator", []uint16{'a', 0, 'b', 0}, textinput.DisallowedControl},
+		{"text after terminator padding", []uint16{'a', 0, 0, 0, 'b', 0}, textinput.DisallowedControl},
+		{"text in the last unit after a NUL", []uint16{'a', 0, 'b'}, textinput.DisallowedControl},
+		{"no terminator", []uint16{'a', 'b'}, textinput.InvalidEncoding},
+		{"no code units", nil, textinput.InvalidEncoding},
+		{"high surrogate before a letter", []uint16{0xD83D, 'a', 0}, textinput.InvalidEncoding},
+		{"high surrogate before the terminator", []uint16{'a', 0xD83D, 0}, textinput.InvalidEncoding},
+		{"lone low surrogate", []uint16{0xDE00, 'a', 0}, textinput.InvalidEncoding},
+		{"reversed surrogate pair", []uint16{0xDE00, 0xD83D, 0}, textinput.InvalidEncoding},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,7 +96,7 @@ func TestUnicodeTextBoundsDecodedBytesBeforeDecoding(t *testing.T) {
 	}
 	exact := over[:len(over)-1]
 	exact[len(exact)-1] = 0
-	if got, err := decodeUnicodeText(exact); !errors.Is(err, inputtext.InvalidEncoding) || got != "" {
+	if got, err := decodeUnicodeText(exact); !errors.Is(err, textinput.InvalidEncoding) || got != "" {
 		t.Fatalf("text of exactly 32 MiB that opens with a reversed surrogate pair returned %d bytes, %v; want the size bound to pass and decoding to refuse the pair", len(got), err)
 	}
 }
@@ -110,7 +110,7 @@ func TestUnicodeTextUnitsBoundGlobalSize(t *testing.T) {
 		{size: 2, units: 1},
 		{size: transferLimit, units: transferLimit / 2},
 		{size: transferLimit + 2, want: ErrTransferTooLarge},
-		{size: 7, want: inputtext.InvalidEncoding},
+		{size: 7, want: textinput.InvalidEncoding},
 	}
 	for _, tc := range cases {
 		units, err := unicodeTextUnits(tc.size)

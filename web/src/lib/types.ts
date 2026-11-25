@@ -287,6 +287,14 @@ export type AppNotification =
 			readonly resolution: string | null;
 	  }
 	| {
+			readonly type: "requestWarning";
+			readonly threadId: string;
+			readonly requestId: RequestId;
+			readonly field: string;
+			readonly reason: string;
+			readonly message: string;
+	  }
+	| {
 			readonly type: "loginCompleted";
 			readonly loginId: string | null;
 			readonly success: boolean;
@@ -460,18 +468,15 @@ export interface QuestionSelection {
 	readonly other: string;
 }
 
-export interface QuestionWarning {
-	readonly threadId: string;
-	readonly message: string;
-	readonly requestId: RequestId;
-	readonly reason: string;
+export interface QuestionCorrection {
 	readonly field: string;
+	readonly reason: string;
+	readonly message: string;
 }
 
-export interface QuestionCorrection {
-	readonly questionId: string | null;
-	readonly answerIndex: number | null;
-	readonly reason: string;
+export interface QuestionSubmission {
+	readonly selections: readonly QuestionSelection[];
+	readonly correction: QuestionCorrection | null;
 }
 
 export type ServerRequest = ApprovalRequest | QuestionRequest;
@@ -480,7 +485,6 @@ export interface RpcHandlers {
 	readonly onNotification: (notification: AppNotification) => void;
 	readonly onRequest: (request: ApprovalRequest) => void;
 	readonly onQuestion: (request: QuestionRequest) => void;
-	readonly onQuestionWarning: (warning: QuestionWarning) => void;
 	readonly onStateChange: (state: ConnectionState) => void;
 	readonly onError: (message: string) => void;
 }

@@ -6,7 +6,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -71,7 +71,7 @@ func (u uiaTextUnit) next(text string, i int) int {
 	case uiaByCharacter, uiaByLine, uiaByParagraph:
 	}
 	for i < len(text) {
-		step, err := inputtext.NextBoundary(text, i)
+		step, err := textinput.NextClusterBoundary(text, i)
 		if err != nil || step == i {
 			return len(text)
 		}
@@ -92,7 +92,7 @@ func (u uiaTextUnit) previous(text string, i int) int {
 	case uiaByCharacter, uiaByLine, uiaByParagraph:
 	}
 	for i > 0 {
-		step, err := inputtext.PreviousBoundary(text, i)
+		step, err := textinput.PreviousClusterBoundary(text, i)
 		if err != nil || step == i {
 			return 0
 		}
@@ -124,7 +124,7 @@ func uiaWordNext(text string, i int) int {
 	if err != nil {
 		return len(text)
 	}
-	paint, err := inputtext.PaintRange(text, inputtext.Range{Start: start, End: start})
+	paint, err := textinput.PaintRange(text, textinput.Range{Start: start, End: start})
 	if err != nil {
 		return len(text)
 	}
@@ -132,7 +132,7 @@ func uiaWordNext(text string, i int) int {
 }
 
 func uiaWordPrevious(text string, i int) int {
-	before, err := inputtext.PreviousBoundary(text, i)
+	before, err := textinput.PreviousClusterBoundary(text, i)
 	if err != nil || i == 0 {
 		return 0
 	}
@@ -144,21 +144,21 @@ func uiaSnap(text string, i int) int {
 	for i < len(text) && !utf8.RuneStart(text[i]) {
 		i--
 	}
-	paint, err := inputtext.PaintRange(text, inputtext.Range{Start: i, End: i})
+	paint, err := textinput.PaintRange(text, textinput.Range{Start: i, End: i})
 	if err != nil || i == len(text) {
 		return i
 	}
 	return paint.Start
 }
 
-func uiaSnapRange(text string, r inputtext.Range) inputtext.Range {
+func uiaSnapRange(text string, r textinput.Range) textinput.Range {
 	start, end := uiaSnap(text, r.Start), uiaSnap(text, r.End)
-	return inputtext.Range{Start: min(start, end), End: max(start, end)}
+	return textinput.Range{Start: min(start, end), End: max(start, end)}
 }
 
-func uiaExpand(text string, r inputtext.Range, u uiaTextUnit) inputtext.Range {
+func uiaExpand(text string, r textinput.Range, u uiaTextUnit) textinput.Range {
 	start := u.floor(text, r.Start)
-	return inputtext.Range{Start: start, End: u.next(text, start)}
+	return textinput.Range{Start: start, End: u.next(text, start)}
 }
 
 func uiaMoveOffset(text string, at int, u uiaTextUnit, count int32) (int, int32) {
@@ -178,29 +178,29 @@ func uiaValidEndpoint(endpoint int32) bool {
 	return endpoint == uiaEndpointStart || endpoint == uiaEndpointEnd
 }
 
-func uiaEndpointOf(r inputtext.Range, endpoint int32) int {
+func uiaEndpointOf(r textinput.Range, endpoint int32) int {
 	if endpoint == uiaEndpointEnd {
 		return r.End
 	}
 	return r.Start
 }
 
-func uiaWithEndpoint(r inputtext.Range, endpoint int32, at int) inputtext.Range {
+func uiaWithEndpoint(r textinput.Range, endpoint int32, at int) textinput.Range {
 	if endpoint == uiaEndpointEnd {
-		return inputtext.Range{Start: min(r.Start, at), End: at}
+		return textinput.Range{Start: min(r.Start, at), End: at}
 	}
-	return inputtext.Range{Start: at, End: max(at, r.End)}
+	return textinput.Range{Start: at, End: max(at, r.End)}
 }
 
-func uiaMoveEndpoint(text string, r inputtext.Range, endpoint int32, u uiaTextUnit, count int32) (inputtext.Range, int32) {
+func uiaMoveEndpoint(text string, r textinput.Range, endpoint int32, u uiaTextUnit, count int32) (textinput.Range, int32) {
 	at, moved := uiaMoveOffset(text, uiaEndpointOf(r, endpoint), u, count)
 	return uiaWithEndpoint(r, endpoint, at), moved
 }
 
-func uiaMove(text string, r inputtext.Range, u uiaTextUnit, count int32) (inputtext.Range, int32) {
+func uiaMove(text string, r textinput.Range, u uiaTextUnit, count int32) (textinput.Range, int32) {
 	if r.Start == r.End {
 		at, moved := uiaMoveOffset(text, r.Start, u, count)
-		return inputtext.Range{Start: at, End: at}, moved
+		return textinput.Range{Start: at, End: at}, moved
 	}
 	at, moved := u.floor(text, r.Start), int32(0)
 	for ; count > 0; count-- {
@@ -216,10 +216,10 @@ func uiaMove(text string, r inputtext.Range, u uiaTextUnit, count int32) (inputt
 	if moved == 0 {
 		return r, 0
 	}
-	return inputtext.Range{Start: at, End: u.next(text, at)}, moved
+	return textinput.Range{Start: at, End: u.next(text, at)}, moved
 }
 
-func uiaRangeText(text string, r inputtext.Range, maxUnits int) string {
+func uiaRangeText(text string, r textinput.Range, maxUnits int) string {
 	if r.End-r.Start > TextObjectLimit {
 		r.End = objectEnd(text, r.Start)
 	}
@@ -241,9 +241,9 @@ func utf16Prefix(s string, units int) (string, int) {
 	return s, units
 }
 
-func uiaFind(text string, r inputtext.Range, needle string, backward, fold bool) (inputtext.Range, bool) {
+func uiaFind(text string, r textinput.Range, needle string, backward, fold bool) (textinput.Range, bool) {
 	if needle == "" {
-		return inputtext.Range{}, false
+		return textinput.Range{}, false
 	}
 	starts := make([]int, 0, r.End-r.Start)
 	for i := r.Start; i < r.End; i++ {
@@ -257,11 +257,11 @@ func uiaFind(text string, r inputtext.Range, needle string, backward, fold bool)
 			at = starts[len(starts)-1-k]
 		}
 		end, ok := uiaMatchAt(text[:r.End], at, needle, fold)
-		if ok && inputtext.CheckRange(text, inputtext.Range{Start: at, End: end}) == nil {
-			return inputtext.Range{Start: at, End: end}, true
+		if ok && textinput.CheckRange(text, textinput.Range{Start: at, End: end}) == nil {
+			return textinput.Range{Start: at, End: end}, true
 		}
 	}
-	return inputtext.Range{}, false
+	return textinput.Range{}, false
 }
 
 func uiaMatchAt(text string, at int, needle string, fold bool) (int, bool) {
@@ -294,7 +294,7 @@ func uiaPointOffset(n SemanticNode, p image.Point) int {
 	return 0
 }
 
-func uiaVisibleBoxes(n SemanticNode, r inputtext.Range) []image.Rectangle {
+func uiaVisibleBoxes(n SemanticNode, r textinput.Range) []image.Rectangle {
 	var visible []image.Rectangle
 	for _, box := range n.rangeBoxes(r) {
 		if clipped := box.Intersect(n.Bounds); !clipped.Empty() {

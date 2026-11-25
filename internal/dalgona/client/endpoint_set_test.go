@@ -597,3 +597,100 @@ func TestEndpointSetRefusesMoreThan32EndpointsAndRepeatedIDs(t *testing.T) {
 		t.Fatal("a repeated endpoint id accepted")
 	}
 }
+
+func (d *fakeDaemon) current() *rpc.Conn {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.conns[len(d.conns)-1]
+}
+
+type finishingObserver struct {
+	*recorder
+	first any
+}
+
+func (o *finishingObserver) Requested(context.Context, Link, string, jsontext.Value) (any, error) {
+	return o.first, nil
+}
+
+func acceptCorrectionCheck(seen *[]string) rpc.ResponseCheck {
+	return func(result jsontext.Value) error {
+		var answer string
+		if err := json.Unmarshal(result, &answer); err != nil {
+			return err
+		}
+		*seen = append(*seen, answer)
+		if answer != "good" {
+			return errors.New("the correction has not arrived yet")
+		}
+		return nil
+	}
+}
+
+func startServerQuestion(t *testing.T, conn *rpc.Conn, got *string, seen *[]string) <-chan error {
+	t.Helper()
+	called := make(chan error, 1)
+	go func() {
+		called <- conn.CallIDChecked(t.Context(), "q-1", rpc.CheckedCall{Method: "test/question", Check: acceptCorrectionCheck(seen)}, got)
+	}()
+	return called
+}
+
+func requireServerCorrection(t *testing.T, called <-chan error, got string, seen []string) {
+	t.Helper()
+	select {
+	case err := <-called:
+		if err != nil || got != "good" {
+			t.Fatalf("the server received %q (%v), want %q", got, err, "good")
+		}
+	default:
+		t.Fatal("the second answer never reached the server")
+	}
+	if !slices.Equal(seen, []string{"bad", "still-bad", "good"}) {
+		t.Fatalf("the server saw answers %q, want the first answer and both corrections", seen)
+	}
+}
+
+func TestRespondSendsASecondAnswerForAFinishedRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		daemon := newFakeDaemon()
+		defer close(daemon.hold)
+		observer := &finishingObserver{recorder: newRecorder(), first: "bad"}
+		set := openSet(t, observer, EndpointSpec{ID: "work", Label: "work", Kind: EndpointDaemon, Dial: daemon.Dial})
+		if err := set.Connect("work"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		link := observer.link(t, "work")
+		var got string
+		var seen []string
+		called := startServerQuestion(t, daemon.current(), &got, &seen)
+		synctest.Wait()
+		if err := set.Respond(t.Context(), link, "q-1", "still-bad"); err != nil {
+			t.Fatalf("Respond with a corrected answer: %v", err)
+		}
+		synctest.Wait()
+		if err := set.Respond(t.Context(), link, "q-1", "good"); err != nil {
+			t.Fatalf("Respond with a second correction: %v", err)
+		}
+		synctest.Wait()
+		requireServerCorrection(t, called, got, seen)
+	})
+}
+
+func TestRespondRejectsAnUnknownRequestID(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rec := newRecorder()
+		daemon := newFakeDaemon()
+		defer close(daemon.hold)
+		set := openSet(t, rec, EndpointSpec{ID: "work", Label: "work", Kind: EndpointDaemon, Dial: daemon.Dial})
+		if err := set.Connect("work"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		link := rec.link(t, "work")
+		if err := set.Respond(t.Context(), link, "no-such-request", "good"); err == nil {
+			t.Fatal("Respond accepted an unknown request id")
+		}
+	})
+}

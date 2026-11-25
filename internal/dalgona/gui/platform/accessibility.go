@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 var ErrAccessibilityBusy = errors.New("the application is busy; retry the accessibility action")
@@ -26,7 +26,7 @@ type AccessibilityIntent struct {
 	Revision     uint64
 	Action       AccessibilityAction
 	Value        string
-	Selection    inputtext.Range
+	Selection    textinput.Range
 	SelectionEnd NodeID
 }
 

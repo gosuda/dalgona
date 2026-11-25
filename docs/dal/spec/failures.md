@@ -81,7 +81,7 @@ Frames normalize by removing headers, arguments, offsets, receiver addresses, an
 
 `Fingerprint` is the full lowercase SHA-256 over NUL-separated fields `failure-v1`, product, class, tool, then each normalized `function@file`. No trailing NUL is used. Product version and line numbers never enter the hash. A version-only rebuild creates no new issue. Empty and content-free stacks contribute `no-stack`. Ids, error text, arguments, output, and timestamps never enter it. SHA-256 collision risk is negligible, but semantic coalescing is not: distinct stackless failures of one product, class, and tool share a fingerprint. Fingerprint equality MUST NOT prove that a local case reproduces an issue.
 
-`Reportable` is true only for dalgona origin main. `ReportText` renders the shared title and body from masked records with no network imports. `dal` consumes it directly for manual output. `dal failures` lists the local records newest first with id, time, class, and tool. `dal failures <id>` prints the report text of one record to file by hand. An id that is not 32 lowercase hexadecimal digits or names no record fails with exit status 1.
+`Reportable` is true only for dalgona origin main. `ReportText` renders the shared title and body from masked records with no network imports. `dal` consumes it directly for manual output. `dal failures` lists the local records newest first with id, time, class, and tool. `dal failures <id>` prints the report text of one record to a file. An id that is not 32 lowercase hexadecimal digits or names no record fails with exit status 1.
 
 ## Converter
 

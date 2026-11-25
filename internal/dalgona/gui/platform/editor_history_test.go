@@ -10,7 +10,7 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -37,13 +37,13 @@ func cycleLetter(i int) string {
 
 func replaceAll(t *testing.T, ed *Editor, text string) {
 	t.Helper()
-	if err := ed.Replace(inputtext.Range{End: len(ed.Draft().Text)}, text); err != nil {
+	if err := ed.Replace(textinput.Range{End: len(ed.Draft().Text)}, text); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestEditorKeepsTheLastThousandUndoStepsAcross100kEdits(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	for i := range historyEdits {
 		replaceAll(t, rig.editor, cycleLetter(i))
 		if i%contractUndoSteps != contractUndoSteps-1 {
@@ -58,7 +58,7 @@ func TestEditorKeepsTheLastThousandUndoStepsAcross100kEdits(t *testing.T) {
 		rig.press("Z", key.ModShortcut)
 		rig.frame()
 		want := cycleLetter(historyEdits - 1 - min(k, contractUndoSteps))
-		rig.wantDraft(inputtext.Draft{Text: want, Selection: caretAt(1)})
+		rig.wantDraft(textinput.Draft{Text: want, Selection: caretAt(1)})
 		rig.wantShown(want)
 	}
 	for range contractUndoSteps {
@@ -66,7 +66,7 @@ func TestEditorKeepsTheLastThousandUndoStepsAcross100kEdits(t *testing.T) {
 		rig.frame()
 	}
 	last := cycleLetter(historyEdits - 1)
-	rig.wantDraft(inputtext.Draft{Text: last, Selection: caretAt(1)})
+	rig.wantDraft(textinput.Draft{Text: last, Selection: caretAt(1)})
 	rig.wantShown(last)
 }
 
@@ -76,7 +76,7 @@ func TestEditorUndoHistoryKeepsTheNewestStepsWithin32MiB(t *testing.T) {
 	text := ""
 	for i := range 20 {
 		next := strings.Repeat(cycleLetter(i), block)
-		ed.record(inputtext.Draft{Text: text}, inputtext.Draft{Text: next})
+		ed.record(textinput.Draft{Text: text}, textinput.Draft{Text: next})
 		text = next
 	}
 	kept, held := len(ed.history), 0
@@ -94,8 +94,8 @@ func TestEditorUndoHistoryKeepsTheNewestStepsWithin32MiB(t *testing.T) {
 func TestEditorUndoHistoryKeepsANewestStepLargerThan32MiB(t *testing.T) {
 	var ed Editor
 	huge := []string{strings.Repeat("x", 17<<20), strings.Repeat("y", 17<<20)}
-	ed.record(inputtext.Draft{Text: "a"}, inputtext.Draft{Text: huge[0]})
-	ed.record(inputtext.Draft{Text: huge[0]}, inputtext.Draft{Text: huge[1]})
+	ed.record(textinput.Draft{Text: "a"}, textinput.Draft{Text: huge[0]})
+	ed.record(textinput.Draft{Text: huge[0]}, textinput.Draft{Text: huge[1]})
 	if len(ed.history) != 1 || ed.history[0].removed != huge[0] || ed.history[0].inserted != huge[1] {
 		t.Fatalf("%d undo steps after one %d-byte replacement; want that replacement alone", len(ed.history), 2*len(huge[0]))
 	}
@@ -103,7 +103,7 @@ func TestEditorUndoHistoryKeepsANewestStepLargerThan32MiB(t *testing.T) {
 
 func TestEditorBoundsGioHistoryBytes(t *testing.T) {
 	const block = 3 << 20
-	ed, err := NewEditor(prompt(block), inputtext.Draft{})
+	ed, err := NewEditor(prompt(block), textinput.Draft{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,10 +116,10 @@ func TestEditorBoundsGioHistoryBytes(t *testing.T) {
 }
 
 func TestEditorResetsGioHistoryOnlyOutsideComposition(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "hello", Selection: caretAt(5)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "hello", Selection: caretAt(5)})
 	rig.press(key.NameLeftArrow, key.ModShift)
 	rig.frame()
-	rig.wantDraft(inputtext.Draft{Text: "hello", Selection: inputtext.Range{Start: 4, End: 5}})
+	rig.wantDraft(textinput.Draft{Text: "hello", Selection: textinput.Range{Start: 4, End: 5}})
 	rig.editor.widgetEdits = contractUndoSteps
 	rig.frame()
 	if gio := gioHistory(&rig.editor.widget).Len(); gio != 1 {
@@ -141,13 +141,13 @@ func TestEditorResetsGioHistoryOnlyOutsideComposition(t *testing.T) {
 	rig.ime.windowsResult("한")
 	rig.ime.windowsEndComposition()
 	rig.frame()
-	rig.wantDraft(inputtext.Draft{Text: "hell한", Selection: caretAt(7)})
+	rig.wantDraft(textinput.Draft{Text: "hell한", Selection: caretAt(7)})
 	rig.wantShown("hell한")
 	if gio := gioHistory(&rig.editor.widget).Len(); gio != 1 {
 		t.Fatalf("Gio holds %d history entries after the commit, want the deferred reset", gio)
 	}
 	rig.press("Z", key.ModShortcut)
 	rig.frame()
-	rig.wantDraft(inputtext.Draft{Text: "hello", Selection: inputtext.Range{Start: 4, End: 5}})
+	rig.wantDraft(textinput.Draft{Text: "hello", Selection: textinput.Range{Start: 4, End: 5}})
 	rig.wantShown("hello")
 }

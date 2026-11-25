@@ -9,7 +9,7 @@ import (
 	"math"
 	"unicode/utf16"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -317,7 +317,7 @@ type utf16Cursor struct {
 }
 
 func (c *utf16Cursor) to(offset int) uint32 {
-	c.units += inputtext.Count(c.text[c.at:offset], inputtext.UTF16Units)
+	c.units += textinput.Count(c.text[c.at:offset], textinput.UTF16Units)
 	c.at = offset
 	return appKitIndex(c.units)
 }
@@ -355,9 +355,9 @@ func appendAppKitBox(b []byte, text string, l appKitLine) []byte {
 	return b
 }
 
-func appKitSelection(value string, r inputtext.Range) (location, length uint32) {
-	start, startErr := inputtext.Convert(value, r.Start, inputtext.Bytes, inputtext.UTF16Units)
-	end, endErr := inputtext.Convert(value, r.End, inputtext.Bytes, inputtext.UTF16Units)
+func appKitSelection(value string, r textinput.Range) (location, length uint32) {
+	start, startErr := textinput.Convert(value, r.Start, textinput.Bytes, textinput.UTF16Units)
+	end, endErr := textinput.Convert(value, r.End, textinput.Bytes, textinput.UTF16Units)
 	if startErr != nil || endErr != nil || start > end {
 		return appKitNone, 0
 	}
@@ -445,10 +445,10 @@ func (i appKitIntent) resolve(s *SemanticSnapshot) (AccessibilityIntent, error) 
 	intent := AccessibilityIntent{Node: i.node, Revision: i.revision, Action: i.action}
 	switch i.action {
 	case ActionSetValue:
-		if intent.Value, err = inputtext.DecodeUTF16(i.value); err != nil {
+		if intent.Value, err = textinput.DecodeUTF16(i.value); err != nil {
 			return AccessibilityIntent{}, fmt.Errorf("the accessibility value is not valid UTF-16; enter the text again: %w", err)
 		}
-		intent.Selection = inputtext.Range{Start: len(intent.Value), End: len(intent.Value)}
+		intent.Selection = textinput.Range{Start: len(intent.Value), End: len(intent.Value)}
 	case ActionSelectText:
 		intent.Selection, err = appKitByteRange(n.Value, i.location, i.length)
 	case ActionActivate, ActionFocus, ActionScrollIntoView, ActionLoadText:
@@ -456,13 +456,13 @@ func (i appKitIntent) resolve(s *SemanticSnapshot) (AccessibilityIntent, error) 
 	return intent, err
 }
 
-func appKitByteRange(value string, location, length uint32) (inputtext.Range, error) {
-	start, startErr := inputtext.Convert(value, int(location), inputtext.UTF16Units, inputtext.Bytes)
-	end, endErr := inputtext.Convert(value, int(location)+int(length), inputtext.UTF16Units, inputtext.Bytes)
+func appKitByteRange(value string, location, length uint32) (textinput.Range, error) {
+	start, startErr := textinput.Convert(value, int(location), textinput.UTF16Units, textinput.Bytes)
+	end, endErr := textinput.Convert(value, int(location)+int(length), textinput.UTF16Units, textinput.Bytes)
 	if err := errors.Join(startErr, endErr); err != nil {
-		return inputtext.Range{}, fmt.Errorf("the accessibility selection splits a character or leaves the text; select the text again: %w", err)
+		return textinput.Range{}, fmt.Errorf("the accessibility selection splits a character or leaves the text; select the text again: %w", err)
 	}
-	return inputtext.Range{Start: start, End: end}, nil
+	return textinput.Range{Start: start, End: end}, nil
 }
 
 func serveAppKitIntents(r io.Reader, tree *AccessibilityTree, refuse func(error)) error {
@@ -490,7 +490,7 @@ func requestAppKitIntent(tree *AccessibilityTree, record appKitIntent) error {
 			return err
 		}
 		if n.TextContainer {
-			return tree.textView(s, n.ID).selectUnits(int(record.location), int(record.location)+int(record.length), inputtext.UTF16Units)
+			return tree.textView(s, n.ID).selectUnits(int(record.location), int(record.location)+int(record.length), textinput.UTF16Units)
 		}
 	}
 	intent, err := record.resolve(s)

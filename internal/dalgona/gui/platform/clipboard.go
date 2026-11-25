@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const transferLimit = 32 << 20
@@ -71,12 +71,12 @@ func ReadText(r io.Reader) (string, error) {
 	if len(data) > transferLimit {
 		return "", ErrTransferTooLarge
 	}
-	text, err := inputtext.DecodeUTF8(data)
+	text, err := textinput.DecodeUTF8(data)
 	if err != nil {
 		return "", err
 	}
 	if strings.IndexByte(text, 0) >= 0 {
-		return "", inputtext.DisallowedControl
+		return "", textinput.DisallowedControl
 	}
 	return text, nil
 }
@@ -86,9 +86,9 @@ func CheckCopy(text string) error {
 	case len(text) > transferLimit:
 		return ErrTransferTooLarge
 	case !utf8.ValidString(text):
-		return inputtext.InvalidEncoding
+		return textinput.InvalidEncoding
 	case strings.IndexByte(text, 0) >= 0:
-		return inputtext.DisallowedControl
+		return textinput.DisallowedControl
 	}
 	return nil
 }
@@ -99,7 +99,7 @@ type PasteTarget struct {
 	Thread    string
 	Field     string
 	Revision  uint64
-	Selection inputtext.Range
+	Selection textinput.Range
 }
 
 func (t PasteTarget) Check(current PasteTarget) error {

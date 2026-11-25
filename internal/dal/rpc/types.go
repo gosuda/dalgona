@@ -443,8 +443,11 @@ type (
 		RemainingMS int64  `json:"remainingMs"`
 	}
 	WarningNotification struct {
-		ThreadID string `json:"threadId"`
-		Message  string `json:"message"`
+		ThreadID  string `json:"threadId"`
+		Message   string `json:"message"`
+		RequestID string `json:"requestId,omitzero"`
+		Reason    string `json:"reason,omitzero"`
+		Field     string `json:"field,omitzero"`
 	}
 	SandboxChosenNotification struct {
 		ThreadID string `json:"threadId"`

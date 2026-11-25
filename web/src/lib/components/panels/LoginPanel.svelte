@@ -1,13 +1,8 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
-import {
-	faultNotices,
-	isWhitespaceOnly,
-	refuseSingleLineInsertion,
-	selectDeletedCluster,
-	singleLineFault,
-} from "#lib/inputtext.ts";
+import { oneLine } from "#lib/oneLine.ts";
 import type { Session } from "#lib/session.svelte.ts";
+import { isBlank } from "#lib/text/validate.ts";
 import type { LoginMethod } from "#lib/types.ts";
 
 interface Props {
@@ -54,25 +49,17 @@ $effect(() => {
 	});
 });
 
-function keyRefusal(key: string): string | null {
-	const fault = singleLineFault(key);
-	if (fault !== null) return faultNotices[fault];
-	return isWhitespaceOnly(key) ? "Enter the API key." : null;
-}
-
 function submitKey(event: SubmitEvent): void {
 	event.preventDefault();
 	if (keyBusy) return;
 	const provider = picked;
 	if (provider === null) return;
-	formError = keyRefusal(apiKey);
-	if (formError !== null) return;
+	if (isBlank(apiKey)) {
+		formError = "Enter the API key.";
+		return;
+	}
+	formError = null;
 	void session.startLogin(provider, "apiKey", apiKey);
-}
-
-function guardKey(event: ClipboardEvent | DragEvent): void {
-	const fault = refuseSingleLineInsertion(event);
-	formError = fault === null ? null : faultNotices[fault];
 }
 
 function startBrowser(provider: string): void {
@@ -138,14 +125,12 @@ function close(): void {
 						spellcheck="false"
 						bind:value={apiKey}
 						readonly={keyBusy}
-						aria-invalid={formError === null && keyError === null ? "false" : "true"}
 						aria-describedby="{uid}-error"
-						onpaste={guardKey}
-						ondrop={guardKey}
-						onkeydown={(event) => selectDeletedCluster(event, event.currentTarget)}
+						oninput={() => (formError = null)}
+						{@attach oneLine((message) => (formError = message))}
 					/>
 					{#if formError !== null || keyError !== null}
-						<p id="{uid}-error" class="field-error" role="alert">{formError ?? keyError}</p>
+						<p id="{uid}-error" class="field-error">{formError ?? keyError}</p>
 					{/if}
 					<button type="submit" class="point" aria-disabled={keyBusy ? "true" : undefined}>Log in</button>
 				</form>

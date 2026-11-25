@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type Step uint8
@@ -228,7 +228,7 @@ func (d *Document) findInBlock(i int, query string, found *[]Selection, limit in
 		start, end := at+hit, at+hit+len(query)
 		_, width := utf8.DecodeRuneInString(projection.Text[start:])
 		at = start + width
-		if inputtext.CheckRange(projection.Text, inputtext.Range{Start: start, End: end}) != nil {
+		if textinput.CheckRange(projection.Text, textinput.Range{Start: start, End: end}) != nil {
 			continue
 		}
 		count++

@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -253,7 +253,7 @@ func dragQueryFile(handle, index uintptr) (string, error) {
 	if copied&clipboardUintBits != length {
 		return "", errClipboardFileName
 	}
-	file, err := inputtext.DecodeUTF16(name[:length])
+	file, err := textinput.DecodeUTF16(name[:length])
 	if err != nil {
 		return "", fmt.Errorf("read copied file %d: %w; rename the file to valid Unicode and copy it again", index+1, err)
 	}

@@ -140,7 +140,7 @@ describe("login panel", () => {
 		);
 	});
 
-	test("an API key with significant spaces is sent exactly", async () => {
+	test("an API key login sends the key exactly as typed and refuses a blank one", async () => {
 		const { session, rpc } = await connected({
 			"dalgona/account/providers/list": providers([
 				{ id: "openai", login: "apiKey", signedIn: false },
@@ -153,29 +153,27 @@ describe("login panel", () => {
 		});
 		await fireEvent.click(await screen.findByLabelText(/openai/));
 		const field = screen.getByLabelText("API key for openai");
-		await fireEvent.input(field, { target: { value: " \u3000" } });
+		await fireEvent.input(field, { target: { value: " \u3000 " } });
 		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
-		expect(screen.getByRole("alert").textContent).toBe("Enter the API key.");
-		await fireEvent.input(field, { target: { value: " sk-test\t" } });
+		expect(screen.getByText("Enter the API key.")).toBeTruthy();
+		expect(
+			rpc.calls.filter((call) => call.method === "account/login/start"),
+		).toEqual([]);
+		await fireEvent.input(field, { target: { value: "  sk-test  " } });
 		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
 		await vi.waitFor(() =>
-			expect(
-				rpc.calls.filter((call) => call.method === "account/login/start"),
-			).toEqual([
-				{
-					method: "account/login/start",
-					params: { type: "apiKey", provider: "openai", apiKey: " sk-test\t" },
-				},
-			]),
+			expect(rpc.calls).toContainEqual({
+				method: "account/login/start",
+				params: { type: "apiKey", provider: "openai", apiKey: "  sk-test  " },
+			}),
 		);
 	});
 
-	test("a pasted key with a line break or NUL is refused whole and not echoed", async () => {
-		const { session, rpc } = await connected({
+	test("an API key paste with a line break inserts nothing and says why", async () => {
+		const { session } = await connected({
 			"dalgona/account/providers/list": providers([
 				{ id: "openai", login: "apiKey", signedIn: false },
 			]),
-			"account/login/start": () => ({ type: "apiKey" }),
 		});
 		session.openPanel("login");
 		render(LoginPanel, {
@@ -185,25 +183,15 @@ describe("login panel", () => {
 		const field = screen.getByLabelText(
 			"API key for openai",
 		) as HTMLInputElement;
-		const inserted = await fireEvent.paste(field, {
-			clipboardData: { getData: () => "sk-secret\n" },
-		});
-		expect(inserted).toBe(false);
-		const alert = screen.getByRole("alert");
-		expect(alert.textContent).toBe(
-			"This field takes one line. Paste or drop text without line breaks.",
-		);
-		expect(field.getAttribute("aria-describedby")).toBe(alert.id);
-		expect(field.value).toBe("");
-		await fireEvent.input(field, { target: { value: "sk\0secret" } });
-		await fireEvent.click(screen.getByRole("button", { name: "Log in" }));
-		expect(screen.getByRole("alert").textContent).toBe(
-			"This text has a NUL character. Remove it to continue.",
-		);
-		expect(document.body.textContent).not.toContain("secret");
+		await fireEvent.input(field, { target: { value: "sk-" } });
+		const clipboardData = {
+			getData: (type: string) => (type === "text/plain" ? "sk-test\n" : ""),
+		};
+		expect(await fireEvent.paste(field, { clipboardData })).toBe(false);
+		expect(field.value).toBe("sk-");
 		expect(
-			rpc.calls.some((call) => call.method === "account/login/start"),
-		).toBe(false);
+			screen.getByText("This field takes one line. Nothing was pasted."),
+		).toBeTruthy();
 	});
 
 	test("a browser login waits for account/login/completed and reloads models", async () => {

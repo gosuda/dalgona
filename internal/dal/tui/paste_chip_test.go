@@ -48,59 +48,6 @@ func TestPrivateUseInsidePasteChipStaysByteExact(t *testing.T) {
 	}
 }
 
-func TestSingleLineFieldsRefuseMultilinePaste(t *testing.T) {
-	t.Parallel()
-	setup := []struct {
-		name  string
-		open  func(t *testing.T) model
-		value func(m model) string
-	}{
-		{name: "filter", open: func(t *testing.T) model {
-			return openModelPicker(t, new(fakeCaller))
-		}, value: func(m model) string { return m.input.field.value() }},
-		{name: "target", open: func(t *testing.T) model {
-			m := openModelPicker(t, new(fakeCaller))
-			m.list.pending = "baseBranch"
-			return m
-		}, value: func(m model) string { return m.input.field.value() }},
-		{name: "answer", open: func(t *testing.T) model {
-			free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
-				`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
-			m, _ := openQuestion(t, free)
-			return m
-		}, value: func(m model) string { return m.input.field.value() }},
-		{name: "api key", open: func(t *testing.T) model {
-			m := openLoginPanel(t, new(fakeCaller), "openai")
-			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
-			return m
-		}, value: func(m model) string { return m.input.field.value() }},
-	}
-	for _, field := range setup {
-		t.Run(field.name, func(t *testing.T) {
-			t.Parallel()
-			checkSingleLineRefusal(t, field.open, field.value)
-		})
-	}
-}
-
-func checkSingleLineRefusal(t *testing.T, open func(t *testing.T) model, value func(m model) string) {
-	t.Helper()
-	for _, in := range []string{"one\ntwo", "one\rtwo", "one\r\ntwo", "one\u000btwo", "one\u2028two"} {
-		m := open(t)
-		m.input.field = textField{text: []rune("prior"), cursor: 5}
-		m, _ = drive(t, m, tea.PasteMsg{Content: in})
-		if got := value(m); got != "prior" {
-			t.Fatalf("%q: field holds %q, want the prior value kept whole", in, got)
-		}
-		if m.input.field.cursor != 5 {
-			t.Fatalf("%q: cursor at %d, want 5", in, m.input.field.cursor)
-		}
-		if !strings.Contains(m.notice, "takes one line") {
-			t.Fatalf("%q: notice %q, want a visible one-line refusal", in, m.notice)
-		}
-	}
-}
-
 func TestFieldPasteRefusalNamesTheReason(t *testing.T) {
 	t.Parallel()
 	prior := textField{text: []rune("prior"), cursor: 5}

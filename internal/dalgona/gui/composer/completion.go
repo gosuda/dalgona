@@ -11,7 +11,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
 )
 
@@ -21,7 +21,7 @@ type fileRequest struct {
 	key     state.DraftKey
 	cwd     string
 	query   string
-	span    inputtext.Range
+	span    textinput.Range
 	textGen uint64
 	ticket  uint64
 }

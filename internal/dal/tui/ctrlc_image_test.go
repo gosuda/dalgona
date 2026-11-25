@@ -66,7 +66,7 @@ func TestCtrlCSavesTextAndSaysImagesAreDropped(t *testing.T) {
 		t.Fatalf("hint = %q, want %q", m.hint.text, want)
 	}
 	if got := historyTexts(m); !slices.Equal(got, []string{"note "}) {
-		t.Fatalf("history = %q, want the typed text with its space kept", got)
+		t.Fatalf("history = %q, want the typed text with its space", got)
 	}
 	if got := m.input.composer.Value(); got != "" || len(m.input.composer.images()) != 0 {
 		t.Fatalf("draft %q with %d images after Ctrl+C, want it cleared", got, len(m.input.composer.images()))

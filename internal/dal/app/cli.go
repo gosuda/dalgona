@@ -19,6 +19,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type CLIEnv struct {
@@ -204,7 +205,10 @@ func (env CLIEnv) pipedInput() (string, error) {
 	if len(data) > pipedInputLimit {
 		return "", fmt.Errorf("piped input is larger than %d bytes; write it to a file and ask the agent to read it", pipedInputLimit)
 	}
-	return strings.TrimRight(strings.ToValidUTF8(string(data), "\uFFFD"), "\r\n"), nil
+	if err := (textinput.Field{Name: "stdin"}).CheckBytes(data); err != nil {
+		return "", fmt.Errorf("%w; pipe UTF-8 text without NUL", err)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func isTerminal(in io.Reader) bool {

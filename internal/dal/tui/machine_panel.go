@@ -307,7 +307,9 @@ func (p *machinePanel) insert(text string) {
 		return
 	}
 	p.err = ""
-	p.form.field.insert(text)
+	if err := p.form.field.insert(text); err != nil {
+		p.err = "Enter one valid line for this field"
+	}
 }
 
 func (m *machineModel) machineFormKey(msg tea.KeyPressMsg) tea.Cmd {

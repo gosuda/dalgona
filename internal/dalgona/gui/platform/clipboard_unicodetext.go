@@ -4,7 +4,7 @@ import (
 	"slices"
 	"unicode/utf16"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func unicodeTextUnits(size uintptr) (uintptr, error) {
@@ -12,7 +12,7 @@ func unicodeTextUnits(size uintptr) (uintptr, error) {
 	case size > transferLimit:
 		return 0, ErrTransferTooLarge
 	case size%2 != 0:
-		return 0, inputtext.InvalidEncoding
+		return 0, textinput.InvalidEncoding
 	}
 	return size / 2, nil
 }
@@ -21,13 +21,13 @@ func decodeUnicodeText(units []uint16) (string, error) {
 	end := slices.Index(units, 0)
 	switch {
 	case end < 0:
-		return "", inputtext.InvalidEncoding
+		return "", textinput.InvalidEncoding
 	case slices.ContainsFunc(units[end:], isTextUnit):
-		return "", inputtext.DisallowedControl
+		return "", textinput.DisallowedControl
 	case utf8Length(units[:end]) > transferLimit:
 		return "", ErrTransferTooLarge
 	}
-	return inputtext.DecodeUTF16(units[:end])
+	return textinput.DecodeUTF16(units[:end])
 }
 
 func isTextUnit(unit uint16) bool {

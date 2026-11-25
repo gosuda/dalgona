@@ -1,16 +1,8 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
-import {
-	faultNotices,
-	isWhitespaceOnly,
-	multilineText,
-	refuseSingleLineInsertion,
-	selectDeletedCluster,
-	singleLineFault,
-	type TextFault,
-	textFault,
-} from "#lib/inputtext.ts";
+import { oneLine } from "#lib/oneLine.ts";
 import type { Session } from "#lib/session.svelte.ts";
+import { isBlank } from "#lib/text/validate.ts";
 import type { ReviewTarget } from "#lib/types.ts";
 
 interface Props {
@@ -26,47 +18,19 @@ let instructions = $state("");
 let error = $state("");
 let busy = $state(false);
 
-function refusal(
-	fault: TextFault | null,
-	value: string,
-	blankNotice: string,
-): string | null {
-	if (fault !== null) return faultNotices[fault];
-	return isWhitespaceOnly(value) ? blankNotice : null;
-}
-
 function target(): ReviewTarget | string {
 	if (kind === "baseBranch") {
-		const problem = refusal(
-			singleLineFault(branch),
-			branch,
-			"Enter a base branch.",
-		);
-		return problem ?? { type: kind, branch };
+		return isBlank(branch) ? "Enter a base branch." : { type: kind, branch };
 	}
 	if (kind === "commit") {
-		const problem = refusal(singleLineFault(sha), sha, "Enter a commit id.");
-		return problem ?? { type: kind, sha };
+		return isBlank(sha) ? "Enter a commit id." : { type: kind, sha };
 	}
 	if (kind === "custom") {
-		const problem = refusal(
-			textFault(instructions),
-			instructions,
-			"Enter review instructions.",
-		);
-		return problem ?? { type: kind, instructions };
+		return isBlank(instructions)
+			? "Enter review instructions."
+			: { type: kind, instructions };
 	}
 	return { type: kind };
-}
-
-function guardLine(event: ClipboardEvent | DragEvent): void {
-	const fault = refuseSingleLineInsertion(event);
-	error = fault === null ? "" : faultNotices[fault];
-}
-
-function typeInstructions(event: Event): void {
-	if (event instanceof InputEvent && event.isComposing) return;
-	instructions = multilineText(instructions);
 }
 
 async function start(): Promise<void> {
@@ -97,44 +61,19 @@ async function start(): Promise<void> {
 			<label><input type="radio" name="review-target" value="uncommittedChanges" bind:group={kind} /> Uncommitted changes</label>
 			<label><input type="radio" name="review-target" value="baseBranch" bind:group={kind} /> Base branch</label>
 			{#if kind === "baseBranch"}
-				<input
-					type="text"
-					bind:value={branch}
-					aria-label="Base branch name"
-					aria-invalid={error === "" ? "false" : "true"}
-					aria-describedby={error === "" ? undefined : "review-error"}
-					onpaste={guardLine}
-					ondrop={guardLine}
-					onkeydown={(event) => selectDeletedCluster(event, event.currentTarget)}
-				/>
+				<input type="text" bind:value={branch} aria-label="Base branch name" oninput={() => (error = "")} {@attach oneLine((message) => (error = message))} />
 			{/if}
 			<label><input type="radio" name="review-target" value="commit" bind:group={kind} /> Commit</label>
 			{#if kind === "commit"}
-				<input
-					type="text"
-					bind:value={sha}
-					aria-label="Commit id"
-					aria-invalid={error === "" ? "false" : "true"}
-					aria-describedby={error === "" ? undefined : "review-error"}
-					onpaste={guardLine}
-					ondrop={guardLine}
-					onkeydown={(event) => selectDeletedCluster(event, event.currentTarget)}
-				/>
+				<input type="text" bind:value={sha} aria-label="Commit id" oninput={() => (error = "")} {@attach oneLine((message) => (error = message))} />
 			{/if}
 			<label><input type="radio" name="review-target" value="custom" bind:group={kind} /> Custom</label>
 			{#if kind === "custom"}
-				<textarea
-					bind:value={instructions}
-					aria-label="Review instructions"
-					aria-invalid={error === "" ? "false" : "true"}
-					aria-describedby={error === "" ? undefined : "review-error"}
-					oninput={typeInstructions}
-					onkeydown={(event) => selectDeletedCluster(event, event.currentTarget)}
-				></textarea>
+				<textarea bind:value={instructions} aria-label="Review instructions"></textarea>
 			{/if}
 		</fieldset>
 		{#if error !== ""}
-			<p class="error" id="review-error" role="alert">{error}</p>
+			<p class="error" role="alert">{error}</p>
 		{/if}
 	{/snippet}
 	{#snippet footer()}

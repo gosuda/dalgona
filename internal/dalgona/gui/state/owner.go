@@ -56,19 +56,24 @@ func (o *Owner) Notified(link client.Link, method string, params jsontext.Value)
 	o.post(notifyMsg{link: link, method: method, params: params, at: time.Now()})
 }
 
-func (o *Owner) Arrived(link client.Link, method string, params jsontext.Value) {
-	if method == rpc.MethodRequest {
-		o.post(arrivalMsg{link: link, params: params})
+func requestIDOf(method string, params jsontext.Value) (string, error) {
+	header, err := decode[rpc.RequestParams](params)
+	if method != rpc.MethodRequest || err != nil || header.Details.RequestID == "" {
+		return "", rpc.NativeKind(rpc.ErrorIncompatible)
 	}
+	return header.Details.RequestID, nil
 }
 
 func (o *Owner) Requested(ctx context.Context, link client.Link, method string, params jsontext.Value) (any, error) {
-	header, err := decode[rpc.RequestParams](params)
-	if method != rpc.MethodRequest || err != nil || header.Details.RequestID == "" {
-		return nil, rpc.NativeKind(rpc.ErrorIncompatible)
+	requestID, err := requestIDOf(method, params)
+	if err != nil {
+		return nil, err
 	}
 	waiter := make(chan reply, 1)
-	if !o.post(awaitMsg{link: link, request: header.Details.RequestID, waiter: waiter}) {
+	if !o.post(arrivalMsg{link: link, params: params}) {
+		return nil, rpc.NativeKind(rpc.ErrorUnavailable)
+	}
+	if !o.post(awaitMsg{link: link, request: requestID, waiter: waiter}) {
 		return nil, rpc.NativeKind(rpc.ErrorUnavailable)
 	}
 	select {

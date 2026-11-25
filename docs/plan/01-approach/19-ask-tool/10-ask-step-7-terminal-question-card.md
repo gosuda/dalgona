@@ -79,6 +79,7 @@ Preserve unaffected card tests. Update the existing immediate-row expectations t
 - `TestQuestionCardMultiSelectKeepsOptionOrder`
 - `TestQuestionCardOtherText` (the composer holds `Mongo`; `enter` gives `{"q1":{"answers":["Mongo"]}}`)
 - `TestQuestionCardFreeText` (free text opens input mode at once)
+  Coverage now resides in `TestSecondRequestKeepsTypedAnswer`.
 - `TestQuestionCardSubmitNowSkips`
 - `TestQuestionCardEscCancelsWithEmptyAnswers` (`{"answers":{}}`)
 - `TestQuestionCardClosedByResolvedNotification`

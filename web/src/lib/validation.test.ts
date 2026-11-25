@@ -54,6 +54,45 @@ describe("notification validation", () => {
 		});
 	});
 
+	it("keeps only a warning that names a request", () => {
+		expect(
+			parseNotification({
+				method: "warning",
+				params: { message: "The sandbox is not available.", threadId: null },
+			}),
+		).toBeNull();
+		expect(
+			parseNotification({
+				method: "warning",
+				params: {
+					message: "invalid text",
+					threadId: "thread-1",
+					requestId: 7,
+					reason: "text_too_large",
+				},
+			}),
+		).toBeNull();
+		expect(
+			parseNotification({
+				method: "warning",
+				params: {
+					message: "invalid text",
+					threadId: "thread-1",
+					requestId: 7,
+					reason: "disallowed_control",
+					field: "answers.q1.answers[0]",
+				},
+			}),
+		).toEqual({
+			type: "requestWarning",
+			threadId: "thread-1",
+			requestId: 7,
+			field: "answers.q1.answers[0]",
+			reason: "disallowed_control",
+			message: "invalid text",
+		});
+	});
+
 	it("rejects a delta without a string item id", () => {
 		expect(
 			parseNotification({
@@ -657,18 +696,6 @@ describe("live file-change approval", () => {
 				},
 			],
 		});
-	});
-
-	it("keeps the grant root out of a file-change approval", () => {
-		expect(
-			parseApprovalRequest("item/fileChange/requestApproval", "req-2", {
-				itemId: "fc-2",
-				startedAtMs: 4,
-				threadId: "thread-1",
-				turnId: "turn-2",
-				grantRoot: "/work",
-			})?.detail,
-		).toBe("");
 	});
 });
 

@@ -100,7 +100,7 @@ Status: `internal/dalgona/gui/document` keeps immutable source, revisions, block
 Each run in a projection maps to its source span.
 Tail blocks keep a provisional key until they close.
 `State.Publish` remaps the selection, focus, scroll anchor, and pending renderer keys in one step.
-Grapheme boundaries and unit conversions come from `internal/dal/inputtext`.
+Grapheme boundaries and unit conversions come from `internal/dal/textinput`.
 
 ## D04. Render Markdown and GFM
 
@@ -246,9 +246,7 @@ Windows MUST share immutable pixel allocations through the application LRU rathe
 Full-image previews MUST use bounded viewport tiles and release obsolete tiles before admitting replacements.
 These ceilings are design limits, not measured performance claims.
 
-The user MUST be able to fold a code block of ten or more lines.
-The user MUST be able to fold a diff file section of more than one line.
-The user MUST be able to fold a top-level quotation.
+The user MUST be able to fold a code block of ten or more lines. The user MUST be able to fold a diff file section of more than one line and a top-level quotation.
 A folded block MUST show one header row.
 The header row MUST show the first row of the block and the count of hidden rows.
 The header row MUST give the user an action to expand the block.
@@ -362,16 +360,13 @@ A failure MUST show its cause, source location when known, Retry, and intact sou
 Retry MUST follow the worker restart policy in D11.
 
 Status: `internal/dalgona/gui/figure` compiles D2 with the bundled dagre layout.
-It refuses D2 imports, icons, and image shapes at their source spans.
-It also refuses sketch mode, fill patterns, and other layout engines at their source spans.
+It refuses D2 imports, icons, and image shapes, sketch mode, fill patterns, and other layout engines at their source spans.
 D2 Markdown labels are parsed by the `internal/dalgona/gui/document` model and laid out as native text runs measured with the D2 Source Sans Pro faces.
 `internal/dalgona/gui/figure/math` parses and lays out D2 LaTeX labels. It draws them as glyph outlines. The formula source is the semantic label.
 It runs the vendored Mermaid, elkjs, entities, nomnoml, and graphre bundles in QuickJS without a host API.
 The files `js/SHA256SUMS` and `js/NOTICE` pin the bytes, versions, and licenses of these bundles.
 The owned decoder changes raw SVG and engine SVG into a validated display list.
-The decoder covers the geometry, path, coordinate, paint, definition, gradient, and text rows of the profile.
-It also resolves the engine styles and the engine shadow filter.
-Gio fills paths only with the nonzero rule.
+The decoder covers the geometry, path, coordinate, paint, definition, gradient, and text rows of the profile. It resolves the engine styles and the engine shadow filter.
 Thus even-odd fills and radial gradients become raster tiles.
 Masks and clips are decomposed into exact trapezoid regions, so overlapping mask shapes, partial luminance or alpha, and `evenodd` clip children keep their meaning.
 A gradient inside a mask is drawn in bands of 1/64 of its offset. At most one mask gradient may shade one area.
@@ -439,8 +434,7 @@ Status: `internal/dalgona/gui/figure/math` parses this grammar into an owned sem
 It enforces the formula source, nesting, node, and array bounds in D11.
 It reports each refusal with its source span.
 It reads the OpenType MATH table itself.
-The layout puts fractions, scripts, primes, operator limits, radicals, accents, and braces into positioned glyphs, rules, and text runs.
-It also lays out stretchy delimiters, arrays, alignment environments, and tags.
+The layout puts fractions, scripts, primes, operator limits, radicals, accents, braces, stretchy delimiters, arrays, alignment environments, and tags into positioned glyphs, rules, and text runs.
 A `gui` build draws these items from the glyph outlines of the math font and the document text face.
 `internal/dalgona/gui/platform` embeds STIX Two Math 2.13 b171, and `MathFontData` returns it only after it checks the pinned SHA-256.
 The caller passes those bytes to `ParseFont`. The caller passes Hanken Grotesk with the Pretendard fallback from `MathTextFaceData` to `NewTextFont` for text runs and missing math glyphs.

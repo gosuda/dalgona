@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type TextPoint struct {
@@ -139,19 +139,19 @@ func (p TextPoint) offset(n SemanticNode) int {
 	return p.Byte
 }
 
-func (v textView) point(pos int, unit inputtext.Unit) (TextPoint, error) {
+func (v textView) point(pos int, unit textinput.Unit) (TextPoint, error) {
 	return v.locate(pos, unit, false)
 }
 
-func (v textView) locate(pos int, unit inputtext.Unit, clampEnd bool) (TextPoint, error) {
+func (v textView) locate(pos int, unit textinput.Unit, clampEnd bool) (TextPoint, error) {
 	if pos < 0 {
-		return TextPoint{}, inputtext.InvalidOffset
+		return TextPoint{}, textinput.InvalidOffset
 	}
 	for _, id := range v.parts() {
 		n := v.snap.nodes[id]
-		prefix := inputtext.Count(n.TextBefore, unit)
+		prefix := textinput.Count(n.TextBefore, unit)
 		if pos < prefix {
-			at, err := inputtext.Convert(n.TextBefore, pos, unit, inputtext.Bytes)
+			at, err := textinput.Convert(n.TextBefore, pos, unit, textinput.Bytes)
 			return TextPoint{Node: id, Byte: at - len(n.TextBefore)}, err
 		}
 		pos -= prefix
@@ -162,9 +162,9 @@ func (v textView) locate(pos int, unit inputtext.Unit, clampEnd bool) (TextPoint
 		if err != nil {
 			return TextPoint{}, err
 		}
-		length := inputtext.Count(n.Value, unit)
+		length := textinput.Count(n.Value, unit)
 		if pos <= length {
-			at, err := inputtext.Convert(n.Value, pos, unit, inputtext.Bytes)
+			at, err := textinput.Convert(n.Value, pos, unit, textinput.Bytes)
 			return TextPoint{Node: id, Byte: at}, err
 		}
 		pos -= length
@@ -172,7 +172,7 @@ func (v textView) locate(pos int, unit inputtext.Unit, clampEnd bool) (TextPoint
 	if clampEnd || pos == 0 {
 		return v.whole().End, nil
 	}
-	return TextPoint{}, inputtext.InvalidOffset
+	return TextPoint{}, textinput.InvalidOffset
 }
 
 func (v textView) read(r TextRange) (string, error) {
@@ -187,7 +187,7 @@ func (v textView) readUTF16(r TextRange, maxUnits int) (string, error) {
 		return "", nil
 	}
 	if order, err := v.compare(r.Start, r.End); err != nil || order > 0 {
-		return "", cmp.Or(err, error(inputtext.InvalidOffset))
+		return "", cmp.Or(err, error(textinput.InvalidOffset))
 	}
 	first, last := v.snap.textOrder[r.Start.Node], v.snap.textOrder[r.End.Node]
 	if first == last && r.Start.Byte >= 0 && r.End.Byte >= 0 {
@@ -297,16 +297,16 @@ func boundedTextPrefix(text string, limit int) (string, error) {
 	for !utf8.RuneStart(text[limit]) {
 		limit--
 	}
-	at, err := inputtext.PaintRange(text, inputtext.Range{Start: limit, End: limit})
+	at, err := textinput.PaintRange(text, textinput.Range{Start: limit, End: limit})
 	return text[:at.Start], err
 }
 
 func textSlice(text string, start, end int) (string, error) {
 	if start < 0 || end < start || end > len(text) {
-		return "", inputtext.InvalidOffset
+		return "", textinput.InvalidOffset
 	}
 	if !scalarBoundary(text, start) || !scalarBoundary(text, end) {
-		return "", inputtext.InvalidOffset
+		return "", textinput.InvalidOffset
 	}
 	return text[start:end], nil
 }
@@ -321,7 +321,7 @@ func (v textView) selectRange(r TextRange) error {
 	}
 	order, err := v.compare(r.Start, r.End)
 	if err != nil || order > 0 {
-		return cmp.Or(err, error(inputtext.InvalidOffset))
+		return cmp.Or(err, error(textinput.InvalidOffset))
 	}
 	start, err := v.selectionPoint(r.Start, true)
 	if err != nil {
@@ -334,7 +334,7 @@ func (v textView) selectRange(r TextRange) error {
 			return err
 		}
 	}
-	return v.tree.Request(AccessibilityIntent{Node: start.Node, Revision: v.snap.Revision(), Action: ActionSelectText, Selection: inputtext.Range{Start: start.Byte, End: end.Byte}, SelectionEnd: end.Node})
+	return v.tree.Request(AccessibilityIntent{Node: start.Node, Revision: v.snap.Revision(), Action: ActionSelectText, Selection: textinput.Range{Start: start.Byte, End: end.Byte}, SelectionEnd: end.Node})
 }
 
 func (v textView) selectionPoint(p TextPoint, start bool) (TextPoint, error) {
@@ -348,13 +348,13 @@ func (v textView) selectionPoint(p TextPoint, start bool) (TextPoint, error) {
 		return TextPoint{}, err
 	}
 	at := max(0, p.offset(n))
-	if err := inputtext.CheckRange(n.Value, inputtext.Range{Start: at, End: at}); err != nil {
+	if err := textinput.CheckRange(n.Value, textinput.Range{Start: at, End: at}); err != nil {
 		return TextPoint{}, err
 	}
 	return TextPoint{Node: p.Node, Byte: at}, nil
 }
 
-func (v textView) selectUnits(start, end int, unit inputtext.Unit) error {
+func (v textView) selectUnits(start, end int, unit textinput.Unit) error {
 	r, err := v.unitsRange(start, end, unit)
 	if err != nil {
 		return err
@@ -362,9 +362,9 @@ func (v textView) selectUnits(start, end int, unit inputtext.Unit) error {
 	return v.tree.SelectTextRange(v.snap, r)
 }
 
-func (v textView) unitsRange(start, end int, unit inputtext.Unit) (TextRange, error) {
+func (v textView) unitsRange(start, end int, unit textinput.Unit) (TextRange, error) {
 	if start > end {
-		return TextRange{}, inputtext.InvalidOffset
+		return TextRange{}, textinput.InvalidOffset
 	}
 	from, err := v.point(start, unit)
 	if err != nil {

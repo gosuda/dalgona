@@ -524,8 +524,7 @@ The tuple contains style, decimal contract version, workspace, consumer, and the
 exact final post-hook payload bytes, in that order. Each length is an unsigned
 64-bit big-endian byte count.
 
-The dispatcher computes the identity and the fingerprint after argument
-validation and before preparation. Then it deduplicates the call:
+The dispatcher computes the identity and fingerprint after argument validation and before preparation, then deduplicates the call:
 
 - A `request` below `generation` comes from an earlier open, so its evidence expired.
   The dispatcher MUST refuse the call with `reference_expired` and MUST NOT prepare it.
@@ -537,10 +536,7 @@ validation and before preparation. Then it deduplicates the call:
 - A repeated identity after the first dispatch ended MUST replay that result with `replayed=true`.
 - A repeated identity appends no journal record. The records of the first dispatch hold the invocation.
 
-The fold rejects a repeated call id in one assistant message. So only an in-band
-re-dispatch in the same streaming request can repeat an identity in a live host.
-Live deduplication lasts as long as that streaming request.
-
+The fold rejects a repeated call id in one assistant message. Only an in-band re-dispatch in the same streaming request can repeat an identity in a live host. Live deduplication lasts as long as that streaming request.
 The host appends `hashline.invocation_started` in one batch with `tool.started`.
 This occurs after preparation and approval, because the start must name a call in flight.
 A call that preparation or approval refuses has no invocation records.

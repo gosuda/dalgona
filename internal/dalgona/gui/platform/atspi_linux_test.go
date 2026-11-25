@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const atspiTestBusConfig = `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
@@ -169,7 +169,7 @@ func atspiTestTree() []SemanticNode {
 	return []SemanticNode{
 		{ID: "transcript", Role: RoleDocument, Name: "Transcript", Bounds: image.Rect(5, 5, 800, 600)},
 		{ID: "plan", Parent: "transcript", Role: RoleHeading, Name: "Plan", Level: 2, Bounds: image.Rect(10, 10, 300, 40)},
-		{ID: "composer/main", Parent: "transcript", Role: RoleTextField, Name: "Message", Action: "Edit", Value: atspiTestText, Selection: inputtext.Range{Start: 7, End: 18}, Bounds: image.Rect(10, 500, 700, 580)},
+		{ID: "composer/main", Parent: "transcript", Role: RoleTextField, Name: "Message", Action: "Edit", Value: atspiTestText, Selection: textinput.Range{Start: 7, End: 18}, Bounds: image.Rect(10, 500, 700, 580)},
 		{ID: "token", Parent: "transcript", Role: RoleSecureField, Name: "API token", Action: "Edit"},
 		{ID: "token-error", Parent: "token", Role: RoleError, Name: "The token is empty", Target: "token"},
 		{ID: "send", Parent: "transcript", Role: RoleButton, Name: "Send", Action: "Send", Disabled: true, Reason: "Connect to a daemon first", Bounds: image.Rect(710, 500, 790, 580)},
@@ -202,7 +202,7 @@ func TestATSPIMissingTextRequestsLoad(t *testing.T) {
 	f.want(group, "org.a11y.atspi.Text.GetText", args, "😀\n\nL")
 	f.want(group, "org.a11y.atspi.Text.GetCharacterAtOffset", []any{int32(4)}, int32('L'))
 	f.want(group, "org.a11y.atspi.Text.SetSelection", []any{int32(0), int32(1), int32(5)}, true)
-	f.wantIntent(AccessibilityIntent{Node: "cached", Revision: 2, Action: ActionSelectText, Selection: inputtext.Range{Start: 1, End: 1}, SelectionEnd: "unloaded"})
+	f.wantIntent(AccessibilityIntent{Node: "cached", Revision: 2, Action: ActionSelectText, Selection: textinput.Range{Start: 1, End: 1}, SelectionEnd: "unloaded"})
 }
 
 func newATSPIFixture(t *testing.T, queue int, initial *SemanticSnapshot) *atspiFixture {
@@ -512,11 +512,11 @@ func TestATSPIActionsAndEditsBecomeIntents(t *testing.T) {
 	}{
 		{wrap, "org.a11y.atspi.Action.DoAction", []any{int32(0)}, AccessibilityIntent{Node: "wrap", Revision: 1, Action: ActionActivate}},
 		{atspiNodePath("plan"), "org.a11y.atspi.Component.GrabFocus", nil, AccessibilityIntent{Node: "plan", Revision: 1, Action: ActionFocus}},
-		{composer, "org.a11y.atspi.EditableText.SetTextContents", []any{"새 글"}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSetValue, Value: "새 글", Selection: inputtext.Range{Start: 7, End: 7}}},
-		{composer, "org.a11y.atspi.EditableText.InsertText", []any{int32(3), "→!", int32(3)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSetValue, Value: "한글 →e\u0301👍🏽\nok", Selection: inputtext.Range{Start: 10, End: 10}}},
-		{composer, "org.a11y.atspi.EditableText.DeleteText", []any{int32(3), int32(5)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSetValue, Value: "한글 👍🏽\nok", Selection: inputtext.Range{Start: 7, End: 7}}},
-		{composer, "org.a11y.atspi.Text.SetSelection", []any{int32(0), int32(0), int32(2)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSelectText, Selection: inputtext.Range{Start: 0, End: 6}}},
-		{composer, "org.a11y.atspi.Text.SetCaretOffset", []any{int32(10)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSelectText, Selection: inputtext.Range{Start: 21, End: 21}}},
+		{composer, "org.a11y.atspi.EditableText.SetTextContents", []any{"새 글"}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSetValue, Value: "새 글", Selection: textinput.Range{Start: 7, End: 7}}},
+		{composer, "org.a11y.atspi.EditableText.InsertText", []any{int32(3), "→!", int32(3)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSetValue, Value: "한글 →e\u0301👍🏽\nok", Selection: textinput.Range{Start: 10, End: 10}}},
+		{composer, "org.a11y.atspi.EditableText.DeleteText", []any{int32(3), int32(5)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSetValue, Value: "한글 👍🏽\nok", Selection: textinput.Range{Start: 7, End: 7}}},
+		{composer, "org.a11y.atspi.Text.SetSelection", []any{int32(0), int32(0), int32(2)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSelectText, Selection: textinput.Range{Start: 0, End: 6}}},
+		{composer, "org.a11y.atspi.Text.SetCaretOffset", []any{int32(10)}, AccessibilityIntent{Node: "composer/main", Revision: 1, Action: ActionSelectText, Selection: textinput.Range{Start: 21, End: 21}}},
 	}
 	for _, c := range accepted {
 		f.want(c.path, c.method, c.args, true)
@@ -661,7 +661,7 @@ func TestATSPIEmitsChangeAndAnnouncementSignals(t *testing.T) {
 	})
 	nodes := atspiTestTree()
 	nodes[1].Name = "Plan v2"
-	nodes[2].Value, nodes[2].Selection = atspiTestText+"ay", inputtext.Range{Start: 23, End: 23}
+	nodes[2].Value, nodes[2].Selection = atspiTestText+"ay", textinput.Range{Start: 23, End: 23}
 	nodes[5].Disabled = false
 	nodes[6] = SemanticNode{ID: "retry", Parent: "transcript", Role: RoleButton, Name: "Retry", Action: "Retry"}
 	f.tree.Publish(atspiSnapshot(t, 2, "send", nodes))
@@ -680,7 +680,7 @@ func TestATSPIEmitsChangeAndAnnouncementSignals(t *testing.T) {
 		{path: send, member: "Object.StateChanged", detail: "focused", detail1: 1, value: "0"},
 		{path: send, member: "Object.Announcement", detail1: 2, value: "Send failed"},
 	})
-	nodes[2].Value, nodes[2].Selection = "한글 okay", inputtext.Range{Start: 11, End: 11}
+	nodes[2].Value, nodes[2].Selection = "한글 okay", textinput.Range{Start: 11, End: 11}
 	f.tree.Publish(atspiSnapshot(t, 3, "send", nodes))
 	f.expectSignals(signals, []atspiTestSignal{
 		{path: composer, member: "Object.TextChanged", detail: "delete", detail1: 3, detail2: 5, value: "e\u0301👍🏽\n"},

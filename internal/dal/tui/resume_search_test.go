@@ -68,16 +68,16 @@ func TestResumeSearchOpensOlderThreadByMessage(t *testing.T) {
 		var queries []string
 		client := &resumeSearchCaller{search: func(_ context.Context, query, _ string) (string, error) {
 			queries = append(queries, query)
-			return `{"data":[{"threadId":"old-51","name":"Deploy notes","snippet":"서버응답\n timed out\u001b]52;c;hidden-control\u0007"}]}`, nil
+			return `{"data":[{"threadId":"old-51","name":"Deploy notes","snippet":"\uc11c\ubc84\uc751\ub2f5\n timed out\u001b]52;c;hidden-control\u0007"}]}`, nil
 		}}
 		m := recentResumeList(t, client)
-		m = runResumeInput(t, m, press('서', 0, "서"))
-		m = runResumeInput(t, m, press('버', 0, "버"))
+		m = runResumeInput(t, m, press('\uc11c', 0, "\uc11c"))
+		m = runResumeInput(t, m, press('\ubc84', 0, "\ubc84"))
 		m = runResumeInput(t, m, tea.PasteMsg{Content: "\uc751\ub2f5"})
 		if !slices.Equal(queries, []string{"\uc11c\ubc84\uc751\ub2f5"}) {
-			t.Fatalf("searches = %v, want just the four-character query", queries)
+			t.Fatalf("searches = %v, want just the three-character query", queries)
 		}
-		assertContains(t, stripANSI(m.View().Content), "Deploy notes", "서버응답 timed out")
+		assertContains(t, stripANSI(m.View().Content), "Deploy notes", "\uc11c\ubc84\uc751\ub2f5 timed out")
 		if strings.Contains(m.View().Content, "hidden-control") {
 			t.Fatal("the excerpt emitted a terminal control sequence")
 		}
@@ -263,5 +263,21 @@ func TestResumeSearchRejectsOversizePasteBeforeReadingItsFirstLine(t *testing.T)
 		}
 		assertContains(t, m.notice, "1 MiB")
 		assertContains(t, stripANSI(m.View().Content), "matched excerpt")
+	})
+}
+
+func TestResumeSearchSendsTheExactQuery(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		var queries []string
+		client := &resumeSearchCaller{search: func(_ context.Context, query, _ string) (string, error) {
+			queries = append(queries, query)
+			return `{"data":[]}`, nil
+		}}
+		m := recentResumeList(t, client)
+		runResumeInput(t, m, tea.PasteMsg{Content: " disk\u3000logs "})
+		if !slices.Equal(queries, []string{" disk\u3000logs "}) {
+			t.Fatalf("searches = %q, want the filter with its spaces", queries)
+		}
 	})
 }

@@ -154,7 +154,7 @@ func TestComposerWrapsEveryRowAtWindowWidthMinusThree(t *testing.T) {
 		},
 		{
 			name: "decomposed words wrap like composed words", width: 20, height: 12, text: strings.TrimSpace(strings.Repeat("cafe\u0301 ", 7)), caret: -1,
-			rows: []string{"cafe\u0301 cafe\u0301 cafe\u0301", "cafe\u0301 cafe\u0301 cafe\u0301", "cafe\u0301"},
+			rows: []string{"café café café", "café café café", "café"},
 			x:    promptCells + 4, y: 2,
 		},
 		{
@@ -485,7 +485,6 @@ func TestComposerRowsMatchWrapperOutput(t *testing.T) {
 		spacedSentence,
 		"한글 한글 한글 한글 한글 한글 한글 한글 한글 한글",
 		"가나다라마바사아자차카타파하거너더러머버서어저처커터퍼허",
-		"café café café café café café café",
 		strings.Repeat("x", 30) + "       " + strings.Repeat("y", 40),
 		"a  -  b -- c --- dd -  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ff",
 		"👨‍👩‍👧 family 👨‍👩‍👧 of 👨‍👩‍👧 three 👨‍👩‍👧 emoji 👨‍👩‍👧 here",

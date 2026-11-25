@@ -4,7 +4,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type wordClass uint8
@@ -31,7 +31,7 @@ func classOf(cluster string) wordClass {
 }
 
 func nextCluster(text string, t int) int {
-	next, err := inputtext.NextBoundary(text, t)
+	next, err := textinput.NextClusterBoundary(text, t)
 	if err != nil || next <= t {
 		_, width := utf8.DecodeRuneInString(text[t:])
 		return t + max(width, 1)
@@ -40,7 +40,7 @@ func nextCluster(text string, t int) int {
 }
 
 func previousCluster(text string, t int) int {
-	previous, err := inputtext.PreviousBoundary(text, t)
+	previous, err := textinput.PreviousClusterBoundary(text, t)
 	if err != nil || previous >= t {
 		_, width := utf8.DecodeLastRuneInString(text[:t])
 		return t - max(width, 1)

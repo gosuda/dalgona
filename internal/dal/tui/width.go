@@ -6,9 +6,17 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/text/unicode/norm"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
+
+func (s *screenState) nfc(text string) string {
+	if norm.NFC.IsNormalString(text) {
+		return text
+	}
+	return norm.NFC.String(text)
+}
 
 const (
 	tabStop = 8
@@ -35,7 +43,7 @@ func (s *screenState) expandFrom(text string, col int) string {
 			out.WriteString(text)
 			break
 		}
-		col += s.method.StringWidth(text[:i])
+		col += s.method.StringWidth(s.nfc(text[:i]))
 		out.WriteString(text[:i])
 		if text[i] == '\n' {
 			out.WriteByte('\n')
@@ -55,18 +63,18 @@ func (s *screenState) cells(text string) int {
 }
 
 func (s *screenState) cellsFrom(text string, col int) int {
-	return s.method.StringWidth(s.expandFrom(text, col))
+	return s.method.StringWidth(s.nfc(s.expandFrom(text, col)))
 }
 
 func (s *screenState) fit(text string, n int) string {
-	expanded := s.expand(s.head(text, n))
-	if len(expanded) <= n {
-		return expanded
+	nfc := s.nfc(s.expand(s.head(text, n)))
+	if len(nfc) <= n {
+		return nfc
 	}
 	if n < 3 {
-		return s.truncate(expanded, n, "")
+		return s.truncate(nfc, n, "")
 	}
-	return s.truncate(expanded, n, "...")
+	return s.truncate(nfc, n, "...")
 }
 
 func (s *screenState) head(text string, n int) string {
@@ -131,7 +139,7 @@ func plainPrefix(text string, bound int) string {
 }
 
 func (s *screenState) wrap(text string, n int) []string {
-	text = s.expand(text)
+	text = s.nfc(s.expand(text))
 	if strings.Contains(text, "<U+") {
 		return s.greedyWrap(text, n)
 	}
@@ -302,7 +310,7 @@ type byteRange struct {
 }
 
 func (s *screenState) wrapRanges(text string, n int) []byteRange {
-	flat := s.expandDisplay(text)
+	flat := s.nfc(s.expandDisplay(text))
 	parts := s.wrap(flat, n)
 	ranges := make([]byteRange, len(parts))
 	walk := sourceWalk{screen: s, text: text}
@@ -366,7 +374,7 @@ func (w *sourceWalk) advance(flat int) int {
 			w.col++
 			continue
 		}
-		size, _ := inputtext.NextBoundary(w.text[w.at:], 0)
+		size, _ := textinput.NextClusterBoundary(w.text[w.at:], 0)
 		cluster := w.text[w.at : w.at+size]
 		if cluster == "\t" {
 			pad := tabStop - w.col%tabStop
@@ -375,7 +383,7 @@ func (w *sourceWalk) advance(flat int) int {
 			w.at++
 			continue
 		}
-		shown := controlDisplay(cluster)
+		shown := w.screen.nfc(controlDisplay(cluster))
 		w.flat += len(shown)
 		w.col += w.screen.method.StringWidth(shown)
 		w.at += len(cluster)

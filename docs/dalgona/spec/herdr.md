@@ -33,8 +33,7 @@ herdr pane report-agent <pane> --source dalgona --agent dalgona --state <state> 
 The remote session identity MUST encode the remote name and thread ID without collisions.
 Reports MUST follow only the focused endpoint.
 The report sequence MUST belong to that endpoint and thread.
-The caller MUST pass restore arguments separately.
-It MUST NOT form a shell command from the remote name or thread ID.
+The caller MUST pass restore arguments separately, never forming a shell command from the remote name or thread ID.
 Replacing a queued endpoint-and-thread report MUST move that key to the end of the queue.
 The last delivered queued report MUST describe the latest focused endpoint.
 

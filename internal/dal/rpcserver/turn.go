@@ -12,10 +12,8 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
-
-type imageSource func(admit func(int64) error) (agent.Image, error)
 
 type turnParams struct {
 	threadID       string
@@ -26,8 +24,10 @@ type turnParams struct {
 	approvalPolicy string
 	sandboxPolicy  string
 	text           []string
-	texts          []inputtext.Item
-	imageSources   []imageSource
+	items          int
+	textErr        error
+	texts          []textinput.Item
+	loads          []imageLoad
 	images         []agent.Image
 	imageErr       error
 	imageBytes     int64
@@ -129,30 +129,29 @@ func resolveImageAlt(altText, altAlias string) string {
 	return altAlias
 }
 
-func (p *turnParams) recordImageMeta(name, altText, altAlias string) {
+func (p *turnParams) recordImageMeta(index int, name, altText, altAlias string) {
 	if name != "" {
-		p.addInputText("name", name)
+		p.addInputText(index, "name", name)
 	}
 	if altText != "" {
-		p.addInputText("altText", altText)
+		p.addInputText(index, "altText", altText)
 	}
 	if altAlias != "" {
-		p.addInputText("alt", altAlias)
+		p.addInputText(index, "alt", altAlias)
 	}
 }
 
-func (p *turnParams) queueURLImage(url, name, altText, altAlias string) {
-	p.addInputText("url", url)
-	p.recordImageMeta(name, altText, altAlias)
+func (p *turnParams) queueURLImage(index int, url, name, altText, altAlias string) {
+	p.addInputText(index, "url", url)
+	p.recordImageMeta(index, name, altText, altAlias)
 	alt := resolveImageAlt(altText, altAlias)
-	p.imageSources = append(p.imageSources, func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, name, alt, admit) })
+	p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromURL(url, name, alt, admit) })
 }
 
-func (p *turnParams) queuePathImage(path, name, altText, altAlias string) {
-	p.addInputText("path", path)
-	p.recordImageMeta(name, altText, altAlias)
+func (p *turnParams) queuePathImage(index int, path, name, altText, altAlias string) {
+	p.recordImageMeta(index, name, altText, altAlias)
 	alt := resolveImageAlt(altText, altAlias)
-	p.imageSources = append(p.imageSources, func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, name, alt, admit) })
+	p.queueImage(func(admit func(int64) error) (agent.Image, error) { return imageFromPath(path, name, alt, admit) })
 }
 
 func (p *turnParams) readInput(d *jsontext.Decoder) error {
@@ -161,38 +160,52 @@ func (p *turnParams) readInput(d *jsontext.Decoder) error {
 	if err != nil {
 		return err
 	}
+	index := p.items
+	p.items++
 	switch kind {
 	case "text":
-		p.addInputText("text", text)
+		p.addInputText(index, "text", text)
 		p.text = append(p.text, text)
 	case "mention", "skill":
-		p.addInputText("path", path)
+		p.addInputText(index, "path", path)
 		p.text = append(p.text, "@"+path)
 	case "image":
-		p.queueURLImage(url, name, altText, altAlias)
+		p.queueURLImage(index, url, name, altText, altAlias)
 	case "localImage":
-		p.queuePathImage(path, name, altText, altAlias)
+		p.addInputText(index, "path", path)
+		p.queuePathImage(index, path, name, altText, altAlias)
 	default:
 		return invalidParams("unsupported input type " + kind)
 	}
 	return nil
 }
 
-func (p *turnParams) addInputText(member, text string) {
-	field := "input[" + strconv.Itoa(len(p.texts)) + "]." + member
-	p.texts = append(p.texts, inputtext.Item{Field: field, Policy: directTextPolicy, Text: text})
+func (p *turnParams) addInputText(index int, member, value string) {
+	field := "input[" + strconv.Itoa(index) + "]." + member
+	p.texts = append(p.texts, textinput.Item{Field: field, Policy: directTextPolicy, Text: value})
+	p.checkText(index, member, value)
 }
 
 func parseTurn(params jsontext.Value) (turnParams, error) {
 	var p turnParams
 	err := decodeParams(params, p.member)
-	p.texts = append(p.texts, inputtext.Item{Field: "model", Policy: directTextPolicy, Text: p.model})
+	p.texts = append(p.texts, textinput.Item{Field: "model", Policy: directTextPolicy, Text: p.model})
 	return p, err
 }
 
-func turnTexts(params jsontext.Value) ([]inputtext.Item, error) {
+func turnTexts(params jsontext.Value) ([]textinput.Item, error) {
 	p, err := parseTurn(params)
 	return p.texts, err
+}
+
+func (p *turnParams) checkText(index int, member, value string) {
+	if p.textErr != nil {
+		return
+	}
+	field := textinput.Field{Name: "input[" + strconv.Itoa(index) + "]." + member}
+	if err := field.Check(value); err != nil {
+		p.textErr = invalidParams(err.Error())
+	}
 }
 
 func decodeTurn(params jsontext.Value) (turnParams, error) {
@@ -200,9 +213,10 @@ func decodeTurn(params jsontext.Value) (turnParams, error) {
 	if err != nil {
 		return p, err
 	}
-	for _, source := range p.imageSources {
-		p.takeImage(source)
+	if p.textErr != nil {
+		return p, p.textErr
 	}
+	p.loadImages()
 	return p, nil
 }
 

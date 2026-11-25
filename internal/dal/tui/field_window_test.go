@@ -9,13 +9,13 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func TestFieldWindowShowsWholeClustersAndEscapes(t *testing.T) {
 	t.Parallel()
 	draft := strings.Repeat("e\u0301\U0001F468\u200D\U0001F469x\u0007", 3)
-	bounds := inputtext.Boundaries(draft)
+	bounds := textinput.Boundaries(draft)
 	shown := make([]string, 0, len(bounds)-1)
 	for i := range bounds[1:] {
 		shown = append(shown, displayText(draft[bounds[i]:bounds[i+1]]))

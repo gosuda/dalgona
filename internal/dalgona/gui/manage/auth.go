@@ -12,8 +12,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/theme"
@@ -31,8 +31,8 @@ const (
 )
 
 var (
-	apiKeyPolicy   = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: apiKeyLimitBytes}}
-	authCodePolicy = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: authCodeLimitBytes}}
+	apiKeyPolicy   = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: apiKeyLimitBytes}}
+	authCodePolicy = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: authCodeLimitBytes}}
 )
 
 func callbackMode(flow string) string {
@@ -323,7 +323,7 @@ func (a *authFlow) send(h *Hub, work *tasks, b binding) {
 	case looksLikeURL(a.input.text()):
 		response.Kind = "redirectUrl"
 	}
-	if inputtext.Blank(response.Value) {
+	if textinput.VisuallyBlank(response.Value) {
 		a.submitOp.state, a.submitOp.err = outcomeFailed, fmt.Errorf("enter the %s first", flowLabel(a.flow))
 		return
 	}

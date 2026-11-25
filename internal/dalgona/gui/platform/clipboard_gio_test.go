@@ -13,7 +13,7 @@ import (
 	"gioui.org/io/transfer"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func TestWriteTextPublishesExactBytes(t *testing.T) {
@@ -29,7 +29,7 @@ func TestWriteTextPublishesExactBytes(t *testing.T) {
 
 func TestWriteTextRefusesTextTheClipboardCannotCarry(t *testing.T) {
 	var router input.Router
-	if err := WriteText(router.Source(), "a\x00b"); !errors.Is(err, inputtext.DisallowedControl) {
+	if err := WriteText(router.Source(), "a\x00b"); !errors.Is(err, textinput.DisallowedControl) {
 		t.Fatalf("error %v, want DisallowedControl", err)
 	}
 	if _, content, ok := router.WriteClipboard(); ok {
@@ -80,8 +80,8 @@ func TestReadPasteClosesRejectedStreams(t *testing.T) {
 		mime, data string
 		want       error
 	}{
-		{"application/text", "bad\x00text", inputtext.DisallowedControl},
-		{"application/text", "bad\xfftext", inputtext.InvalidEncoding},
+		{"application/text", "bad\x00text", textinput.DisallowedControl},
+		{"application/text", "bad\xfftext", textinput.InvalidEncoding},
 		{"image/png", "\x89PNG", ErrUnsupportedPaste},
 	}
 	for _, tc := range cases {

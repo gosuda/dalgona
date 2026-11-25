@@ -11,9 +11,9 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dal/rpcserver"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/battery"
 )
 
@@ -310,8 +310,8 @@ func removable(edit mcpEdit, user config.UserMCPServers) error {
 }
 
 func checkServerName(name string) error {
-	policy := inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: mcpNameBytes}}
-	if err := inputtext.CheckRequest([]inputtext.Item{{Field: "edits.name", Policy: policy, Text: name}}); err != nil {
+	policy := textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: mcpNameBytes}}
+	if err := textinput.CheckRequest([]textinput.Item{{Field: "edits.name", Policy: policy, Text: name}}); err != nil {
 		return invalidNative(err.Error())
 	}
 	if name == "" || strings.ContainsAny(name, ".\"") {

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (d *Document) Position(offset int, affinity Affinity) (Position, error) {
@@ -17,10 +17,10 @@ func (d *Document) Position(offset int, affinity Affinity) (Position, error) {
 
 func (d *Document) checkOffset(offset int, affinity Affinity) error {
 	if offset < 0 || offset > len(d.source) || (offset < len(d.source) && !utf8.RuneStart(d.source[offset])) {
-		return fmt.Errorf("%w: byte %d is not a character boundary of %d source bytes", inputtext.InvalidOffset, offset, len(d.source))
+		return fmt.Errorf("%w: byte %d is not a character boundary of %d source bytes", textinput.InvalidOffset, offset, len(d.source))
 	}
 	if affinity != Before && affinity != After {
-		return fmt.Errorf("%w: affinity %d is neither before nor after", inputtext.InvalidOffset, affinity)
+		return fmt.Errorf("%w: affinity %d is neither before nor after", textinput.InvalidOffset, affinity)
 	}
 	if len(d.blocks) == 0 {
 		return fmt.Errorf("%w: %+v", ErrNoPosition, d.header.Identity)
@@ -88,7 +88,7 @@ func snap(p Projection, t int, affinity Affinity) int {
 		}
 		return run.Text.Start
 	}
-	cluster, err := inputtext.PaintRange(p.Text, inputtext.Range{Start: t, End: t})
+	cluster, err := textinput.PaintRange(p.Text, textinput.Range{Start: t, End: t})
 	if err != nil || cluster.Start == cluster.End {
 		return t
 	}
@@ -135,11 +135,11 @@ func (d *Document) End() (Position, error) {
 	return d.Position(len(d.source), Before)
 }
 
-func (d *Document) TextOffset(p Position, unit inputtext.Unit) (Key, int, error) {
+func (d *Document) TextOffset(p Position, unit textinput.Unit) (Key, int, error) {
 	i, t, err := d.locate(p)
 	if err != nil {
 		return Key{}, 0, err
 	}
-	converted, err := inputtext.Convert(d.blocks[i].Projection.Text, t, inputtext.Bytes, unit)
+	converted, err := textinput.Convert(d.blocks[i].Projection.Text, t, textinput.Bytes, unit)
 	return d.blocks[i].Key, converted, err
 }

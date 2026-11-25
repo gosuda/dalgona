@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
+import {
+	cleanup,
+	fireEvent,
+	render,
+	screen,
+	within,
+} from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { tick } from "svelte";
 import { afterEach, describe, expect, type Mock, test, vi } from "vitest";
@@ -6,12 +12,14 @@ import App from "#lib/components/App.svelte";
 import QuestionCard from "#lib/components/QuestionCard.svelte";
 import { type RpcPort, Session } from "#lib/session.svelte.ts";
 import type {
+	AppNotification,
 	JsonValue,
 	QuestionRequest,
 	QuestionSelection,
 	RequestId,
 	RpcHandlers,
 } from "#lib/types.ts";
+import { parseNotification } from "#lib/validation.ts";
 
 afterEach(cleanup);
 
@@ -88,9 +96,65 @@ function props(
 		position: 1,
 		total: 1,
 		subagent: null,
+		submission: null,
 		onSubmit,
 		onDismiss,
 	};
+}
+
+const otherRequest: QuestionRequest = {
+	...databaseRequest,
+	questions: databaseRequest.questions.map((question) => ({
+		...question,
+		isOther: true,
+	})),
+};
+
+function notice(method: string, params: JsonValue): AppNotification {
+	const parsed = parseNotification({ method, params });
+	if (parsed === null) throw new Error(`${method} did not parse`);
+	return parsed;
+}
+
+function correction(field: string, reason: string): AppNotification {
+	return notice("warning", {
+		threadId: "thread-1",
+		requestId: "req-1",
+		message: `invalid text: ${field}: ${reason}`,
+		reason,
+		field,
+	});
+}
+
+function openApp(respond: (id: RequestId, result: JsonValue) => void): {
+	handlers: RpcHandlers;
+	session: Session;
+} {
+	let handlers: RpcHandlers | undefined;
+	const session = new Session((_url, incoming) => {
+		handlers = incoming;
+		return { ...port(respond), call: () => new Promise<never>(() => {}) };
+	});
+	session.start({
+		hash: "#token=abc",
+		host: "localhost:7437",
+		pathname: "/",
+		protocol: "http:",
+		search: "",
+	});
+	if (handlers === undefined) throw new Error("the session did not dial");
+	session.activeThreadId = "thread-1";
+	return { handlers, session };
+}
+
+function pasted(text: string) {
+	return { getData: (type: string) => (type === "text/plain" ? text : "") };
+}
+
+function otherField(): HTMLInputElement {
+	return screen.getByRole("textbox", {
+		name: "Other answer for Database",
+	}) as HTMLInputElement;
 }
 
 function port(respond: (id: RequestId, result: JsonValue) => void): RpcPort {
@@ -267,538 +331,231 @@ describe("question card", () => {
 	});
 });
 
-describe("question card answers", () => {
-	afterEach(cleanup);
-
-	const nameRequest: QuestionRequest = {
-		id: "req-3",
-		method: "item/tool/requestUserInput",
-		threadId: "thread-1",
-		turnId: "turn-1",
-		itemId: "call-name",
-		questions: [
-			{
-				id: "name",
-				header: "Name",
-				question: "What should the service be called?",
-				isOther: false,
-				multiSelect: false,
-				options: [],
-			},
-		],
-	};
-
-	function answerField(): HTMLTextAreaElement {
-		return screen.getByRole("textbox", { name: "Name" }) as HTMLTextAreaElement;
-	}
-
-	test("an answer over 2000 characters stays with a field error and does not submit", async () => {
+describe("question display", () => {
+	test("shows look-alike labels apart and submits the offered label", async () => {
 		const onSubmit = vi.fn();
-		render(QuestionCard, { props: props(nameRequest, onSubmit, vi.fn()) });
-		const over = `${"x".repeat(1999)}e\u0301`;
-		await fireEvent.input(answerField(), { target: { value: over } });
-		const alert = screen.getByRole("alert");
-		expect(alert.textContent).toBe(
-			"This answer has 2001 characters. Shorten it to 2000 or fewer.",
-		);
-		expect(answerField().getAttribute("aria-describedby")).toBe(alert.id);
-		expect(answerField().getAttribute("aria-invalid")).toBe("true");
-		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).not.toHaveBeenCalled();
-		expect(answerField().value).toBe(over);
-
-		const emoji = "\u{1F600}".repeat(2000);
-		await fireEvent.input(answerField(), { target: { value: emoji } });
-		expect(screen.queryByRole("alert")).toBeNull();
-		expect(answerField().getAttribute("aria-invalid")).toBe("false");
-		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).toHaveBeenCalledWith(nameRequest, [
-			{ picked: [], other: emoji },
-		]);
-	});
-
-	test("a pasted answer of 2000 emoji is not cut at 2000 UTF-16 units", async () => {
-		const user = userEvent.setup();
-		render(QuestionCard, { props: props(nameRequest, vi.fn(), vi.fn()) });
-		const emoji = "\u{1F600}".repeat(2000);
-		await user.click(answerField());
-		await user.paste(emoji);
-		expect(answerField().value).toBe(emoji);
-	});
-
-	test("an answer takes several lines and converts CRLF once", async () => {
-		const onSubmit = vi.fn();
-		render(QuestionCard, { props: props(nameRequest, onSubmit, vi.fn()) });
-		await fireEvent.input(answerField(), {
-			target: { value: "a\r\nb\rc\r\n" },
-		});
-		expect(answerField().value).toBe("a\nb\nc\n");
-		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).toHaveBeenCalledWith(nameRequest, [
-			{ picked: [], other: "a\nb\nc\n" },
-		]);
-	});
-
-	test("NUL in an answer is refused with a field error", async () => {
-		const onSubmit = vi.fn();
-		render(QuestionCard, { props: props(nameRequest, onSubmit, vi.fn()) });
-		await fireEvent.input(answerField(), { target: { value: "a\0b" } });
-		expect(screen.getByRole("alert").textContent).toBe(
-			"This text has a NUL character. Remove it to continue.",
-		);
-		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).not.toHaveBeenCalled();
-	});
-
-	test("Backspace in an answer selects the whole cluster first", async () => {
-		render(QuestionCard, { props: props(nameRequest, vi.fn(), vi.fn()) });
-		await fireEvent.input(answerField(), {
-			target: { value: "\u1100\u1161\u11a8\u{20000}\u{E0100}" },
-		});
-		answerField().setSelectionRange(7, 7);
-		await fireEvent.keyDown(answerField(), { key: "Backspace" });
-		expect([answerField().selectionStart, answerField().selectionEnd]).toEqual([
-			3, 7,
-		]);
-		answerField().setSelectionRange(3, 3);
-		await fireEvent.keyDown(answerField(), { key: "Backspace" });
-		expect([answerField().selectionStart, answerField().selectionEnd]).toEqual([
-			0, 3,
-		]);
-	});
-
-	test("the session sends padded and whitespace-only answers as typed", async () => {
-		const respond = vi.fn();
-		let handlers: RpcHandlers | undefined;
-		const session = new Session((_url, incoming) => {
-			handlers = incoming;
-			return port(respond);
-		});
-		session.start({
-			hash: "#token=abc",
-			host: "localhost:7437",
-			pathname: "/",
-			protocol: "http:",
-			search: "",
-		});
-		if (handlers === undefined) throw new Error("the session did not dial");
-		session.activeThreadId = "thread-1";
-		handlers.onQuestion(nameRequest);
-		render(App, { props: { session } });
-		await tick();
-		await fireEvent.input(answerField(), { target: { value: " \u3000 " } });
-		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(respond).toHaveBeenCalledWith("req-3", {
-			answers: { name: { answers: [" \u3000 "] } },
-		});
-	});
-
-	test("model text shows control escapes and reveals invisible differences between options", async () => {
-		const onSubmit = vi.fn();
-		const twins: QuestionRequest = {
-			...nameRequest,
-			id: "req-4",
+		const request: QuestionRequest = {
+			...databaseRequest,
 			questions: [
 				{
-					id: "pick",
+					id: "q1",
 					header: "Pick\u202e",
-					question: "Which \x1b[1mone?",
+					question: "Which\none?",
 					isOther: false,
 					multiSelect: false,
 					options: [
-						{ label: "Yes", description: "plain\u0007", preview: "a\n\x1b[2J" },
-						{ label: "Yes\u200b", description: "hidden", preview: null },
+						{ label: "Yes", description: "a\tb", preview: null },
+						{ label: "Yes\u200b", description: "", preview: "\n\tcode\u0000" },
 					],
 				},
 			],
 		};
-		render(QuestionCard, { props: props(twins, onSubmit, vi.fn()) });
-		const group = screen.getByRole("group");
-		const escapes = (selector: string): readonly (readonly string[])[] =>
-			[...group.querySelectorAll(selector)].map((element) =>
-				[...element.querySelectorAll(".escape")].map(
-					(marker) => marker.getAttribute("data-escape") ?? "",
-				),
-			);
-		const texts = (selector: string): readonly (string | null)[] =>
-			[...group.querySelectorAll(selector)].map(
-				(element) => element.textContent,
-			);
-		expect(texts("legend")).toEqual(["Pick\u202e"]);
-		expect(escapes("legend")).toEqual([["U+202E"]]);
-		expect(texts(".prompt")).toEqual(["Which \x1b[1mone?"]);
-		expect(escapes(".prompt")).toEqual([["U+001B"]]);
-		expect(texts(".choice")).toEqual(["Yes", "Yes\u200b"]);
-		expect(escapes(".choice")).toEqual([[], ["U+200B"]]);
-		expect(escapes(".description")).toEqual([["U+0007"], []]);
-		const radios = screen.getAllByRole("radio");
-		await fireEvent.click(radios[0] as HTMLElement);
-		expect(texts(".preview")).toEqual(["a\n\x1b[2J"]);
-		expect(escapes(".preview")).toEqual([["U+001B"]]);
-		await fireEvent.click(radios[1] as HTMLElement);
+		render(QuestionCard, { props: props(request, onSubmit, vi.fn()) });
+		expect(screen.getByText("Pick<U+202E>")).toBeTruthy();
+		expect(screen.getByText("Which one?")).toBeTruthy();
+		expect(screen.getByText("a b")).toBeTruthy();
+		expect(screen.getByText("Yes")).toBeTruthy();
+		await fireEvent.click(screen.getByRole("radio", { name: /Yes<U\+200B>/ }));
+		expect(document.querySelector(".preview")?.textContent).toBe(
+			"    code<U+0000>",
+		);
 		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).toHaveBeenCalledWith(twins, [
+		expect(onSubmit).toHaveBeenCalledWith(request, [
 			{ picked: ["Yes\u200b"], other: "" },
 		]);
 	});
 });
 
-describe("question answer correction", () => {
-	afterEach(cleanup);
-
-	const request: QuestionRequest = {
-		id: "req-5",
-		method: "item/tool/requestUserInput",
-		threadId: "thread-1",
-		turnId: "turn-1",
-		itemId: "call-name",
-		questions: [
-			{
-				id: "name",
-				header: "Name",
-				question: "What should the service be called?",
-				isOther: false,
-				multiSelect: false,
-				options: [],
-			},
-		],
-	};
-
-	const warning = {
-		threadId: "thread-1",
-		message: "invalid text: answers.name.answers[0]: disallowed_control",
-		requestId: "req-5",
-		reason: "disallowed_control",
-		field: "answers.name.answers[0]",
-	};
-
-	function field(): HTMLTextAreaElement {
-		return screen.getByRole("textbox", { name: "Name" }) as HTMLTextAreaElement;
-	}
-
-	function submit(): HTMLButtonElement {
-		return screen.getByRole("button", { name: "Submit" }) as HTMLButtonElement;
-	}
-
-	function opened(respond: (id: RequestId, result: JsonValue) => void): {
-		readonly session: Session;
-		readonly handlers: RpcHandlers;
-	} {
-		let handlers: RpcHandlers | undefined;
-		const session = new Session((_url, incoming) => {
-			handlers = incoming;
-			return {
-				...port(respond),
-				call: <T>(
-					method: string,
-					_params: JsonValue,
-					parse: (value: unknown) => T,
-				) =>
-					method === "initialize"
-						? Promise.resolve(
-								parse({
-									userAgent: "dalgona/0.1.0",
-									platformFamily: "unix",
-									platformOs: "linux",
-								}),
-							)
-						: Promise.reject(new Error(`no ${method} in this test`)),
-			};
-		});
-		session.start({
-			hash: "#token=abc",
-			host: "localhost:7437",
-			pathname: "/",
-			protocol: "http:",
-			search: "",
-		});
-		if (handlers === undefined) throw new Error("the session did not dial");
-		session.activeThreadId = "thread-1";
-		handlers.onQuestion(request);
-		return { session, handlers };
-	}
-
-	test("the card waits for resolution, takes a correction and answers the same request again", async () => {
-		const respond = vi.fn();
-		const { session, handlers } = opened(respond);
-		render(App, { props: { session } });
-		await tick();
-		await fireEvent.input(field(), { target: { value: "first draft" } });
-		await fireEvent.click(submit());
-		expect(respond).toHaveBeenCalledExactlyOnceWith("req-5", {
-			answers: { name: { answers: ["first draft"] } },
-		});
-		expect(
-			screen.getByRole("heading", { name: "Answer this question" }),
-		).toBeTruthy();
-		expect(
-			screen.getByText("Waiting for dalgona to accept the answer."),
-		).toBeTruthy();
-		expect(field().readOnly).toBe(true);
-		expect(submit().getAttribute("aria-disabled")).toBe("true");
-		await fireEvent.click(submit());
-		expect(respond).toHaveBeenCalledTimes(1);
-
-		handlers.onQuestionWarning(warning);
-		await tick();
-		expect(field().readOnly).toBe(false);
-		expect(field().value).toBe("first draft");
-		const alert = document.getElementById(
-			field().getAttribute("aria-describedby") ?? "",
-		);
-		expect(alert?.getAttribute("role")).toBe("alert");
-		expect(alert?.textContent).toBe(
-			"dalgona refused this answer because it has a NUL character. Remove it and submit again.",
-		);
-
-		await fireEvent.input(field(), { target: { value: "second draft" } });
-		await fireEvent.click(submit());
-		expect(respond).toHaveBeenCalledTimes(2);
-		expect(respond).toHaveBeenLastCalledWith("req-5", {
-			answers: { name: { answers: ["second draft"] } },
-		});
-
-		handlers.onNotification({
-			type: "requestResolved",
-			requestId: "req-5",
-			resolution: "answered",
-		});
-		await tick();
-		expect(
-			screen.queryByRole("heading", { name: "Answer this question" }),
-		).toBeNull();
-		expect(document.body.textContent).not.toContain(
-			"Question answered in another window",
-		);
-		handlers.onQuestionWarning(warning);
-		await tick();
-		expect(
-			screen.queryByRole("heading", { name: "Answer this question" }),
-		).toBeNull();
-	});
-
-	test("a warning for a request this window did not answer changes nothing", async () => {
-		const respond = vi.fn();
-		const { session, handlers } = opened(respond);
-		render(App, { props: { session } });
-		await tick();
-		await fireEvent.input(field(), { target: { value: "draft" } });
-		handlers.onQuestionWarning(warning);
-		await tick();
-		expect(field().getAttribute("aria-invalid")).toBe("false");
-		expect(field().getAttribute("aria-describedby")).toBeNull();
-	});
-});
-
-describe("question draft retention", () => {
-	afterEach(cleanup);
-
-	const request: QuestionRequest = {
-		id: "req-9",
-		method: "item/tool/requestUserInput",
-		threadId: "thread-1",
-		turnId: "turn-1",
-		itemId: "call-name",
-		questions: [
-			{
-				id: "name",
-				header: "Name",
-				question: "What should the service be called?",
-				isOther: false,
-				multiSelect: false,
-				options: [],
-			},
-		],
-	};
-
-	const warning = {
-		threadId: "thread-1",
-		message: "invalid text: answers.name.answers[0]: disallowed_control",
-		requestId: "req-9",
-		reason: "disallowed_control",
-		field: "answers.name.answers[0]",
-	};
-
-	function field(): HTMLTextAreaElement {
-		return screen.getByRole("textbox", { name: "Name" }) as HTMLTextAreaElement;
-	}
-
-	function submit(): HTMLButtonElement {
-		return screen.getByRole("button", { name: "Submit" }) as HTMLButtonElement;
-	}
-
-	function opened(respond: (id: RequestId, result: JsonValue) => void): {
-		readonly session: Session;
-		readonly handlers: RpcHandlers;
-	} {
-		let handlers: RpcHandlers | undefined;
-		const session = new Session((_url, incoming) => {
-			handlers = incoming;
-			return {
-				...port(respond),
-				call: <T>(
-					method: string,
-					_params: JsonValue,
-					parse: (value: unknown) => T,
-				) =>
-					method === "initialize"
-						? Promise.resolve(
-								parse({
-									userAgent: "dalgona/0.1.0",
-									platformFamily: "unix",
-									platformOs: "linux",
-								}),
-							)
-						: Promise.reject(new Error(`no ${method} in this test`)),
-			};
-		});
-		session.start({
-			hash: "#token=abc",
-			host: "localhost:7437",
-			pathname: "/",
-			protocol: "http:",
-			search: "",
-		});
-		if (handlers === undefined) throw new Error("the session did not dial");
-		session.activeThreadId = "thread-1";
-		handlers.onQuestion(request);
-		return { session, handlers };
-	}
-
-	test("a remount after submitting keeps the answers until the request resolves", async () => {
-		const respond = vi.fn();
-		const { session, handlers } = opened(respond);
-		const view = render(App, { props: { session } });
-		await tick();
-		await fireEvent.input(field(), { target: { value: "first draft" } });
-		await fireEvent.click(submit());
-		expect(respond).toHaveBeenCalledExactlyOnceWith("req-9", {
-			answers: { name: { answers: ["first draft"] } },
-		});
-		view.unmount();
-		render(App, { props: { session } });
-		await tick();
-		expect(field().value).toBe("first draft");
-		expect(field().readOnly).toBe(true);
-		handlers.onQuestionWarning(warning);
-		await tick();
-		expect(field().readOnly).toBe(false);
-		expect(field().value).toBe("first draft");
-	});
-});
-
-describe("question other atomicity", () => {
-	afterEach(cleanup);
-
-	const otherRequest: QuestionRequest = {
-		id: "req-other",
-		method: "item/tool/requestUserInput",
-		threadId: "thread-1",
-		turnId: "turn-1",
-		itemId: "call-pick",
-		questions: [
-			{
-				id: "pick",
-				header: "Pick",
-				question: "Choose one.",
-				isOther: true,
-				multiSelect: false,
-				options: [{ label: "Alpha", description: "First.", preview: null }],
-			},
-		],
-	};
-
-	function otherField(): HTMLTextAreaElement {
-		return screen.getByRole("textbox", {
-			name: "Other answer for Pick",
-		}) as HTMLTextAreaElement;
-	}
-
-	function alpha(): HTMLInputElement {
-		return screen.getByRole("radio", { name: /Alpha/ }) as HTMLInputElement;
-	}
-
-	test("a rejected Other candidate keeps the selected option", async () => {
+describe("question answer text", () => {
+	test("keeps an over-limit answer in the field with an error and does not submit it", async () => {
 		const onSubmit = vi.fn();
 		render(QuestionCard, { props: props(otherRequest, onSubmit, vi.fn()) });
-		await fireEvent.click(alpha());
-		expect(alpha().checked).toBe(true);
-		const over = "x".repeat(2001);
-		await fireEvent.input(otherField(), { target: { value: over } });
-		expect(screen.getByRole("alert").textContent).toBe(
-			"This answer has 2001 characters. Shorten it to 2000 or fewer.",
+		expect(otherField().hasAttribute("maxlength")).toBe(false);
+		const full = "\u{1F600}".repeat(2000);
+		await fireEvent.input(otherField(), { target: { value: `${full}x` } });
+		expect(otherField().value).toBe(`${full}x`);
+		const alert = screen.getByRole("alert");
+		expect(alert.textContent).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
 		);
-		expect(otherField().value).toBe(over);
-		expect(alpha().checked).toBe(true);
+		expect(otherField().getAttribute("aria-describedby")).toBe(alert.id);
+		expect(otherField().getAttribute("aria-invalid")).toBe("true");
 		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
 		expect(onSubmit).not.toHaveBeenCalled();
-		await fireEvent.input(otherField(), { target: { value: "ok" } });
-		expect(alpha().checked).toBe(false);
-		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).toHaveBeenCalledWith(otherRequest, [
-			{ picked: [], other: "ok" },
-		]);
-	});
-
-	test("a composing Other input does not replace the committed selection", async () => {
-		const onSubmit = vi.fn();
-		render(QuestionCard, { props: props(otherRequest, onSubmit, vi.fn()) });
-		await fireEvent.click(alpha());
-		const field = otherField();
-		await fireEvent.input(field, {
-			target: { value: "あ" },
-			isComposing: true,
-		});
-		await tick();
-		expect(alpha().checked).toBe(true);
-		expect(field.value).toBe("あ");
+		await fireEvent.input(otherField(), { target: { value: full } });
 		expect(screen.queryByRole("alert")).toBeNull();
 		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
 		expect(onSubmit).toHaveBeenCalledWith(otherRequest, [
-			{ picked: ["Alpha"], other: "" },
+			{ picked: [], other: full },
 		]);
 	});
-});
 
-describe("question whitespace twins", () => {
-	afterEach(cleanup);
-
-	test("options that collide after whitespace rendering reveal their code points", async () => {
-		const onSubmit = vi.fn();
-		const twins: QuestionRequest = {
-			id: "req-ws",
-			method: "item/tool/requestUserInput",
-			threadId: "thread-1",
-			turnId: "turn-1",
-			itemId: "call-ws",
-			questions: [
-				{
-					id: "pick",
-					header: "Pick",
-					question: "Choose one.",
-					isOther: false,
-					multiSelect: false,
-					options: [
-						{ label: "Read only", description: "First.", preview: null },
-						{ label: "Read  only", description: "Second.", preview: null },
-					],
-				},
-			],
-		};
-		render(QuestionCard, { props: props(twins, onSubmit, vi.fn()) });
-		const group = screen.getByRole("group");
-		const choices = [...group.querySelectorAll(".choice")];
-		expect(choices).toHaveLength(2);
-		const escapes = choices.map((choice) =>
-			[...choice.querySelectorAll(".escape")].map(
-				(marker) => marker.getAttribute("data-escape") ?? "",
-			),
+	test("refuses a multiline paste whole and keeps the answer", async () => {
+		render(QuestionCard, { props: props(otherRequest, vi.fn(), vi.fn()) });
+		await fireEvent.input(otherField(), { target: { value: "keep" } });
+		expect(
+			await fireEvent.paste(otherField(), {
+				clipboardData: pasted("a\u2028b"),
+			}),
+		).toBe(false);
+		expect(otherField().value).toBe("keep");
+		expect(screen.getByRole("alert").textContent).toBe(
+			"This field takes one line. Nothing was pasted.",
 		);
-		expect(escapes).toEqual([["U+0020"], ["U+0020", "U+0020"]]);
-		await fireEvent.click(screen.getAllByRole("radio")[1] as HTMLElement);
+		expect(
+			await fireEvent.paste(otherField(), {
+				clipboardData: pasted("one line"),
+			}),
+		).toBe(true);
+		await fireEvent.input(otherField(), { target: { value: "keep it" } });
+		expect(screen.queryByRole("alert")).toBeNull();
+	});
+
+	test("refuses a NUL answer and submits whitespace as typed", async () => {
+		const onSubmit = vi.fn();
+		render(QuestionCard, { props: props(otherRequest, onSubmit, vi.fn()) });
+		await fireEvent.input(otherField(), { target: { value: "a\u0000b" } });
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Remove the NUL character from this answer.",
+		);
 		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-		expect(onSubmit).toHaveBeenCalledWith(twins, [
-			{ picked: ["Read  only"], other: "" },
+		expect(onSubmit).not.toHaveBeenCalled();
+		await fireEvent.input(otherField(), { target: { value: " \u3000 " } });
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).toHaveBeenCalledWith(otherRequest, [
+			{ picked: [], other: " \u3000 " },
 		]);
+	});
+
+	test("sends nothing while a submitted answer waits", async () => {
+		const onSubmit = vi.fn();
+		const onDismiss = vi.fn();
+		render(QuestionCard, {
+			props: {
+				...props(otherRequest, onSubmit, onDismiss),
+				submission: {
+					selections: [{ picked: [], other: "sent" }],
+					correction: null,
+				},
+			},
+		});
+		expect(otherField().value).toBe("sent");
+		for (const name of ["Submit", "Skip", "Dismiss"]) {
+			const button = screen.getByRole("button", { name });
+			expect(button.getAttribute("aria-disabled")).toBe("true");
+			await fireEvent.click(button);
+		}
+		await fireEvent.keyDown(screen.getByRole("heading"), { key: "Escape" });
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(onDismiss).not.toHaveBeenCalled();
+		expect(screen.getByRole("status").textContent).toBe(
+			"Answer sent. Waiting for the question to close.",
+		);
+	});
+
+	test("restores submitted answers and holds a correction it cannot place until an answer changes", async () => {
+		const onSubmit = vi.fn();
+		render(QuestionCard, {
+			props: {
+				...props(databaseRequest, onSubmit, vi.fn()),
+				submission: {
+					selections: [{ picked: ["Postgres"], other: "" }],
+					correction: {
+						field: "answers.gone.answers[0]",
+						reason: "text_too_large",
+						message: "invalid text",
+					},
+				},
+			},
+		});
+		expect(
+			(screen.getByRole("radio", { name: /Postgres/ }) as HTMLInputElement)
+				.checked,
+		).toBe(true);
+		expect(screen.getByRole("alert").textContent).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
+		);
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole("radio", { name: /SQLite/ }));
+		expect(screen.queryByRole("alert")).toBeNull();
+		await fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+		expect(onSubmit).toHaveBeenCalledWith(databaseRequest, [
+			{ picked: ["SQLite"], other: "" },
+		]);
+	});
+
+	test("keeps the card after Submit until the request resolves and resubmits after a warning", async () => {
+		const respond = vi.fn();
+		const { handlers, session } = openApp(respond);
+		handlers.onQuestion(otherRequest);
+		render(App, { props: { session } });
+		await tick();
+		await fireEvent.input(otherField(), { target: { value: " two words " } });
+		const card = within(
+			screen.getByRole("region", { name: "Answer this question" }),
+		);
+		const submit = card.getByRole("button", { name: "Submit" });
+		submit.focus();
+		await fireEvent.click(submit);
+		expect(respond).toHaveBeenCalledWith("req-1", {
+			answers: { q1: { answers: [" two words "] } },
+		});
+		expect(
+			screen.getByText("Answer sent. Waiting for the question to close."),
+		).toBeTruthy();
+		expect(submit.getAttribute("aria-disabled")).toBe("true");
+		await fireEvent.click(submit);
+		await fireEvent.click(card.getByRole("button", { name: "Skip" }));
+		await fireEvent.click(card.getByRole("button", { name: "Dismiss" }));
+		await fireEvent.keyDown(submit, { key: "Escape" });
+		expect(respond).toHaveBeenCalledTimes(1);
+
+		handlers.onNotification(
+			correction("answers.q1.answers[0]", "disallowed_control"),
+		);
+		await tick();
+		expect(otherField().value).toBe(" two words ");
+		const error = screen.getByText(
+			"Remove the NUL character from this answer.",
+		);
+		expect(otherField().getAttribute("aria-describedby")).toBe(error.id);
+		expect(submit.getAttribute("aria-disabled")).toBeNull();
+		expect(document.activeElement).toBe(submit);
+		await fireEvent.click(submit);
+		expect(respond).toHaveBeenCalledTimes(1);
+
+		await fireEvent.input(otherField(), {
+			target: { value: " two words, fixed " },
+		});
+		expect(
+			screen.queryByText("Remove the NUL character from this answer."),
+		).toBeNull();
+		await fireEvent.click(submit);
+		expect(respond).toHaveBeenCalledTimes(2);
+		expect(respond).toHaveBeenLastCalledWith("req-1", {
+			answers: { q1: { answers: [" two words, fixed "] } },
+		});
+
+		handlers.onNotification(
+			notice("serverRequest/resolved", {
+				threadId: "thread-1",
+				requestId: "req-1",
+				resolution: "answered",
+			}),
+		);
+		await tick();
+		expect(
+			screen.queryByRole("region", { name: "Question details" }),
+		).toBeNull();
+		expect(screen.getByText("Question answered")).toBeTruthy();
+		handlers.onNotification(
+			correction("answers.q1.answers[0]", "disallowed_control"),
+		);
+		await tick();
+		expect(
+			screen.queryByRole("region", { name: "Question details" }),
+		).toBeNull();
+		expect(respond).toHaveBeenCalledTimes(2);
 	});
 });

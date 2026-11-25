@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -71,7 +71,7 @@ func toastXML(title, body, launch string) (string, error) {
 	if !toastText(title) || !toastText(body) || !toastText(launch) {
 		return "", errToastText
 	}
-	if inputtext.Count(launch, inputtext.UTF16Units) > toastLaunchUnits {
+	if textinput.Count(launch, textinput.UTF16Units) > toastLaunchUnits {
 		return "", errToastLaunch
 	}
 	var content strings.Builder
@@ -94,7 +94,7 @@ func xmlChar(r rune) bool {
 }
 
 func toastTag(tag string) string {
-	if inputtext.Count(tag, inputtext.UTF16Units) <= toastTagUnits {
+	if textinput.Count(tag, textinput.UTF16Units) <= toastTagUnits {
 		return tag
 	}
 	digest := sha256.Sum256([]byte(tag))
@@ -102,10 +102,10 @@ func toastTag(tag string) string {
 }
 
 func toastActivation(app, launch []uint16) (string, bool) {
-	if id, err := inputtext.DecodeUTF16(app); err != nil || id != toastAppID {
+	if id, err := textinput.DecodeUTF16(app); err != nil || id != toastAppID {
 		return "", false
 	}
-	tag, err := inputtext.DecodeUTF16(launch)
+	tag, err := textinput.DecodeUTF16(launch)
 	return tag, err == nil && tag != "" && toastText(tag)
 }
 

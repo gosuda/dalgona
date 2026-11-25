@@ -79,7 +79,6 @@ type pairedTestObserver struct{ phases chan client.PhaseChange }
 
 func (o pairedTestObserver) PhaseChanged(change client.PhaseChange)     { o.phases <- change }
 func (pairedTestObserver) Notified(client.Link, string, jsontext.Value) {}
-func (pairedTestObserver) Arrived(client.Link, string, jsontext.Value)  {}
 func (pairedTestObserver) Requested(context.Context, client.Link, string, jsontext.Value) (any, error) {
 	return nil, &rpc.RPCError{Code: -32601, Message: "Method not found"}
 }

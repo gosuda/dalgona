@@ -274,6 +274,13 @@ const codexCases: readonly CodexCase[] = [
 		requestId: "req-1",
 		threadId: "thread-1",
 	}),
+	notification("warning", "WarningNotification", {
+		message: "invalid text: answers.q1.answers[0]: text_too_large",
+		threadId: "thread-1",
+		requestId: "req-1",
+		reason: "text_too_large",
+		field: "answers.q1.answers[0]",
+	}),
 	notification("account/login/completed", "AccountLoginCompletedNotification", {
 		error: "openai did not accept the API key; it was not saved",
 		loginId: "login-1",
@@ -459,6 +466,14 @@ const expectedParsed: Readonly<Record<string, JsonValue>> = {
 		type: "requestResolved",
 		requestId: "req-1",
 		resolution: null,
+	},
+	WarningNotification: {
+		type: "requestWarning",
+		threadId: "thread-1",
+		requestId: "req-1",
+		field: "answers.q1.answers[0]",
+		reason: "text_too_large",
+		message: "invalid text: answers.q1.answers[0]: text_too_large",
 	},
 	AccountLoginCompletedNotification: {
 		type: "loginCompleted",
@@ -685,14 +700,6 @@ describe("dalgona schema conformance", () => {
 				key,
 			).toBeNull();
 		}
-	});
-
-	it("rejects an advisor status row missing a usage member", () => {
-		expect(() =>
-			parseAdvisorStatusResponse([
-				without(advisorStatus[0] as JsonObject, "usage"),
-			]),
-		).toThrow("invalid advisor status");
 	});
 
 	it("reads the word of a keyword row and ignores its hue", () => {

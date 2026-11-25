@@ -48,7 +48,6 @@ func (m *model) clearHint() {
 
 type caller interface {
 	Call(context.Context, string, any, any) error
-	Respond(context.Context, string, any) error
 }
 
 type model struct {

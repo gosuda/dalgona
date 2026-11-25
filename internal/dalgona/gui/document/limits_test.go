@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
 )
@@ -245,7 +245,7 @@ func TestCodeOutputSplitsLongLinesAtGraphemes(t *testing.T) {
 		t.Fatalf("rows %v", b.Rows)
 	}
 	for _, row := range b.Rows[:len(b.Rows)-1] {
-		if row.Len() > MaxRowBytes || inputtext.CheckRange(b.Projection.Text, inputtext.Range{Start: row.Start, End: row.End}) != nil {
+		if row.Len() > MaxRowBytes || textinput.CheckRange(b.Projection.Text, textinput.Range{Start: row.Start, End: row.End}) != nil {
 			t.Fatalf("row %v splits a grapheme or exceeds the limit", row)
 		}
 	}

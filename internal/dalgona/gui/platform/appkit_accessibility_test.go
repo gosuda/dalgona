@@ -12,7 +12,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type wireNode struct {
@@ -122,7 +122,7 @@ func publishedTree(t *testing.T, revision uint64, nodes []SemanticNode) (*Access
 
 func TestAppKitSnapshotKeepsReadingOrderAndRelations(t *testing.T) {
 	nodes := validTree()
-	nodes[2].Value, nodes[2].Selection = "a😀b", inputtext.Range{Start: 1, End: 5}
+	nodes[2].Value, nodes[2].Selection = "a😀b", textinput.Range{Start: 1, End: 5}
 	nodes[2].Bounds = image.Rect(-12, 40, 300, 72)
 	_, snap := publishedTree(t, 9, nodes)
 	var e appKitSnapshotEncoder
@@ -176,8 +176,8 @@ func TestAppKitSnapshotSendsLinesInUTF16WithTheirGeometry(t *testing.T) {
 	nodes := validTree()
 	nodes[2].Value = "a😀b\ncd\n"
 	nodes[2].Lines = []TextLine{
-		{Range: inputtext.Range{Start: 0, End: 7}, Bounds: image.Rect(0, 0, 40, 10), Clusters: []ClusterSpan{{0, 10}, {10, 30}, {30, 40}, {40, 40}}},
-		{Range: inputtext.Range{Start: 10, End: 10}, Bounds: image.Rect(0, 20, 0, 30)},
+		{Range: textinput.Range{Start: 0, End: 7}, Bounds: image.Rect(0, 0, 40, 10), Clusters: []ClusterSpan{{0, 10}, {10, 30}, {30, 40}, {40, 40}}},
+		{Range: textinput.Range{Start: 10, End: 10}, Bounds: image.Rect(0, 20, 0, 30)},
 	}
 	got := encodeWire(t, nodes)
 	composer, token, send := got[2], got[3], got[5]
@@ -290,10 +290,10 @@ func TestAppKitSelectionConvertsNativeUnits(t *testing.T) {
 	nodes[2].Value = "a😀b"
 	_, snap := publishedTree(t, 4, nodes)
 	selected, err := resolveWire(t, snap, wireIntent(appKitIntent{revision: 4, action: ActionSelectText, location: 3, length: 1, node: "composer"}))
-	if err != nil || selected.Selection != (inputtext.Range{Start: 5, End: 6}) || selected.Node != "composer" {
+	if err != nil || selected.Selection != (textinput.Range{Start: 5, End: 6}) || selected.Node != "composer" {
 		t.Fatalf("selection %+v, %v; want the b after the emoji at bytes 5 to 6", selected, err)
 	}
-	if _, selectionErr := resolveWire(t, snap, wireIntent(appKitIntent{revision: 4, action: ActionSelectText, location: 2, node: "composer"})); !errors.Is(selectionErr, inputtext.InvalidOffset) {
+	if _, selectionErr := resolveWire(t, snap, wireIntent(appKitIntent{revision: 4, action: ActionSelectText, location: 2, node: "composer"})); !errors.Is(selectionErr, textinput.InvalidOffset) {
 		t.Fatalf("a caret between surrogates: %v", selectionErr)
 	}
 }
@@ -302,11 +302,11 @@ func TestAppKitSetValueDecodesUTF16(t *testing.T) {
 	_, snap := publishedTree(t, 4, validTree())
 	i := appKitIntent{revision: 4, action: ActionSetValue, node: "composer", value: utf16.Encode([]rune("hé😀"))}
 	set, err := resolveWire(t, snap, wireIntent(i))
-	if err != nil || set.Value != "hé😀" || set.Selection != (inputtext.Range{Start: 7, End: 7}) {
+	if err != nil || set.Value != "hé😀" || set.Selection != (textinput.Range{Start: 7, End: 7}) {
 		t.Fatalf("set value %+v, %v", set, err)
 	}
 	i.value = []uint16{'a', 0xD800}
-	if _, err := resolveWire(t, snap, wireIntent(i)); !errors.Is(err, inputtext.InvalidEncoding) {
+	if _, err := resolveWire(t, snap, wireIntent(i)); !errors.Is(err, textinput.InvalidEncoding) {
 		t.Fatalf("an unpaired surrogate: %v", err)
 	}
 }
@@ -339,7 +339,7 @@ func TestServeAppKitIntentsRequestsAndRefuses(t *testing.T) {
 	if got := <-tree.Intents(); got != (AccessibilityIntent{Node: "token", Revision: 6, Action: ActionFocus}) {
 		t.Fatalf("queued %+v", got)
 	}
-	want := AccessibilityIntent{Node: "heading", Revision: 6, Action: ActionSelectText, Selection: inputtext.Range{Start: 1, End: 1}, SelectionEnd: "next"}
+	want := AccessibilityIntent{Node: "heading", Revision: 6, Action: ActionSelectText, Selection: textinput.Range{Start: 1, End: 1}, SelectionEnd: "next"}
 	select {
 	case got := <-tree.Intents():
 		if got != want {

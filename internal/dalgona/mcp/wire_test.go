@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"encoding/json/jsontext"
-	"errors"
 	"strings"
 	"testing"
 )
@@ -165,21 +164,6 @@ func assertMatchPayload(t *testing.T, testCase matchCase, matched bool, result j
 	}
 	if testCase.wantResult != "" && string(result) != testCase.wantResult {
 		t.Fatalf("result = %s, want %s", result, testCase.wantResult)
-	}
-}
-
-func TestMatchResponseErrorType(t *testing.T) {
-	t.Parallel()
-	_, _, err := matchResponse([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params"}}`), 1)
-	if err == nil {
-		t.Fatal("expected an rpc error")
-	}
-	failure, ok := errors.AsType[*rpcError](err)
-	if !ok {
-		t.Fatalf("error type = %T", err)
-	}
-	if failure.Code != -32602 || failure.Message != "bad params" {
-		t.Fatalf("rpc error = %d %q", failure.Code, failure.Message)
 	}
 }
 

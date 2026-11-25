@@ -75,13 +75,31 @@ func (s *server) requestInput(serveCtx, askCtx context.Context, q questionAsk) {
 		return
 	}
 	var response jsontext.Value
-	err = s.conn.CallIDValidated(askCtx, rpc.ValidatedCall{ID: q.requestID, Method: methodRequestUserInput, Params: params, Check: s.answerCheck(q)}, &response)
+	err = s.conn.CallIDChecked(askCtx, q.requestID, rpc.CheckedCall{Method: methodRequestUserInput, Params: params, Check: s.answerCheck(q)}, &response)
 	switch {
 	case err == nil:
 		s.answerQuestion(q, inputReply(q.questions, response))
 	case askCtx.Err() != nil, serveCtx.Err() != nil, errors.Is(err, io.ErrClosedPipe):
 	default:
 		s.cannotAnswer(q, err)
+	}
+}
+
+func (s *server) answerCheck(q questionAsk) rpc.ResponseCheck {
+	return func(result jsontext.Value) error {
+		byID, err := answersByID(result)
+		if err != nil {
+			return nil
+		}
+		textErr := asktool.CheckAnswers(byID)
+		if textErr == nil {
+			return nil
+		}
+		s.send("warning", rpc.WarningNotification{
+			ThreadID: q.thread.ID(), Message: textErr.Error(), RequestID: q.requestID,
+			Reason: string(textErr.Reason), Field: textErr.Field,
+		})
+		return textErr
 	}
 }
 

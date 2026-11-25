@@ -17,8 +17,8 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/giodraw"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
@@ -55,7 +55,7 @@ func (c *card) prepareAnswers() {
 func (a *answer) prepare(q rpc.ToolRequestUserInputQuestion) {
 	a.picks = make([]widget.Clickable, len(q.Options))
 	a.picked = make([]bool, len(q.Options))
-	field, err := platform.NewEditor(inputtext.Answer, inputtext.Draft{})
+	field, err := platform.NewEditor(textinput.Answer, textinput.Draft{})
 	if err != nil {
 		a.fault = err.Error()
 		return
@@ -144,7 +144,7 @@ func (a *answer) choose(q rpc.ToolRequestUserInputQuestion, option int) {
 		return
 	}
 	if a.text() != "" {
-		if err := a.field.SetDraft(inputtext.Draft{}); err != nil {
+		if err := a.field.SetDraft(textinput.Draft{}); err != nil {
 			a.fault = rejectionText(err, "")
 			return
 		}
@@ -163,7 +163,7 @@ func rejectionText(err error, candidate string) string {
 	if errors.Is(err, platform.ErrComposing) {
 		return "Finish or cancel the text composition first."
 	}
-	reason, ok := errors.AsType[inputtext.Reason](err)
+	reason, ok := errors.AsType[textinput.Reason](err)
 	if !ok {
 		return err.Error()
 	}
@@ -488,30 +488,30 @@ func (d *Dock) previewBlock(ps paints, content string) layout.Widget {
 	}
 }
 
-func faultText(reason inputtext.Reason, scalars int) string {
+func faultText(reason textinput.Reason, scalars int) string {
 	switch reason {
-	case inputtext.TextTooLarge:
-		return fmt.Sprintf("This answer has %d characters. Shorten it to %d or fewer.", scalars, inputtext.Answer.Limit.Max)
-	case inputtext.DisallowedControl:
+	case textinput.TextTooLarge:
+		return fmt.Sprintf("This answer has %d characters. Shorten it to %d or fewer.", scalars, textinput.Answer.Limit.Max)
+	case textinput.DisallowedControl:
 		return "This text has a NUL character. Remove it to continue."
-	case inputtext.LineBreakNotAllowed:
+	case textinput.LineBreakNotAllowed:
 		return "This field takes one line. Remove the line breaks to continue."
-	case inputtext.InvalidEncoding, inputtext.InvalidOffset:
+	case textinput.InvalidEncoding, textinput.InvalidOffset:
 	}
 	return "This text has an incomplete character. Retype the last character."
 }
 
 func correctionText(reason string) string {
-	switch inputtext.Reason(reason) {
-	case inputtext.TextTooLarge:
-		return fmt.Sprintf("dalgona refused this answer because it has more than %d characters. Shorten it and submit again.", inputtext.Answer.Limit.Max)
-	case inputtext.DisallowedControl:
+	switch textinput.Reason(reason) {
+	case textinput.TextTooLarge:
+		return fmt.Sprintf("dalgona refused this answer because it has more than %d characters. Shorten it and submit again.", textinput.Answer.Limit.Max)
+	case textinput.DisallowedControl:
 		return "dalgona refused this answer because it has a NUL character. Remove it and submit again."
-	case inputtext.InvalidEncoding:
+	case textinput.InvalidEncoding:
 		return "dalgona refused this answer because it has an incomplete character. Retype it and submit again."
-	case inputtext.LineBreakNotAllowed:
+	case textinput.LineBreakNotAllowed:
 		return "dalgona refused this answer because it has a line break. Remove it and submit again."
-	case inputtext.InvalidOffset:
+	case textinput.InvalidOffset:
 	}
 	return "dalgona refused this answer. Edit it and submit again."
 }

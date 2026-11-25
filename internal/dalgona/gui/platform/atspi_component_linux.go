@@ -5,7 +5,7 @@ package platform
 import (
 	"image"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -28,10 +28,10 @@ var atspiComponentMembers = map[string]atspiMember{
 		return []any{clampInt32(o.node.Bounds.Dx()), clampInt32(o.node.Bounds.Dy())}, nil
 	}},
 	"GrabFocus": {out: []any{false}, call: func(o *atspiObject, _ []any) ([]any, error) {
-		return o.request(ActionFocus, "", inputtext.Range{})
+		return o.request(ActionFocus, "", textinput.Range{})
 	}},
 	"ScrollTo": {in: []any{uint32(0)}, out: []any{false}, call: func(o *atspiObject, _ []any) ([]any, error) {
-		return o.request(ActionScrollIntoView, "", inputtext.Range{})
+		return o.request(ActionScrollIntoView, "", textinput.Range{})
 	}},
 }
 
@@ -139,7 +139,7 @@ var atspiActionMembers = map[string]atspiMember{
 		if err := atspiActionIndex(args[0].(int32)); err != nil {
 			return nil, err
 		}
-		return o.request(ActionActivate, "", inputtext.Range{})
+		return o.request(ActionActivate, "", textinput.Range{})
 	}},
 }
 

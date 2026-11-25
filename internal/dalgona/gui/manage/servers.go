@@ -15,8 +15,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	mcpLinePolicy  = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: mcpFieldBytes}}
-	mcpLinesPolicy = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: mcpFieldBytes}}
+	mcpLinePolicy  = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: mcpFieldBytes}}
+	mcpLinesPolicy = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: mcpFieldBytes}}
 	errNoSource    = errors.New("the daemon returned MCP runtime status without its configuration source; upgrade the daemon (mcpConfig:1 requires provenance)")
 	errOtherConfig = errors.New("the runtime status answers another configuration version")
 )
@@ -158,7 +158,7 @@ func (e *serverEditor) config() (mcpConfig, []string) {
 		return e.httpConfig()
 	}
 	var problems []string
-	if inputtext.Blank(e.command.text()) {
+	if textinput.VisuallyBlank(e.command.text()) {
 		problems = append(problems, "A stdio server needs a command.")
 	}
 	env := map[string]mcpEnvValue{}
@@ -437,7 +437,7 @@ func (s *Servers) saveEditor(b binding) {
 	e := &s.editor
 	name := e.name.text()
 	c, problems := e.config()
-	if inputtext.Blank(name) || strings.ContainsAny(name, " \t") {
+	if textinput.VisuallyBlank(name) || strings.ContainsAny(name, " \t") {
 		problems = append(problems, "A server needs a name without spaces.")
 	}
 	if e.existing == "" && slices.ContainsFunc(s.servers(), func(x mcpServer) bool { return x.Name == name && x.Source == sourceUser }) {

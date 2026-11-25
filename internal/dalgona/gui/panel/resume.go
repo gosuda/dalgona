@@ -9,8 +9,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
@@ -87,7 +87,7 @@ func (r *resumePanel) update(gtx layout.Context, s *scene) {
 		return
 	}
 	if text := r.filter.text(); text != r.query {
-		r.query, r.changed, r.armed = text, gtx.Now, inputtext.Searchable(text)
+		r.query, r.changed, r.armed = text, gtx.Now, textinput.Searchable(text)
 		r.restart(s.out)
 	}
 	r.page(gtx, s)
@@ -237,7 +237,7 @@ func (r *resumePanel) layout(gtx layout.Context, s *scene) layout.Dimensions {
 	for _, ep := range s.env.View.Endpoints() {
 		content = append(content, r.laneRows(s, ep)...)
 	}
-	if inputtext.Searchable(r.query) {
+	if textinput.Searchable(r.query) {
 		content = append(content, r.searchRows(s)...)
 	}
 	n, row := rows(content)

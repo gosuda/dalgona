@@ -9,7 +9,7 @@ import (
 
 	"gioui.org/layout"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
@@ -278,7 +278,7 @@ func keyProblem(key string) string {
 	if err := keyPolicy.Check(key); err != nil {
 		return faultNotice(err, keyPolicy)
 	}
-	if inputtext.Blank(key) {
+	if textinput.VisuallyBlank(key) {
 		return "Enter the API key."
 	}
 	return ""
@@ -298,7 +298,7 @@ func (l *loginPanel) sendPaste(s *scene) {
 		l.paste.fault = faultNotice(err, pastePolicy)
 		return
 	}
-	if inputtext.Blank(value) {
+	if textinput.VisuallyBlank(value) {
 		l.paste.fault = "Paste the redirect URL or the authorization code."
 		return
 	}

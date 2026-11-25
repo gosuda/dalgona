@@ -2,7 +2,7 @@
 
 package platform
 
-import "github.com/gosuda/dalgona/internal/dal/inputtext"
+import "github.com/gosuda/dalgona/internal/dal/textinput"
 
 func atspiSelectable(parent, child Role) bool {
 	return parent == RoleList && child == RoleListItem || parent == RoleMenu && child == RoleMenuItem || child == RoleRadioButton
@@ -116,5 +116,5 @@ func (o *atspiObject) choose(selected bool) ([]any, error) {
 	case !selected && o.node.Role == RoleRadioButton:
 		return []any{false}, nil
 	}
-	return o.request(ActionActivate, "", inputtext.Range{})
+	return o.request(ActionActivate, "", textinput.Range{})
 }

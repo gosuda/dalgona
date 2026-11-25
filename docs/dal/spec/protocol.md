@@ -32,7 +32,13 @@ Every response and notification in the Codex subset MUST validate against the ve
 ## Text inputs
 
 [Input text](input-text.md) defines the shared input contract for GUI, TUI, web, and daemon callers.
-The daemon applies the parse checks and the parameter checks below.
+The daemon applies the field checks of `internal/dal/textinput` before any effect of the request.
+`turn/start` and `turn/steer` check every `text` item and the `path` of every `mention`, `skill`, and `localImage` item.
+They finish these checks before they read an image or touch the thread.
+Their field reads `input[<index>].<member>`, where `<index>` counts every input item from zero.
+`review/start` checks `target.title` and `target.instructions`, `thread/name/set` checks `name`, and `account/login/start` checks `apiKey`.
+`dalgona/keywords/match` checks `text` against its byte limit.
+`Thread.Submit` repeats the check on its whole input for callers outside the protocol.
 
 The daemon MUST reject malformed UTF-8 and unpaired JSON surrogate escapes before dispatching a message.
 It MUST NOT enable replacement decoding for user input.
@@ -71,7 +77,7 @@ A string anywhere inside an object or array location reports the field of that l
 
 Each location rejects NUL with `disallowed_control`.
 `apiKey` also rejects a line break with `line_break_not_allowed`.
-The `dalgona/keywords/match` `text` limit is 64 KiB. The limit of every other location is the 16 MiB line limit.
+The `dalgona/keywords/match` `text` limit is 64 KiB. Every other location uses the 16 MiB line limit.
 
 Accepted free text MUST preserve its decoded Unicode scalar sequence.
 The daemon MUST NOT trim, normalize, case-fold, or strip it as a general input cleanup step.
@@ -296,7 +302,7 @@ The field MUST identify the invalid answer, such as `answers.q1.answers[0]`, wit
 The field has the form `answers.<questionId>.answers[<index>]`. The index counts from zero.
 All five members are strings. The `reason` is an input-text reason such as `disallowed_control` or `text_too_large`.
 The `message` is `invalid text: <field>: <reason>`. The `requestId` is the string id of the original `item/tool/requestUserInput` request.
-An exact offered option label is not typed text, so it skips text validation.
+An exact offered option label skips text validation.
 This warning MUST NOT carry `serverRequest/resolved` or create a journal event.
 
 First-party clients MUST retain the draft and question card until `serverRequest/resolved`, including after sending an answer.
@@ -318,16 +324,12 @@ Reconnecting or reopening MUST NOT be promised as recovery, because losing the l
 The server MUST NOT accept invalid answer text to preserve that older behavior.
 
 The transport validates a typed response before its response dispatcher consumes the waiter.
-`rpc.Conn.CallIDValidated` keeps the waiter, the request id, and the original deadline after a rejected answer.
-This is transport work, not a new request method or a new question id scheme.
-
-A client that dials with `rpc.Dial` receives each server request in wire order.
-If the client handler implements `rpc.RequestArrival`, the dispatch loop calls `RequestArrived` before it starts the handler that waits for the answer.
-This call occurs in the same order as the notifications, so a native client can put `dalgona/request` at its ordinal.
-The handler `Request` then sends the first response.
-To send a corrected response, the client calls `rpc.Conn.Respond` with the original request id and the new result.
-`Respond` sends one response envelope with the request id as a JSON string. It does not wait for a reply.
-The client sends a correction only after a matching correction warning and before `serverRequest/resolved`.
+`rpc.Conn.CallIDChecked` keeps the waiter, the request id, and the original deadline after a rejected answer.
+`rpc.Conn.CallIDChecked` runs that validation before it removes the waiter. It adds no request method or question id scheme.
+The warning reaches only the connection whose response failed the check.
+`rpc.ClientResponder` gives a client request handler that retained sender.
+A handler that answers through it returns `rpc.ErrResponded`, and the connection then sends nothing more for that request.
+The handler's context ends when `serverRequest/resolved` names its request.
 
 A client MUST answer `{"answers": {}}` to dismiss the questions. Any other error response MUST mean that the window cannot answer.
 
@@ -403,6 +405,8 @@ A `userMessage` item MUST carry `keywords` when its prompt fired notices. Each e
   Stdin has no read deadline and accepts at most 1048576 bytes.
   Use `</dev/null` or `ssh -n` to avoid unintended stdin input.
   The client MUST reject malformed UTF-8 before submission, replacing the previous U+FFFD repair behavior.
+  It MUST also reject NUL before submission.
+  Either refusal prints `invalid text: stdin: <reason>; pipe UTF-8 text without NUL`, exits 1, and dials no daemon.
   This is an explicit compatibility tightening under [Input text](input-text.md).
   The existing headless adapter removes trailing CR and LF characters as a documented CLI convenience.
   That transformation MUST NOT apply to GUI, TUI, web, or direct daemon text inputs.

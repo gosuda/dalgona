@@ -133,6 +133,7 @@ linters:
             - "**/internal/dal/syntax/**"
             - "**/internal/dal/shellargs/**"
             - "**/internal/dal/secrets/**"
+            - "**/internal/dal/textinput/**"
           deny:
             - pkg: "github.com/gosuda/dalgona/internal/dalgona"
               desc: core must not import interfaces or batteries
@@ -190,7 +191,7 @@ linters:
               desc: tui reaches the core only through internal/dal/rpc
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
-            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dal/textinput$"
         gui-imports:
           list-mode: lax
           files:
@@ -203,7 +204,7 @@ linters:
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
             - "github.com/gosuda/dalgona/internal/dalgona/client$"
-            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dal/textinput$"
             - "github.com/gosuda/dalgona/internal/dalgona/gui"
         gui-terminal-imports:
           list-mode: lax
@@ -216,7 +217,7 @@ linters:
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
             - "github.com/gosuda/dalgona/internal/dalgona/client$"
-            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dal/textinput$"
             - "github.com/gosuda/dalgona/internal/dalgona/gui"
             - "github.com/gosuda/dalgona/internal/dalgona/vtstate$"
         gui-root-imports:
@@ -230,7 +231,7 @@ linters:
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
             - "github.com/gosuda/dalgona/internal/dalgona/client$"
-            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dal/textinput$"
             - "github.com/gosuda/dalgona/internal/dalgona/gui"
             - "github.com/gosuda/dalgona/internal/dal/config$"
             - "github.com/gosuda/dalgona/internal/dalgona/doctor$"
@@ -244,7 +245,7 @@ linters:
           allow:
             - "github.com/gosuda/dalgona/internal/dal/rpc$"
             - "github.com/gosuda/dalgona/internal/dalgona/client$"
-            - "github.com/gosuda/dalgona/internal/dal/inputtext$"
+            - "github.com/gosuda/dalgona/internal/dal/textinput$"
             - "github.com/gosuda/dalgona/internal/dalgona/gui"
             - "github.com/gosuda/dalgona/internal/dal/config$"
             - "github.com/gosuda/dalgona/internal/dalgona/doctor$"
@@ -270,6 +271,12 @@ linters:
           deny:
             - pkg: "gioui.org"
               desc: design tokens stay pure Go so headless tests cover them
+        text-input-leaf:
+          files:
+            - "**/internal/dal/textinput/**"
+          deny:
+            - pkg: "github.com/gosuda/dalgona/internal/"
+              desc: the text input package holds Unicode tables, segmentation, and field checks only
         rpc-wire:
           files:
             - "**/internal/dal/rpc/**"

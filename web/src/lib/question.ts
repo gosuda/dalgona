@@ -1,24 +1,26 @@
-import { isBlank, scalarCount, type TextFault, textFault } from "./inputtext";
+import { answerScalars, checkText, type TextReason } from "./text/validate";
 import type {
 	JsonValue,
-	QuestionCorrection,
 	QuestionItem,
 	QuestionOption,
 	QuestionRequest,
 	QuestionSelection,
-	QuestionWarning,
 	RequestId,
 	ServerRequest,
 } from "./types";
 import { QUESTION_METHOD } from "./types";
 
-export const MAX_ANSWER = 2000;
-
-export type AnswerFault = TextFault | "text_too_large";
-
 interface Members {
 	readonly [key: string]: unknown;
 }
+
+const textErrors: Readonly<Record<TextReason, string>> = {
+	text_too_large: `Shorten this answer to ${answerScalars} characters or fewer.`,
+	disallowed_control: "Remove the NUL character from this answer.",
+	invalid_encoding: "Retype this answer: it holds an incomplete character.",
+	line_break_not_allowed: "Remove the line break from this answer.",
+	invalid_offset: "Retype this answer.",
+};
 
 const resolutionNotices: Readonly<Record<string, string>> = {
 	answered: "Question answered in another window",
@@ -28,34 +30,8 @@ const resolutionNotices: Readonly<Record<string, string>> = {
 	timedOut: "Question timed out",
 };
 
-const correctionNotices: Readonly<Record<string, string>> = {
-	text_too_large: `dalgona refused this answer because it has more than ${MAX_ANSWER} characters. Shorten it and submit again.`,
-	disallowed_control:
-		"dalgona refused this answer because it has a NUL character. Remove it and submit again.",
-	invalid_encoding:
-		"dalgona refused this answer because it has an incomplete character. Retype it and submit again.",
-	line_break_not_allowed:
-		"dalgona refused this answer because it has a line break. Remove it and submit again.",
-};
-
-const correctionField = /^answers\.(.+)\.answers\[(\d+)\]$/;
-
 function isMembers(value: unknown): value is Members {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isModelText(value: unknown): value is string {
-	return typeof value === "string" && textFault(value) === null;
-}
-
-function isRequiredText(value: unknown): value is string {
-	return isModelText(value) && !isBlank(value);
-}
-
-export function answerFault(text: string): AnswerFault | null {
-	const fault = textFault(text);
-	if (fault !== null) return fault;
-	return scalarCount(text) > MAX_ANSWER ? "text_too_large" : null;
 }
 
 function parseOption(value: unknown): QuestionOption | null {
@@ -63,8 +39,12 @@ function parseOption(value: unknown): QuestionOption | null {
 	const label = value["label"];
 	const description = value["description"];
 	const preview = value["preview"];
-	if (!isRequiredText(label) || !isRequiredText(description)) return null;
-	if (preview !== undefined && preview !== null && !isModelText(preview)) {
+	if (typeof label !== "string" || typeof description !== "string") return null;
+	if (
+		preview !== undefined &&
+		preview !== null &&
+		typeof preview !== "string"
+	) {
 		return null;
 	}
 	return {
@@ -95,8 +75,8 @@ function parseQuestion(value: unknown): QuestionItem | null {
 	const multiSelect = value["multiSelect"];
 	if (
 		typeof id !== "string" ||
-		!isRequiredText(header) ||
-		!isRequiredText(question) ||
+		typeof header !== "string" ||
+		typeof question !== "string" ||
 		typeof isOther !== "boolean"
 	) {
 		return null;
@@ -162,8 +142,22 @@ function answerTexts(
 	const picked = question.options
 		.map((option) => option.label)
 		.filter((label) => selection?.picked.includes(label) === true);
-	const other = selection?.other ?? "";
-	return other === "" ? picked : [...picked, other];
+	return [...picked, selection?.other ?? ""].filter((text) => text !== "");
+}
+
+export function answerError(text: string): string | null {
+	const reason = checkText(text, { maxScalars: answerScalars });
+	return reason === undefined ? null : textErrors[reason];
+}
+
+export function correctionText(reason: string, message: string): string {
+	return Object.hasOwn(textErrors, reason)
+		? textErrors[reason as TextReason]
+		: message;
+}
+
+export function correctedQuestion(field: string): string | null {
+	return /^answers\.(.+)\.answers\[\d+\]$/s.exec(field)?.[1] ?? null;
 }
 
 export function questionResponse(
@@ -179,40 +173,13 @@ export function questionResponse(
 	return { answers };
 }
 
-export function resolutionNotice(resolution: string | null): string | null {
+export function resolutionNotice(
+	resolution: string | null,
+	submitted: boolean,
+): string | null {
 	if (resolution === null || !Object.hasOwn(resolutionNotices, resolution)) {
 		return null;
 	}
+	if (submitted && resolution === "answered") return "Question answered";
 	return resolutionNotices[resolution] ?? null;
-}
-
-export function parseQuestionWarning(params: unknown): QuestionWarning | null {
-	if (!isMembers(params)) return null;
-	const { threadId, message, requestId, reason, field } = params;
-	if (
-		typeof threadId !== "string" ||
-		typeof message !== "string" ||
-		(typeof requestId !== "string" && typeof requestId !== "number") ||
-		typeof reason !== "string" ||
-		typeof field !== "string"
-	) {
-		return null;
-	}
-	return { threadId, message, requestId, reason, field };
-}
-
-export function correctionOf(warning: QuestionWarning): QuestionCorrection {
-	const match = correctionField.exec(warning.field);
-	return {
-		questionId: match?.[1] ?? null,
-		answerIndex: match?.[2] === undefined ? null : Number(match[2]),
-		reason: warning.reason,
-	};
-}
-
-export function correctionNotice(reason: string): string {
-	const notice = Object.hasOwn(correctionNotices, reason)
-		? correctionNotices[reason]
-		: undefined;
-	return notice ?? "dalgona refused this answer. Edit it and submit again.";
 }

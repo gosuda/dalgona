@@ -11,7 +11,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 
 	"golang.org/x/sys/windows"
 )
@@ -262,7 +262,7 @@ func uiaFromWide(text *uint16) (string, bool) {
 }
 
 func uiaDecodeUnits(units []uint16) (string, bool) {
-	s, err := inputtext.DecodeUTF16(units)
+	s, err := textinput.DecodeUTF16(units)
 	return s, err == nil
 }
 

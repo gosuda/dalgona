@@ -8,7 +8,7 @@ import (
 	"gioui.org/io/key"
 	"gioui.org/layout"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
 )
@@ -137,7 +137,7 @@ func (d *Dock) history(env frame) []string {
 
 func (d *Dock) recallOlder(env frame) {
 	current := d.editor.Draft()
-	if current.Selection != (inputtext.Range{}) {
+	if current.Selection != (textinput.Range{}) {
 		return
 	}
 	if next, ok := d.recall.older(d.history(env), current); ok {
@@ -155,7 +155,7 @@ func (d *Dock) recallNewer(env frame) {
 	}
 }
 
-func (d *Dock) showRecall(next inputtext.Draft) {
+func (d *Dock) showRecall(next textinput.Draft) {
 	if d.setEditor(next) == nil {
 		d.palette.reopen()
 	}
@@ -181,11 +181,11 @@ func (d *Dock) claim() {
 
 func rejectionText(err error) string {
 	switch {
-	case errors.Is(err, inputtext.TextTooLarge):
+	case errors.Is(err, textinput.TextTooLarge):
 		return "The text exceeds 15 MiB; shorten it or attach less."
-	case errors.Is(err, inputtext.DisallowedControl):
+	case errors.Is(err, textinput.DisallowedControl):
 		return "The text contains a NUL character, which a message cannot carry; remove it."
-	case errors.Is(err, inputtext.InvalidEncoding):
+	case errors.Is(err, textinput.InvalidEncoding):
 		return "The text is not valid UTF-8; copy it again from its source."
 	case errors.Is(err, platform.ErrComposing):
 		return "Finish or cancel the text composition first."

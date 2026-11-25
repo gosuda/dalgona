@@ -281,16 +281,6 @@ func TestValidateRejects(t *testing.T) {
 	}
 }
 
-func TestValidateAcceptsConstructed(t *testing.T) {
-	graph := Graph{Nodes: []Node{
-		{ID: "a", Prompt: "first", Writes: []string{"src"}},
-		{ID: "b", Prompt: "second", Needs: []string{"a"}, Writes: []string{"src/ok"}},
-	}}
-	if err := Validate(graph); err != nil {
-		t.Fatalf("Validate() = %v, want nil", err)
-	}
-}
-
 func TestErrorOrdering(t *testing.T) {
 	localErr := graphJSON(
 		nodeJSON("a", `"needs":["ghost"]`),

@@ -7,11 +7,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type mention struct {
-	span  inputtext.Range
+	span  textinput.Range
 	query string
 }
 
@@ -35,7 +35,7 @@ func mentionAt(text string, caret int) (mention, bool) {
 	if start >= end || text[start] != '@' {
 		return mention{}, false
 	}
-	return mention{span: inputtext.Range{Start: start, End: end}, query: text[start+1 : end]}, true
+	return mention{span: textinput.Range{Start: start, End: end}, query: text[start+1 : end]}, true
 }
 
 func insertedPath(path string) string {

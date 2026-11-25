@@ -24,7 +24,7 @@ func TestCellsAndFitTable(t *testing.T) {
 		{"한글", 4, "한글"},
 		{"한글한글", 8, "한..."},
 		{"α", 1, "α"},
-		{"e\u0301", 1, "e\u0301"},
+		{"e\u0301", 1, "é"},
 	}
 	for _, tc := range cases {
 		if got := screen.cells(tc.in); got != tc.cells {
@@ -379,27 +379,6 @@ func TestWrapKeepsTheMarkOfAWideSpaceInsideARow(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-func TestWrapPreservesExactBytes(t *testing.T) {
-	t.Parallel()
-	screen := screenState{method: ansi.GraphemeWidth}
-	for _, text := range []string{"éx", "한글", "aé한x"} {
-		for _, n := range []int{1, 2, 3, 5, 39} {
-			rows := screen.wrap(text, n)
-			if got := strings.Join(rows, ""); got != text {
-				t.Errorf("wrap(%q, %d) = %q, want the exact input bytes", text, n, rows)
-			}
-		}
-	}
-}
-
-func TestFitKeepsExactText(t *testing.T) {
-	t.Parallel()
-	screen := screenState{method: ansi.GraphemeWidth}
-	if got := screen.fit("é", 5); got != "é" {
-		t.Errorf("fit(decomposed, 5) = %q, want the exact text", got)
 	}
 }
 

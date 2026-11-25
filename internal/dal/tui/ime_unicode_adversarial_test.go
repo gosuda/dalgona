@@ -217,10 +217,10 @@ func TestEditorUpMeasuresClusterWidthInUnicodeCore(t *testing.T) {
 	}
 }
 
-func TestPasteAtByteLimitKeepsUTF8(t *testing.T) {
+func TestPasteAtByteLimitRefusesMalformedUTF8Whole(t *testing.T) {
 	t.Parallel()
-	cjk := strings.Repeat("\u4e2d", pasteLimit/3)
-	emoji := strings.Repeat("\U0001f600", pasteLimit/4)
+	cjk := strings.Repeat("中", pasteLimit/3)
+	emoji := strings.Repeat("😀", pasteLimit/4)
 	truncated := strings.Repeat("a", pasteLimit-2) + "\xe4\xb8"
 	cases := []struct {
 		name    string
@@ -232,7 +232,7 @@ func TestPasteAtByteLimitKeepsUTF8(t *testing.T) {
 		{"limit exact CJK plus ascii", cjk + "a", cjk + "a", ""},
 		{"limit exact emoji", emoji, emoji, ""},
 		{"limit plus one refused", cjk + "ab", "", "1 MiB"},
-		{"truncated sequence at limit refused", truncated, "", "invalid UTF-8"},
+		{"truncated sequence at limit", truncated, "", "Paste holds invalid UTF-8. Nothing was pasted."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,8 +247,8 @@ func TestPasteAtByteLimitKeepsUTF8(t *testing.T) {
 			if !utf8.ValidString(got) {
 				t.Fatal("composer holds invalid UTF-8")
 			}
-			if tc.notice != "" && !strings.Contains(m.notice, tc.notice) {
-				t.Fatalf("refused paste notice = %q, want it to name %q", m.notice, tc.notice)
+			if tc.want == "" && !strings.Contains(m.notice, tc.notice) {
+				t.Fatalf("refused paste notice = %q, want %q", m.notice, tc.notice)
 			}
 		})
 	}
@@ -481,8 +481,9 @@ func checkFitCut(t *testing.T, screen screenState, text string, n int) {
 	if cells := rendererCells(screen.method, got); cells > n {
 		t.Fatalf("method %v fit(%q, %d) = %q holds %d cells", screen.method, text, n, got, cells)
 	}
-	if rendererCells(screen.method, text) <= n {
-		if got != text {
+	whole := screen.nfc(text)
+	if rendererCells(screen.method, whole) <= n {
+		if got != whole {
 			t.Fatalf("method %v fit(%q, %d) = %q, want the text unchanged", screen.method, text, n, got)
 		}
 		return
@@ -491,7 +492,7 @@ func checkFitCut(t *testing.T, screen screenState, text string, n int) {
 	if !ok {
 		t.Fatalf("method %v fit(%q, %d) = %q, want a cut text to end with ...", screen.method, text, n, got)
 	}
-	rest, ok := strings.CutPrefix(ansi.Strip(text), plain)
+	rest, ok := strings.CutPrefix(ansi.Strip(whole), plain)
 	if !ok {
 		t.Fatalf("method %v fit(%q, %d) = %q, want a prefix of the text", screen.method, text, n, got)
 	}
@@ -525,7 +526,7 @@ func TestFitCutsAtTheByteBoundOfALongCombiningRun(t *testing.T) {
 		if got := screen.fit(text, 3); got != "..." {
 			t.Errorf("method %v fit of abc, a combining run and d in 3 cells = %q, want ...", method, got)
 		}
-		if got, want := screen.fit(text, 4), text; got != want {
+		if got, want := screen.fit(text, 4), screen.nfc(text); got != want {
 			t.Errorf("method %v fit of the same text in 4 cells = %d bytes, want the whole %d bytes", method, len(got), len(want))
 		}
 	}
@@ -605,7 +606,7 @@ func TestFitMatchesTheRendererTruncateWhereItMeasuresRight(t *testing.T) {
 	}
 	for _, text := range texts {
 		for n := 3; n <= screen.cells(text)+1; n++ {
-			want := ansi.Truncate(text, n, "...")
+			want := ansi.Truncate(screen.nfc(text), n, "...")
 			if got := screen.fit(text, n); got != want {
 				t.Errorf("fit(%q, %d) = %q, want %q", text, n, got, want)
 			}
@@ -619,12 +620,12 @@ func TestFitKeepsTextThatFitsAfterALongCombiningRun(t *testing.T) {
 	for _, method := range fitMethods {
 		screen := screenState{method: method}
 		fits := "e" + marks + "xyz"
-		if got, want := screen.fit(fits, 5), fits; got != want {
+		if got, want := screen.fit(fits, 5), screen.nfc(fits); got != want {
 			t.Errorf("method %v fit of a combining run and xyz = %d bytes, want the %d bytes of the whole text", method, len(got), len(want))
 		}
 		over := "e" + marks + "xyzabcdef"
 		got := screen.fit(over, 5)
-		if want := "e" + marks + "x..."; got != want {
+		if want := screen.nfc("e"+marks+"x") + "..."; got != want {
 			t.Errorf("method %v fit of a combining run and xyzabcdef = %d bytes ending %q, want %d bytes ending %q", method, len(got), got[max(0, len(got)-8):], len(want), want[len(want)-8:])
 		}
 		if cells := screen.cells(got); cells > 5 {

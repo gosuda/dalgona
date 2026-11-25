@@ -1,28 +1,19 @@
 <script lang="ts">
 import { untrack } from "svelte";
-import EscapedText from "#lib/components/EscapedText.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import { isImeKey } from "#lib/ime.ts";
+import { oneLine } from "#lib/oneLine.ts";
 import {
-	collapsedDisplayKey,
-	type DisplayReveal,
-	faultNotices,
-	invisibleKey,
-	multilineText,
-	scalarCount,
-	selectDeletedCluster,
-} from "#lib/inputtext.ts";
-import {
-	type AnswerFault,
-	answerFault,
-	correctionNotice,
-	MAX_ANSWER,
+	answerError,
+	correctedQuestion,
+	correctionText,
 } from "#lib/question.ts";
+import { displayBlock, displayLine, distinctLines } from "#lib/text/display.ts";
 import type {
-	QuestionCorrection,
 	QuestionItem,
 	QuestionRequest,
 	QuestionSelection,
+	QuestionSubmission,
 } from "#lib/types.ts";
 
 interface Props {
@@ -30,13 +21,7 @@ interface Props {
 	position: number;
 	total: number;
 	subagent: string | null;
-	answered?: boolean;
-	correction?: QuestionCorrection | null;
-	draft?: readonly QuestionSelection[] | null;
-	onDraft?: (
-		request: QuestionRequest,
-		selections: readonly QuestionSelection[],
-	) => void;
+	submission: QuestionSubmission | null;
 	onSubmit: (
 		request: QuestionRequest,
 		selections: readonly QuestionSelection[],
@@ -49,10 +34,7 @@ let {
 	position,
 	total,
 	subagent,
-	answered = false,
-	correction = null,
-	draft = null,
-	onDraft,
+	submission,
 	onSubmit,
 	onDismiss,
 }: Props = $props();
@@ -60,7 +42,9 @@ let card = $state<HTMLElement>();
 let heading = $state<HTMLElement>();
 let details = $state<HTMLElement>();
 let selections = $state<readonly QuestionSelection[]>([]);
-let pendingOther = $state<Record<number, string>>({});
+let refusal = $state<{ readonly id: string; readonly message: string } | null>(
+	null,
+);
 
 const empty: QuestionSelection = { picked: [], other: "" };
 const title = $derived(
@@ -68,15 +52,19 @@ const title = $derived(
 		? "Answer these questions"
 		: "Answer this question",
 );
-const faults = $derived(
-	request.questions.map((_, index) => answerFault(selectionAt(index).other)),
+const awaiting = $derived(submission?.correction === null);
+const correction = $derived(submission?.correction ?? null);
+const corrected = $derived(
+	correction === null ? null : correctedQuestion(correction.field),
 );
-const correctedIndex = $derived(
-	correction === null
-		? -1
-		: request.questions.findIndex(
-				(question) => question.id === correction.questionId,
-			),
+const cardError = $derived(
+	correction !== null &&
+		!request.questions.some((question) => question.id === corrected) &&
+		request.questions.every((_, index) =>
+			sameSelection(selectionAt(index), submission?.selections[index] ?? empty),
+		)
+		? correctionText(correction.reason, correction.message)
+		: null,
 );
 
 const lineStep = 48;
@@ -96,8 +84,7 @@ const scrolls: Readonly<Record<string, (body: HTMLElement) => void>> = {
 
 $effect(() => {
 	void request.id;
-	selections = copyDraft(untrack(() => draft));
-	pendingOther = {};
+	selections = untrack(() => submission?.selections ?? []);
 	heading?.focus();
 });
 
@@ -105,22 +92,10 @@ function selectionAt(index: number): QuestionSelection {
 	return selections[index] ?? empty;
 }
 
-function copyDraft(
-	source: readonly QuestionSelection[] | null | undefined,
-): readonly QuestionSelection[] {
-	if (source === null || source === undefined) return [];
-	return request.questions.map((_, index) => {
-		const entry = source[index];
-		if (entry === undefined) return { picked: [], other: "" };
-		return { picked: [...entry.picked], other: entry.other };
-	});
-}
-
 function update(index: number, next: QuestionSelection): void {
 	const copy = request.questions.map((_, entry) => selectionAt(entry));
 	copy[index] = next;
 	selections = copy;
-	onDraft?.(request, copy);
 }
 
 function choose(index: number, question: QuestionItem, label: string): void {
@@ -135,80 +110,34 @@ function choose(index: number, question: QuestionItem, label: string): void {
 	update(index, { picked, other: current.other });
 }
 
-function typeOther(
-	index: number,
-	question: QuestionItem,
-	event: Event & { readonly currentTarget: HTMLTextAreaElement },
-): void {
-	const raw = event.currentTarget.value;
-	if (event instanceof InputEvent && event.isComposing) {
-		pendingOther = { ...pendingOther, [index]: raw };
-		return;
-	}
-	const rest = { ...pendingOther };
-	delete rest[index];
-	pendingOther = rest;
-	const value = multilineText(raw);
+function typeOther(index: number, question: QuestionItem, value: string): void {
+	refusal = null;
 	const current = selectionAt(index);
-	if (!question.multiSelect && value !== "" && answerFault(value) !== null) {
-		update(index, { picked: current.picked, other: value });
-		return;
-	}
 	const picked = question.multiSelect || value === "" ? current.picked : [];
 	update(index, { picked, other: value });
 }
 
-function answerNotice(fault: AnswerFault, text: string): string {
-	if (fault !== "text_too_large") return faultNotices[fault];
-	return `This answer has ${scalarCount(text)} characters. Shorten it to ${MAX_ANSWER} or fewer.`;
+function hasField(question: QuestionItem): boolean {
+	return question.options.length === 0 || question.isOther;
 }
 
-function typedAnswerIndex(
-	question: QuestionItem,
-	selection: QuestionSelection,
-): number {
-	return question.options.filter((option) =>
-		selection.picked.includes(option.label),
-	).length;
+function sameSelection(a: QuestionSelection, b: QuestionSelection): boolean {
+	return (
+		a.other === b.other &&
+		a.picked.length === b.picked.length &&
+		a.picked.every((label, index) => b.picked[index] === label)
+	);
 }
 
-const correctsTypedAnswer = $derived.by(() => {
-	const question = request.questions[correctedIndex];
-	if (correction === null || question === undefined) return false;
-	if (question.options.length > 0 && !question.isOther) return false;
-	const typed = typedAnswerIndex(question, selectionAt(correctedIndex));
-	return correction.answerIndex === typed;
-});
-
-const cardNotice = $derived(
-	correction === null || correctsTypedAnswer
-		? null
-		: correctionNotice(correction.reason),
-);
-
-function fieldNotice(index: number): string | null {
-	const fault = faults[index] ?? null;
-	if (fault !== null) return answerNotice(fault, selectionAt(index).other);
-	if (correction === null || !correctsTypedAnswer) return null;
-	return correctedIndex === index ? correctionNotice(correction.reason) : null;
-}
-
-function labelReveal(question: QuestionItem, label: string): DisplayReveal {
-	const invisible = invisibleKey(label);
-	const collapsed = collapsedDisplayKey(label);
-	let invisibleTwin = false;
-	let collapsedTwin = false;
-	for (const option of question.options) {
-		if (option.label === label) continue;
-		if (!invisibleTwin && invisibleKey(option.label) === invisible) {
-			invisibleTwin = true;
-		}
-		if (!collapsedTwin && collapsedDisplayKey(option.label) === collapsed) {
-			collapsedTwin = true;
-		}
-	}
-	if (collapsedTwin) return "whitespace";
-	return invisibleTwin ? "invisible" : "controls";
+function errorFor(index: number, question: QuestionItem): string | null {
+	const selection = selectionAt(index);
+	const local = hasField(question) ? answerError(selection.other) : null;
+	if (local !== null) return local;
+	if (correction === null || corrected !== question.id) return null;
+	const sent = submission?.selections[index] ?? empty;
+	return sameSelection(selection, sent)
+		? correctionText(correction.reason, correction.message)
+		: null;
 }
 
 function previewOf(
@@ -223,7 +152,9 @@ function previewOf(
 }
 
 function submit(): void {
-	if (answered || faults.some((fault) => fault !== null)) return;
+	if (awaiting || cardError !== null) return;
+	if (request.questions.some((question, index) => errorFor(index, question)))
+		return;
 	onSubmit(
 		request,
 		request.questions.map((_, index) => selectionAt(index)),
@@ -231,7 +162,7 @@ function submit(): void {
 }
 
 function skip(): void {
-	if (answered) return;
+	if (awaiting) return;
 	onSubmit(
 		request,
 		request.questions.map(() => empty),
@@ -239,7 +170,7 @@ function skip(): void {
 }
 
 function dismiss(): void {
-	if (answered) return;
+	if (awaiting) return;
 	onDismiss(request);
 }
 
@@ -288,9 +219,11 @@ function onKeydown(event: KeyboardEvent): void {
 		{/if}
 		{#each request.questions as question, index (question.id)}
 			{@const selection = selectionAt(index)}
-			<fieldset class="question" aria-describedby={`question-prompt-${question.id}`}>
-				<legend><EscapedText text={question.header} /></legend>
-				<p class="prompt" id={`question-prompt-${question.id}`}><EscapedText text={question.question} /></p>
+			{@const error = refusal?.id === question.id ? refusal.message : errorFor(index, question)}
+			{@const labels = distinctLines(question.options.map((option) => option.label))}
+			<fieldset class="question" disabled={awaiting} aria-describedby={`question-prompt-${question.id}`}>
+				<legend>{displayLine(question.header)}</legend>
+				<p class="prompt" id={`question-prompt-${question.id}`}>{displayLine(question.question)}</p>
 				{#each question.options as option, optionIndex (option.label)}
 					<div class="option" class:selected={selection.picked.includes(option.label)}>
 						<label>
@@ -298,7 +231,6 @@ function onKeydown(event: KeyboardEvent): void {
 								<input
 									type="checkbox"
 									checked={selection.picked.includes(option.label)}
-									disabled={answered}
 									onchange={() => choose(index, question, option.label)}
 								/>
 							{:else}
@@ -306,53 +238,48 @@ function onKeydown(event: KeyboardEvent): void {
 									type="radio"
 									name={`${request.id}-${question.id}`}
 									checked={selection.picked.includes(option.label)}
-									disabled={answered}
 									onchange={() => choose(index, question, option.label)}
 								/>
 							{/if}
-							<span class="choice"><EscapedText text={option.label} reveal={labelReveal(question, option.label)} /></span>
+							<span class="choice">{labels[optionIndex]}</span>
 							{#if optionIndex === 0}
 								<span class="recommended">Recommended</span>
 							{/if}
 						</label>
-						<p class="description"><EscapedText text={option.description} /></p>
+						<p class="description">{displayLine(option.description)}</p>
 					</div>
 				{/each}
-				{#if question.options.length === 0 || question.isOther}
-					{@const notice = fieldNotice(index)}
-					{@const errorId = `question-error-${question.id}`}
-					<textarea
+				{#if hasField(question)}
+					<input
 						class="other"
-						rows="2"
+						type="text"
 						placeholder={question.options.length === 0 ? "Answer" : "Other answer"}
 						aria-label={question.options.length === 0 ? question.header : `Other answer for ${question.header}`}
-						aria-invalid={notice === null ? "false" : "true"}
-						aria-describedby={notice === null ? undefined : errorId}
-						readonly={answered}
-						value={pendingOther[index] ?? selection.other}
-						oninput={(event) => typeOther(index, question, event)}
-						onkeydown={(event) => selectDeletedCluster(event, event.currentTarget)}
-					></textarea>
-					{#if notice !== null}
-						<p class="field-error" id={errorId} role="alert">{notice}</p>
-					{/if}
+						aria-invalid={error === null ? undefined : "true"}
+						aria-describedby={error === null ? undefined : `question-error-${question.id}`}
+						value={selection.other}
+						oninput={(event) => typeOther(index, question, event.currentTarget.value)}
+						{@attach oneLine((message) => (refusal = { id: question.id, message }))}
+					/>
+				{/if}
+				{#if error !== null}
+					<p class="field-error" id={`question-error-${question.id}`} role="alert">{error}</p>
 				{/if}
 				{#if previewOf(question, selection) !== null}
-					<pre class="preview"><EscapedText text={previewOf(question, selection) ?? ""} /></pre>
+					<pre class="preview">{displayBlock(previewOf(question, selection) ?? "")}</pre>
 				{/if}
 			</fieldset>
 		{/each}
 	</div>
-	{#if cardNotice !== null}
-		<p class="field-error card-error" role="alert">{cardNotice}</p>
-	{/if}
-	{#if answered}
-		<p class="waiting" role="status">Waiting for dalgona to accept the answer.</p>
+	{#if awaiting}
+		<p class="sent" role="status">Answer sent. Waiting for the question to close.</p>
+	{:else if cardError !== null}
+		<p class="field-error" role="alert">{cardError}</p>
 	{/if}
 	<div class="request-actions">
-		<button class="point" aria-disabled={answered ? "true" : undefined} onclick={submit}>Submit</button>
-		<button class="quiet" aria-disabled={answered ? "true" : undefined} onclick={skip}>Skip</button>
-		<button class="quiet" aria-disabled={answered ? "true" : undefined} onclick={dismiss}>Dismiss</button>
+		<button class="point" aria-disabled={awaiting ? "true" : undefined} onclick={submit}>Submit</button>
+		<button class="quiet" aria-disabled={awaiting ? "true" : undefined} onclick={skip}>Skip</button>
+		<button class="quiet" aria-disabled={awaiting ? "true" : undefined} onclick={dismiss}>Dismiss</button>
 	</div>
 </section>
 
@@ -462,7 +389,6 @@ function onKeydown(event: KeyboardEvent): void {
 	}
 
 	.other {
-		display: block;
 		width: 100%;
 		min-width: 0;
 		border: 0;
@@ -470,29 +396,20 @@ function onKeydown(event: KeyboardEvent): void {
 		background: transparent;
 		color: var(--text);
 		font-size: max(1rem, var(--size-body));
-		line-height: 1.5;
 		padding: var(--space-1) 0;
-		resize: vertical;
-	}
-
-	.other[aria-invalid="true"] {
-		border-bottom-color: var(--failed-text);
 	}
 
 	.field-error {
 		margin: var(--space-1) 0 0;
 		color: var(--failed-text);
 		font-size: var(--size-caption);
+		overflow-wrap: anywhere;
 	}
 
-	.card-error,
-	.waiting {
+	.sent {
 		margin: var(--space-3) 0 0;
-	}
-
-	.waiting {
 		color: var(--dim);
-		font-size: var(--size-small);
+		font-size: var(--size-caption);
 	}
 
 	.preview {

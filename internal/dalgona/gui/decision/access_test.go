@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access/accesstest"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 )
@@ -68,7 +68,7 @@ func TestAccessibleSecretAnswerNeverPublishesItsValue(t *testing.T) {
 		t.Fatalf("the secure field did not accept the replacement: length=%d", len(got))
 	}
 	secure := h.ax.Find(t, "Answer for Name", platform.RoleSecureField)
-	if secure.Selection != (inputtext.Range{}) || len(secure.Lines) != 0 {
+	if secure.Selection != (textinput.Range{}) || len(secure.Lines) != 0 {
 		t.Fatal("the secure field published its text range or geometry")
 	}
 	for _, n := range h.ax.Nodes {

@@ -134,7 +134,7 @@ func TestEditorUpAndDownMoveBetweenWrappedRows(t *testing.T) {
 	}
 }
 
-func TestEditorDecomposedTextWrapsLikeComposedText(t *testing.T) {
+func TestEditorDecomposedTextWrapsAsComposed(t *testing.T) {
 	t.Parallel()
 	const units = 30
 	tests := []struct {
@@ -156,10 +156,10 @@ func TestEditorDecomposedTextWrapsLikeComposedText(t *testing.T) {
 				view := m.View()
 				return stripANSI(view.Content), view.Cursor
 			}
-			wantText, wantCursor := render(strings.Repeat("a\u00e9", units), test.caretComp)
-			gotText, gotCursor := render(strings.Repeat("ae\u0301", units), test.caret)
-			if want := strings.ReplaceAll(wantText, "\u00e9", "e\u0301"); gotText != want {
-				t.Fatalf("decomposed text renders other rows or other scalars:\n%q\nwant:\n%q", gotText, want)
+			wantText, wantCursor := render(strings.Repeat("aé", units), test.caretComp)
+			gotText, gotCursor := render(strings.Repeat("aé", units), test.caret)
+			if gotText != wantText {
+				t.Fatalf("decomposed text renders differently:\n%s\nwant:\n%s", gotText, wantText)
 			}
 			if gotCursor == nil || wantCursor == nil {
 				t.Fatalf("cursor unset: decomposed %v, composed %v", gotCursor, wantCursor)
@@ -285,21 +285,6 @@ func TestShortPasteWithCRKeepsLineBreaks(t *testing.T) {
 	}
 }
 
-func TestPasteIntoFilterRefusesMultilineWhole(t *testing.T) {
-	t.Parallel()
-	for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
-		m := openModelPicker(t, new(fakeCaller))
-		m.input.field = textField{text: []rune("prior"), cursor: 5}
-		m, _ = drive(t, m, tea.PasteMsg{Content: in})
-		if got := m.input.field.value(); got != "prior" {
-			t.Fatalf("%q: filter holds %q, want the prior value kept whole", in, got)
-		}
-		if m.input.field.cursor != 5 {
-			t.Fatalf("%q: cursor at %d, want 5", in, m.input.field.cursor)
-		}
-	}
-}
-
 func TestChipPromptIsSentUnchangedWhenSlashLike(t *testing.T) {
 	for _, first := range []string{"// x", "/model foo"} {
 		caller := new(fakeCaller)
@@ -348,45 +333,55 @@ func TestOversizePasteRefused(t *testing.T) {
 	}
 }
 
-func TestPasteIntoFilterRefusesSecondLine(t *testing.T) {
-	t.Parallel()
-	m := openModelPicker(t, new(fakeCaller))
-	m.input.field = textField{text: []rune("prior"), cursor: 5}
-	m, _ = drive(t, m, tea.PasteMsg{Content: "one\ntwo"})
-	if got := m.input.field.value(); got != "prior" {
-		t.Fatalf("filter holds %q, want the prior value kept whole", got)
-	}
-}
-
-func TestPasteIntoTheOtherOneLineFieldsRefusesWhole(t *testing.T) {
+func TestOneLineFieldsRefuseAWholePasteWithALineBreak(t *testing.T) {
 	t.Parallel()
 	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
 		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
 	tests := []struct {
 		name  string
+		field string
 		model func(*testing.T) model
 	}{
-		{"api key", func(t *testing.T) model {
+		{"filter", "Filter", func(t *testing.T) model { return openModelPicker(t, new(fakeCaller)) }},
+		{"target", "Review target", func(t *testing.T) model {
+			m := openModelPicker(t, new(fakeCaller))
+			m.list.pending = "baseBranch"
+			return m
+		}},
+		{"api key", "API key", func(t *testing.T) model {
 			m := openLoginPanel(t, new(fakeCaller), "openai")
 			m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 			return m
 		}},
-		{"answer line", func(t *testing.T) model {
+		{"answer line", "Answer", func(t *testing.T) model {
 			m, _ := openQuestion(t, free)
 			return m
 		}},
 	}
+	refusals := map[string]string{
+		"one\rtwo": "takes one line", "one\r\ntwo": "takes one line", "one\ntwo": "takes one line",
+		"one\vtwo": "takes one line", "one\ftwo": "takes one line", "one\u0085two": "takes one line",
+		"one\u2028two": "takes one line", "one\u2029two": "takes one line", "one\x00two": "cannot hold NUL",
+		"one\xfftwo": "needs valid UTF-8",
+	}
 	for _, tt := range tests {
-		for _, in := range []string{"one\rtwo", "one\r\ntwo", "one\ntwo"} {
-			m := tt.model(t)
-			m.input.field = textField{text: []rune("prior"), cursor: 5}
+		for in, reason := range refusals {
+			m := typeKeys(t, tt.model(t), "ke")
 			m, _ = drive(t, m, tea.PasteMsg{Content: in})
-			if got := m.input.field.value(); got != "prior" {
-				t.Fatalf("%s: paste %q left %q, want the prior value kept whole", tt.name, in, got)
+			if got := m.input.field.value(); got != "ke" {
+				t.Fatalf("%s: paste %q left %q, want the earlier text only", tt.name, in, got)
 			}
-			if m.input.field.cursor != 5 {
-				t.Fatalf("%s: paste %q moved the cursor to %d, want 5", tt.name, in, m.input.field.cursor)
+			if m.input.field.cursor != 2 {
+				t.Fatalf("%s: paste %q left the caret at %d, want 2", tt.name, in, m.input.field.cursor)
 			}
+			if want := tt.field + " " + reason + "; nothing was inserted"; m.notice != want {
+				t.Fatalf("%s: paste %q gave notice %q, want %q", tt.name, in, m.notice, want)
+			}
+		}
+		m := typeKeys(t, tt.model(t), "ke")
+		m, _ = drive(t, m, tea.PasteMsg{Content: " y\u00a0\u200d\ue000 "})
+		if got, want := m.input.field.value(), "ke y\u00a0\u200d\ue000 "; got != want {
+			t.Fatalf("%s: one-line paste left %q, want %q", tt.name, got, want)
 		}
 	}
 }
@@ -678,5 +673,34 @@ func TestPromptKeepsItsSurroundingWhitespaceWhenSentOrQueued(t *testing.T) {
 				requireLastPrompt(t, caller.calls, 1, "turn/start", tc.sent)
 			})
 		}
+	}
+}
+
+func TestTextFieldStepMovesMidClusterCaretAcrossTheWholeCluster(t *testing.T) {
+	t.Parallel()
+	right := textField{text: []rune("é"), cursor: 1}
+	right.edit("right")
+	if right.cursor != 2 {
+		t.Fatalf("right from inside the cluster left the caret at %d, want 2", right.cursor)
+	}
+	left := textField{text: []rune("1é"), cursor: 2}
+	left.edit("left")
+	if left.cursor != 1 {
+		t.Fatalf("left from inside the cluster left the caret at %d, want 1", left.cursor)
+	}
+}
+
+func TestEditorPasteKeepsCaretAfterPastedCluster(t *testing.T) {
+	t.Parallel()
+	mark := string(rune(0x301))
+	c := newEditor()
+	c.SetValue("xy")
+	c.cursor = 1
+	c.paste("a" + mark)
+	if got, want := c.Value(), "xa"+mark+"y"; got != want {
+		t.Fatalf("pasted text = %q, want %q", got, want)
+	}
+	if c.cursor != 3 {
+		t.Fatalf("caret after the paste sits at %d, want 3", c.cursor)
 	}
 }

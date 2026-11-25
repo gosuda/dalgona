@@ -1095,7 +1095,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## godbus (BSD-2-Clause)
 
-The X11 input method support in Gio links `github.com/godbus/dbus/v5` v5.2.2 into the native desktop client. Its licence text follows.
+The X11 input method support in Gio links `github.com/godbus/dbus/v5` v5.2.4 into the native desktop client. Its licence text follows.
 
 ```text
 Copyright (c) 2013, Georg Reinke (<guelfey at gmail dot com>), Google
@@ -1855,7 +1855,7 @@ SOFTWARE.
 
 ## Unicode Character Database (Unicode-3.0)
 
-`internal/dal/inputtext/testdata` keeps these Unicode 18.0.0 data files without change: `DerivedCoreProperties`, `GraphemeBreakProperty`, `GraphemeBreakTest`, `PropList`, `SentenceBreakProperty`, `SentenceBreakTest`, `WordBreakProperty`, `WordBreakTest` and `emoji-data`. `internal/dal/inputtext/property_table.go` is generated from them.
+The text packages `internal/dal/textinput` and `web/src/lib/text` build their Unicode tables from the Unicode 18.0.0 data files and keep the Unicode 18.0.0 conformance test data without change. The license of the Unicode data files reads as follows.
 
 ```text
 UNICODE LICENSE V3
@@ -1898,7 +1898,6 @@ not be used in advertising or otherwise to promote the sale, use or other
 dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 ```
-
 ## Chroma (MIT)
 
 The native desktop client links `github.com/alecthomas/chroma/v2` v2.27.0 for syntax highlighting in `internal/dalgona/gui/document/code` and `internal/dalgona/gui/figure`.

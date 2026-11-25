@@ -3,7 +3,6 @@ package tui
 import (
 	"bufio"
 	"context"
-	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -16,19 +15,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 )
-
-type refusingResponder struct {
-	fakeCaller
-	refusals int
-}
-
-func (r *refusingResponder) Respond(ctx context.Context, requestID string, result any) error {
-	if r.refusals > 0 {
-		r.refusals--
-		return errors.New("outbound queue is full")
-	}
-	return r.fakeCaller.Respond(ctx, requestID, result)
-}
 
 func correctionWarning(threadID, requestID, field string) notificationMsg {
 	return notificationMsg{method: "warning", params: []byte(`{"threadId":"` + threadID + `","message":"invalid text: ` + field +
@@ -93,16 +79,7 @@ func assertSentCard(t *testing.T, m model, when string) {
 	if len(m.approvals) != 1 || m.approvals[0].card == nil {
 		t.Fatalf("question card closed %s, before serverRequest/resolved: %#v", when, m.approvals)
 	}
-	assertContains(t, stripANSI(strings.Join(m.questionLines(80, 12), "\n")), "Sent · waiting for the server")
-}
-
-func responseJSON(t *testing.T, record responseRecord) string {
-	t.Helper()
-	data, err := json.Marshal(record.result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(data)
+	assertContains(t, stripANSI(strings.Join(m.questionLines(80, 12), "\n")), "Answer sent; waiting for the agent")
 }
 
 func TestQuestionSubmitKeepsCardReadOnlyUntilResolved(t *testing.T) {
@@ -114,15 +91,15 @@ func TestQuestionSubmitKeepsCardReadOnlyUntilResolved(t *testing.T) {
 	}
 	assertSentCard(t, m, "after the first submit")
 	assertContains(t, stripANSI(strings.Join(m.questionLines(80, 12), "\n")), "because")
-	assertContains(t, liveRowText(m), "Waiting for the server")
+	assertContains(t, liveRowText(m), "Answer sent;")
+	if m.notice != "Answer sent; waiting for the agent" {
+		t.Fatalf("notice = %q, want the sent notice", m.notice)
+	}
 	for _, key := range []tea.KeyPressMsg{press('s', 0, "s"), press(tea.KeyEnter, 0, ""), press(tea.KeyEscape, 0, ""), press(tea.KeyTab, 0, ""), press('x', 0, "x")} {
 		m, _ = drive(t, m, key)
 	}
 	assertSentCard(t, m, "after keys on the sent card")
 	assertQuestionUnsent(t, answer)
-	if len(caller.responses) != 0 {
-		t.Fatalf("keys on the sent card sent %d more responses", len(caller.responses))
-	}
 	assertField(t, m, "", "keys on the sent card")
 	m, _ = drive(t, m, requestResolved("t1", "req-1", "answered"))
 	if len(m.approvals) != 0 {
@@ -133,21 +110,9 @@ func TestQuestionSubmitKeepsCardReadOnlyUntilResolved(t *testing.T) {
 	}
 }
 
-func TestQuestionDisconnectClosesSentCardWithoutSecondAnswer(t *testing.T) {
-	t.Parallel()
-	m, answer := submitFreeText(t, new(fakeCaller), "because")
-	_ = answerJSON(t, answer)
-	m, _ = drive(t, m, disconnectedMsg{err: errors.New("EOF")})
-	if len(m.approvals) != 0 {
-		t.Fatalf("lost connection left the sent card open: %#v", m.approvals)
-	}
-	assertQuestionUnsent(t, answer)
-}
-
 func TestQuestionCorrectionWarningRestoresDraftUnderSameRequest(t *testing.T) {
 	t.Parallel()
-	caller := new(fakeCaller)
-	m, answer := submitFreeText(t, caller, "because")
+	m, answer := submitFreeText(t, new(fakeCaller), "because")
 	_ = answerJSON(t, answer)
 	m, _ = drive(t, m, correctionWarning("t1", "req-1", "answers.q1.answers[0]"))
 	if len(m.approvals) != 1 || !m.approvals[0].card.typing || m.approvals[0].card.index != 0 {
@@ -157,13 +122,11 @@ func TestQuestionCorrectionWarningRestoresDraftUnderSameRequest(t *testing.T) {
 	if !m.noticeError {
 		t.Fatalf("notice %q is not an error", m.notice)
 	}
-	assertContains(t, m.notice, "Why", "answer 1", "disallowed control")
+	assertContains(t, m.notice, "Answer not accepted", "answers.q1.answers[0]", "disallowed_control")
 	m = submitTyped(t, typeText(t, m, " now"))
-	assertQuestionUnsent(t, answer)
-	if len(caller.responses) != 1 || caller.responses[0].requestID != "req-1" {
-		t.Fatalf("corrected responses = %#v, want one under req-1", caller.responses)
+	if got := answerJSON(t, answer); !strings.Contains(got, `"q1":{"answers":["because now"]}`) {
+		t.Fatalf("corrected answer = %s", got)
 	}
-	assertContains(t, responseJSON(t, caller.responses[0]), `"q1":{"answers":["because now"]}`)
 	assertSentCard(t, m, "after the corrected submit")
 }
 
@@ -184,7 +147,7 @@ func TestQuestionCorrectionWarningOpensTheNamedAnswer(t *testing.T) {
 		t.Fatalf("warning opened question %d typing %v, want the typed Features answer", card.index, card.typing)
 	}
 	assertField(t, m, "Mongo", "the correction warning")
-	assertContains(t, m.notice, "Features", "answer 2")
+	assertContains(t, m.notice, "Answer not accepted", "answers.q2.answers[1]", "disallowed_control")
 	assertContains(t, stripANSI(strings.Join(m.questionLines(80, 12), "\n")), "Question 2 of 2 · Features")
 }
 
@@ -231,35 +194,18 @@ func TestQuestionWarningWithoutOpenSentRequestChangesNothing(t *testing.T) {
 
 func TestQuestionLocalSubmissionEntriesNumberEachAttempt(t *testing.T) {
 	t.Parallel()
-	caller := &refusingResponder{refusals: 1}
-	m, answer := submitFreeText(t, caller, "because")
+	m, answer := submitFreeText(t, new(fakeCaller), "because")
 	_ = answerJSON(t, answer)
 	assertEntries(t, m, "Why", "Why: Local submission #1: because")
 	m, _ = drive(t, m, correctionWarning("t1", "req-1", "answers.q1.answers[0]"))
 	m = submitTyped(t, typeText(t, m, " now"))
-	assertEntries(t, m, "Why", "Why: Local submission #1: because")
-	if !m.noticeError || len(m.approvals) != 1 || len(caller.responses) != 0 {
-		t.Fatalf("refused enqueue: notice %q error %v, cards %d, responses %d", m.notice, m.noticeError, len(m.approvals), len(caller.responses))
+	if got := answerJSON(t, answer); !strings.Contains(got, `"q1":{"answers":["because now"]}`) {
+		t.Fatalf("corrected answer = %s", got)
 	}
-	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
 	rows := assertEntries(t, m, "Why", "Why: Local submission #1: because", "Why: Local submission #2: because now")
 	if rows[0].key == rows[1].key {
 		t.Fatalf("two attempts share the row key %q", rows[0].key)
 	}
-	if len(caller.responses) != 1 || caller.responses[0].requestID != "req-1" {
-		t.Fatalf("responses = %#v, want the retry under req-1", caller.responses)
-	}
-}
-
-func TestQuestionLocalSubmissionNamesSkipAndDismiss(t *testing.T) {
-	t.Parallel()
-	m, _ := openQuestion(t, questionParamsJSON)
-	m, _ = drive(t, m, press('s', 0, "s"))
-	assertEntries(t, m, "Database", "Database: Local submission #1: skip requested\nFeatures: Local submission #1: skip requested")
-	m, _ = openQuestion(t, questionParamsJSON)
-	m, _ = drive(t, m, press('2', 0, "2"))
-	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
-	assertEntries(t, m, "Database", "Database: Local submission #1: dismiss requested\nFeatures: Local submission #1: dismiss requested")
 }
 
 func TestQuestionLocalRejectionConsumesNoAttempt(t *testing.T) {
@@ -306,45 +252,6 @@ func TestRequestResolvedClosesOnlyTheMatchingThread(t *testing.T) {
 	}
 }
 
-func TestQuestionRowKeyKeepsFieldsApart(t *testing.T) {
-	t.Parallel()
-	rows := []questionRow{
-		{kind: rowLocalSubmission, threadID: "a:b", turnID: "c", itemID: "i", requestID: "r", attempt: 1},
-		{kind: rowLocalSubmission, threadID: "a", turnID: "b:c", itemID: "i", requestID: "r", attempt: 1},
-		{kind: rowLocalSubmission, threadID: "a", turnID: "b", itemID: `c":"i`, requestID: "r", attempt: 1},
-		{kind: rowLocalSubmission, threadID: "a", turnID: `b":"c`, itemID: "i", requestID: "r", attempt: 1},
-		{kind: rowTimedOut, threadID: "a", turnID: "b", itemID: "i", requestID: "r", attempt: 1},
-		{kind: rowLocalSubmission, threadID: "a", turnID: "b", itemID: "i", requestID: "r:1", attempt: 1},
-		{kind: rowLocalSubmission, threadID: "a", turnID: "b", itemID: "i", requestID: "r", attempt: 11},
-	}
-	seen := make(map[string]questionRow, len(rows))
-	for _, row := range rows {
-		key := row.key()
-		if prior, taken := seen[key]; taken {
-			t.Fatalf("rows %+v and %+v share the key %q", prior, row, key)
-		}
-		seen[key] = row
-	}
-}
-
-func TestQuestionReplayKeepsAttemptsAndDraft(t *testing.T) {
-	t.Parallel()
-	caller := new(fakeCaller)
-	m, first := submitFreeText(t, caller, "because")
-	_ = answerJSON(t, first)
-	replay := make(chan requestAnswer, 1)
-	m, _ = drive(t, m, queuedQuestion("req-1", "call-q", replay))
-	assertSentCard(t, m, "after the request replay")
-	m, _ = drive(t, m, correctionWarning("t1", "req-1", "answers.q1.answers[0]"))
-	assertField(t, m, "because", "the warning after the replay")
-	m = submitTyped(t, typeText(t, m, " now"))
-	assertContains(t, answerJSON(t, replay), `"q1":{"answers":["because now"]}`)
-	if len(caller.responses) != 0 {
-		t.Fatalf("correction bypassed the replayed request: %#v", caller.responses)
-	}
-	assertEntries(t, m, "Why", "Why: Local submission #1: because", "Why: Local submission #2: because now")
-}
-
 func TestRunCorrectsRefusedAnswerUnderTheSameRequest(t *testing.T) {
 	t.Parallel()
 	warmSignalPackage()
@@ -363,7 +270,7 @@ func TestRunCorrectsRefusedAnswerUnderTheSameRequest(t *testing.T) {
 		go func() { serverResult <- serveCorrection(server) }()
 		output.waitFor(ctx, t, "Question 1 of 1 · Why")
 		writeKeys(t, keyboard, "because\r\r")
-		output.waitFor(ctx, t, "refused")
+		output.waitFor(ctx, t, "Answer not accepted")
 		writeKeys(t, keyboard, " now\r\r")
 		output.waitFor(ctx, t, "Question answered")
 		writeKeys(t, keyboard, "\x03\x03")

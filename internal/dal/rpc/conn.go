@@ -62,7 +62,15 @@ type pendingCall struct {
 	ch        chan response
 	abandoned <-chan struct{}
 	done      chan struct{}
-	check     *ResponseCheck
+	check     ResponseCheck
+}
+
+type ResponseCheck func(jsontext.Value) error
+
+type CheckedCall struct {
+	Method string
+	Params any
+	Check  ResponseCheck
 }
 
 type (
@@ -125,7 +133,7 @@ func Dial(ctx context.Context, rwc io.ReadWriteCloser, h ClientHandler) *Conn {
 
 func (c *Conn) Call(ctx context.Context, method string, params any, result any) error {
 	idv := jsontext.Value(strconv.AppendUint(nil, c.nextID(), 10))
-	return c.call(ctx, idv, method, params, result)
+	return c.call(ctx, idv, CheckedCall{Method: method, Params: params}, result)
 }
 
 const FrameLimit = 16 << 20
@@ -144,15 +152,19 @@ func requestEnvelope(id jsontext.Value, method string, params jsontext.Value) en
 }
 
 func (c *Conn) CallID(ctx context.Context, id string, method string, params any, result any) error {
+	return c.CallIDChecked(ctx, id, CheckedCall{Method: method, Params: params}, result)
+}
+
+func (c *Conn) CallIDChecked(ctx context.Context, id string, req CheckedCall, result any) error {
 	idv, err := json.Marshal(id)
 	if err != nil {
 		return fmt.Errorf("encode request id: %w", err)
 	}
-	return c.call(ctx, idv, method, params, result)
+	return c.call(ctx, idv, req, result)
 }
 
-func (c *Conn) call(ctx context.Context, idv jsontext.Value, method string, params any, result any) error {
-	_, err := c.roundTrip(ctx, outgoing{id: idv, method: method, params: params}, result)
+func (c *Conn) call(ctx context.Context, idv jsontext.Value, req CheckedCall, result any) error {
+	_, err := c.roundTrip(ctx, outgoing{id: idv, method: req.Method, params: req.Params, check: req.Check}, result)
 	return err
 }
 
@@ -160,7 +172,7 @@ type outgoing struct {
 	id     jsontext.Value
 	method string
 	params any
-	check  *ResponseCheck
+	check  ResponseCheck
 }
 
 func (c *Conn) roundTrip(ctx context.Context, out outgoing, result any) (bool, error) {
@@ -357,15 +369,7 @@ func (c *Conn) dispatchResponse(e envelope) {
 	if len(e.ID) == 0 {
 		return
 	}
-	c.mu.Lock()
-	pc := c.pending[string(e.ID)]
-	if rejection := pc.inspect(e); rejection != nil {
-		c.mu.Unlock()
-		pc.check.Reject(rejection)
-		return
-	}
-	delete(c.pending, string(e.ID))
-	c.mu.Unlock()
+	pc := c.claim(string(e.ID), e)
 	if pc == nil {
 		return
 	}
@@ -375,6 +379,22 @@ func (c *Conn) dispatchResponse(e envelope) {
 	case <-pc.abandoned:
 	case <-c.closed:
 	}
+}
+
+func (c *Conn) claim(key string, e envelope) *pendingCall {
+	c.mu.Lock()
+	pc := c.pending[key]
+	c.mu.Unlock()
+	if pc == nil || pc.check != nil && e.Error == nil && pc.check(e.Result) != nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pending[key] != pc {
+		return nil
+	}
+	delete(c.pending, key)
+	return pc
 }
 
 func (c *Conn) dispatchRequest(e envelope) {
@@ -435,9 +455,9 @@ type clientReq struct {
 }
 
 func (c *Conn) dispatchClientRequest(e envelope) {
-	c.announceRequest(e)
 	ctx, cancel := context.WithCancel(c.ctx)
 	ctx = context.WithValue(ctx, requestIDKey{}, e.ID)
+	ctx = context.WithValue(ctx, responderKey{}, func(result any) error { return c.respond(e.ID, result) })
 	key := string(e.ID)
 	entry := &clientReq{cancel: cancel}
 	c.clientReqMu.Lock()
@@ -500,6 +520,9 @@ func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 		return
 	}
 	result, handlerErr := c.clientHandler.Request(ctx, e.Method, e.Params)
+	if errors.Is(handlerErr, ErrResponded) {
+		return
+	}
 	if handlerErr != nil {
 		code, message := -32603, handlerErr.Error()
 		if coded, ok := errors.AsType[*RPCError](handlerErr); ok {
@@ -508,14 +531,21 @@ func (c *Conn) handleClientRequest(ctx context.Context, e envelope) {
 		c.replyError(e.ID, code, message)
 		return
 	}
+	if err := c.respond(e.ID, result); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		c.replyError(e.ID, -32603, err.Error())
+	}
+}
+
+func (c *Conn) respond(id jsontext.Value, result any) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
-		c.replyError(e.ID, -32603, err.Error())
-		return
+		return err
 	}
-	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: e.ID, Result: raw}, false); enqueueErr != nil {
+	if enqueueErr := c.enqueue(envelope{JSONRPC: "2.0", ID: id, Result: raw}, false); enqueueErr != nil {
 		c.abort(enqueueErr)
+		return io.ErrClosedPipe
 	}
+	return nil
 }
 
 func (c *Conn) replyError(id jsontext.Value, code int, msg string) {
@@ -922,6 +952,17 @@ func writeJSONToken(encoder *jsontext.Encoder, token jsontext.Token) error {
 }
 
 type requestIDKey struct{}
+
+type responderKey struct{}
+
+var ErrResponded = errors.New("rpc: the request handler sent its own responses")
+
+func ClientResponder(ctx context.Context) func(result any) error {
+	if respond, ok := ctx.Value(responderKey{}).(func(any) error); ok {
+		return respond
+	}
+	return func(any) error { return errors.New("rpc: no server request to answer") }
+}
 
 func ClientRequestID(ctx context.Context) (string, error) {
 	raw, _ := ctx.Value(requestIDKey{}).(jsontext.Value)

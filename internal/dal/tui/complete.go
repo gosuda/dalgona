@@ -6,11 +6,11 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -122,12 +122,12 @@ func (m *model) commandQuery() (string, bool) {
 func (c editor) tokenAt() (start, end int) {
 	start, end = c.cursor, c.cursor
 	blocked := c.lead > 0
-	for start > 0 && !blocked && !unicode.IsSpace(c.text[start-1]) {
+	for start > 0 && !blocked && !textinput.IsWhiteSpace(c.text[start-1]) {
 		start--
 		blocked = c.hasChipsAt(start)
 	}
 	blocked = c.lead < c.chipsAt(c.cursor)
-	for end < len(c.text) && !blocked && !unicode.IsSpace(c.text[end]) {
+	for end < len(c.text) && !blocked && !textinput.IsWhiteSpace(c.text[end]) {
 		end++
 		blocked = c.hasChipsAt(end)
 	}
@@ -297,6 +297,7 @@ func (m *model) completePopup() {
 	for i := range e.chips {
 		e.chips[i].at = max(e.chips[i].at+shift, len(head))
 	}
+
 	e.text = slices.Concat(head, tail)
 	e.cursor, e.lead = len(head), 0
 	e.verbatimText = nil

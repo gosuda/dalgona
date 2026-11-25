@@ -3,15 +3,8 @@ package rpcserver
 import (
 	"context"
 	"encoding/json/jsontext"
-	"errors"
-	"maps"
-	"slices"
-	"strconv"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
-
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
-	asktool "github.com/gosuda/dalgona/internal/dal/tool/ask"
 )
 
 const (
@@ -173,57 +166,4 @@ func marshalChunk(chunk rpc.ContentChunk) (jsontext.Value, error) {
 	o.Str("digest", chunk.Digest)
 	o.Close()
 	return o.Bytes()
-}
-
-func (s *server) answerCheck(q questionAsk) rpc.ResponseCheck {
-	return rpc.ResponseCheck{
-		Accept: func(result jsontext.Value) error { return answerText(q.questions, result) },
-		Reject: func(rejection error) {
-			if field, ok := errors.AsType[*inputtext.FieldError](rejection); ok {
-				s.send("warning", answerWarning{threadID: q.thread.ID(), requestID: q.requestID, rejection: field})
-			}
-		},
-	}
-}
-
-func answerText(questions []asktool.Question, result jsontext.Value) error {
-	byID, err := answersByID(result)
-	if err != nil {
-		return nil
-	}
-	var items []inputtext.Item
-	for _, id := range slices.Sorted(maps.Keys(byID)) {
-		for i, answer := range byID[id] {
-			if offeredLabel(questions, id, answer) {
-				continue
-			}
-			field := "answers." + id + ".answers[" + strconv.Itoa(i) + "]"
-			items = append(items, inputtext.Item{Field: field, Policy: inputtext.Answer, Text: answer})
-		}
-	}
-	return inputtext.CheckRequest(items)
-}
-
-func offeredLabel(questions []asktool.Question, id, answer string) bool {
-	index, err := strconv.Atoi(id[min(1, len(id)):])
-	if err != nil || index < 1 || index > len(questions) {
-		return false
-	}
-	return slices.ContainsFunc(questions[index-1].Options, func(option asktool.Option) bool { return option.Label == answer })
-}
-
-type answerWarning struct {
-	threadID  string
-	requestID string
-	rejection *inputtext.FieldError
-}
-
-func (w answerWarning) Encode(o *rpc.Writer) {
-	o.Open()
-	o.Str("threadId", w.threadID)
-	o.Str("message", w.rejection.Error())
-	o.Str("requestId", w.requestID)
-	o.Str("reason", string(w.rejection.Reason))
-	o.Str("field", w.rejection.Field)
-	o.Close()
 }

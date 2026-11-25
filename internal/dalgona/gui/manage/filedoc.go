@@ -24,8 +24,8 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 )
 
@@ -40,7 +40,7 @@ const (
 )
 
 var (
-	documentPolicy   = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: editLimit}}
+	documentPolicy   = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: editLimit}}
 	errTooLarge      = errors.New("the file exceeds the 64 MiB transfer limit")
 	errReadRevision  = errors.New("the daemon changed the file revision during the read")
 	errImageTooLarge = errors.New("the image exceeds the 32-megapixel viewer limit")
@@ -300,7 +300,7 @@ func (d *document) updateSave(gtx layout.Context, f *Files, b binding, off bool)
 }
 
 func (d *document) updateSaveAs(gtx layout.Context, f *Files, b binding, off bool) {
-	if clicked(gtx, &d.saveAsBtn, off || d.kind != docText || inputtext.Blank(d.saveAsPath.text())) {
+	if clicked(gtx, &d.saveAsBtn, off || d.kind != docText || textinput.VisuallyBlank(d.saveAsPath.text())) {
 		d.save(f, b, strings.Trim(d.saveAsPath.text(), "/"), absent)
 	}
 }
@@ -334,7 +334,7 @@ func selectNext(e *platform.Editor, text, query string, from int) bool {
 		if i < 0 {
 			return false
 		}
-		if e.Select(inputtext.Range{Start: at + i, End: at + i + len(query)}) == nil {
+		if e.Select(textinput.Range{Start: at + i, End: at + i + len(query)}) == nil {
 			return true
 		}
 		at += i + 1
@@ -622,7 +622,7 @@ func (d *document) editorWidgets(env scene, b binding, export layout.Widget) []l
 		buttons(env, action{click: &d.findNext, label: fmt.Sprintf("Find next (%d matches)", d.matches()), variant: quiet, off: d.search.text() == ""}),
 		buttons(env,
 			action{click: &d.saveBtn, label: "Save", variant: pointed, off: readOnly || d.op.running() || !d.dirty()},
-			action{click: &d.saveAsBtn, label: "Save as", variant: secondary, off: !b.live || d.op.running() || inputtext.Blank(d.saveAsPath.text())}),
+			action{click: &d.saveAsBtn, label: "Save as", variant: secondary, off: !b.live || d.op.running() || textinput.VisuallyBlank(d.saveAsPath.text())}),
 		func(gtx layout.Context) layout.Dimensions {
 			return d.saveAsPath.layout(gtx, env, "Save as path", d.op.running())
 		},

@@ -15,8 +15,7 @@ Changing `auth` invalidates consent for remote work. It MUST print `automatic fa
 A running process that opened without consent MUST activate reporting once consent and a credential exist, without a restart. Withdrawing consent while it runs MUST stop new enqueues and remote work.
 
 `Off` disables before more work, removes consent and the App credential, and deletes queued excerpts. It preserves local logs, dedup receipts, counters, and restriction deadlines. It prints `automatic failure reporting disabled; queued reports deleted` and `published GitHub issues are not deleted`.
-The native disable operation waits for the daemon reporter to stop before it deletes the queue.
-The daemon does not enable reporting while this operation is in progress.
+The native disable operation waits for the daemon reporter to stop before deleting the queue, during which the daemon does not enable reporting.
 
 ## Authentication
 

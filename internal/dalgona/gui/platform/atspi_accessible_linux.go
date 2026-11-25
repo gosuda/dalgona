@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -399,7 +399,7 @@ var atspiNodeInterfaces = []struct {
 	}},
 }
 
-func (o *atspiObject) request(action AccessibilityAction, value string, selection inputtext.Range) ([]any, error) {
+func (o *atspiObject) request(action AccessibilityAction, value string, selection textinput.Range) ([]any, error) {
 	if o.snap == nil || o.node.ID == "" {
 		return nil, dbus.Error{Name: "org.freedesktop.DBus.Error.UnknownObject", Body: []any{ErrElementUnavailable.Error()}}
 	}

@@ -11,11 +11,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type TextLine struct {
-	Range    inputtext.Range
+	Range    textinput.Range
 	Bounds   image.Rectangle
 	Clusters []ClusterSpan
 }
@@ -37,7 +37,7 @@ func checkLines(text string, lines []TextLine) error {
 }
 
 func (l TextLine) check(text string) error {
-	if inputtext.CheckRange(text, l.Range) != nil {
+	if textinput.CheckRange(text, l.Range) != nil {
 		return errors.New("its range leaves the text or splits a grapheme cluster")
 	}
 	if l.Bounds != l.Bounds.Canon() {
@@ -54,10 +54,10 @@ func (l TextLine) check(text string) error {
 	return nil
 }
 
-func clusterCount(text string, r inputtext.Range) int {
+func clusterCount(text string, r textinput.Range) int {
 	count := 0
 	for at := r.Start; at < r.End; count++ {
-		next, err := inputtext.NextBoundary(text, at)
+		next, err := textinput.NextClusterBoundary(text, at)
 		if err != nil || next <= at {
 			return -1
 		}
@@ -66,12 +66,12 @@ func clusterCount(text string, r inputtext.Range) int {
 	return count
 }
 
-func (l TextLine) clusters(text string) iter.Seq2[inputtext.Range, ClusterSpan] {
-	return func(yield func(inputtext.Range, ClusterSpan) bool) {
+func (l TextLine) clusters(text string) iter.Seq2[textinput.Range, ClusterSpan] {
+	return func(yield func(textinput.Range, ClusterSpan) bool) {
 		start := l.Range.Start
 		for _, span := range l.Clusters {
-			end, err := inputtext.NextBoundary(text, start)
-			if err != nil || !yield(inputtext.Range{Start: start, End: end}, span) {
+			end, err := textinput.NextClusterBoundary(text, start)
+			if err != nil || !yield(textinput.Range{Start: start, End: end}, span) {
 				return
 			}
 			start = end
@@ -94,7 +94,7 @@ func (l TextLine) end() ClusterSpan {
 	return ClusterSpan{Left: last.Right, Right: last.Right}
 }
 
-func (l TextLine) portion(text string, r inputtext.Range) (image.Rectangle, bool) {
+func (l TextLine) portion(text string, r textinput.Range) (image.Rectangle, bool) {
 	span := ClusterSpan{Left: math.MaxInt, Right: math.MinInt}
 	for cluster, s := range l.clusters(text) {
 		if cluster.Start < r.End && r.Start < cluster.End {
@@ -114,11 +114,11 @@ func (l TextLine) nearest(text string, x int) int {
 	return best
 }
 
-func endsWithBreak(text string, r inputtext.Range) bool {
+func endsWithBreak(text string, r textinput.Range) bool {
 	if r.Start == r.End {
 		return false
 	}
-	last, err := inputtext.PreviousBoundary(text, r.End)
+	last, err := textinput.PreviousClusterBoundary(text, r.End)
 	return err == nil && lineBreak(text[last:])
 }
 
@@ -152,14 +152,14 @@ func (n SemanticNode) lineAround(offset int) (TextLine, bool) {
 	return TextLine{Range: hard}, false
 }
 
-func hardLine(text string, offset int) inputtext.Range {
-	at, err := inputtext.PaintRange(text, inputtext.Range{Start: offset, End: offset})
+func hardLine(text string, offset int) textinput.Range {
+	at, err := textinput.PaintRange(text, textinput.Range{Start: offset, End: offset})
 	if err != nil {
-		return inputtext.Range{Start: offset, End: offset}
+		return textinput.Range{Start: offset, End: offset}
 	}
 	start := at.Start
 	for start > 0 {
-		previous, err := inputtext.PreviousBoundary(text, start)
+		previous, err := textinput.PreviousClusterBoundary(text, start)
 		if err != nil || lineBreak(text[previous:]) {
 			break
 		}
@@ -167,7 +167,7 @@ func hardLine(text string, offset int) inputtext.Range {
 	}
 	end := at.Start
 	for end < len(text) {
-		next, err := inputtext.NextBoundary(text, end)
+		next, err := textinput.NextClusterBoundary(text, end)
 		if err != nil {
 			break
 		}
@@ -177,7 +177,7 @@ func hardLine(text string, offset int) inputtext.Range {
 			break
 		}
 	}
-	return inputtext.Range{Start: start, End: end}
+	return textinput.Range{Start: start, End: end}
 }
 
 func (n SemanticNode) textLines() iter.Seq2[TextLine, bool] {
@@ -205,7 +205,7 @@ func (n SemanticNode) characterBox(offset int) (image.Rectangle, bool) {
 	return line.column(line.end()), true
 }
 
-func (n SemanticNode) rangeBoxes(r inputtext.Range) []image.Rectangle {
+func (n SemanticNode) rangeBoxes(r textinput.Range) []image.Rectangle {
 	if r.Start >= r.End || n.Bounds.Empty() && len(n.Lines) == 0 {
 		return nil
 	}
@@ -225,7 +225,7 @@ func (n SemanticNode) rangeBoxes(r inputtext.Range) []image.Rectangle {
 	return boxes
 }
 
-func (n SemanticNode) rangeBox(r inputtext.Range) (image.Rectangle, bool) {
+func (n SemanticNode) rangeBox(r textinput.Range) (image.Rectangle, bool) {
 	boxes := n.rangeBoxes(r)
 	if len(boxes) == 0 {
 		return image.Rectangle{}, false
@@ -260,7 +260,7 @@ func visibleWord(segment string) bool {
 
 func nextWordStart(text string, at int, starts func(segment string) bool) (int, error) {
 	for b := at; b < len(text); {
-		next, err := inputtext.NextWordBoundary(text, b)
+		next, err := textinput.NextWordBoundary(text, b)
 		if err != nil {
 			return 0, err
 		}
@@ -273,9 +273,9 @@ func nextWordStart(text string, at int, starts func(segment string) bool) (int, 
 }
 
 func previousWordStart(text string, at int, starts func(segment string) bool) (int, error) {
-	end, err := inputtext.NextWordBoundary(text, at)
+	end, err := textinput.NextWordBoundary(text, at)
 	for err == nil && end > 0 {
-		start, previousErr := inputtext.PreviousWordBoundary(text, end)
+		start, previousErr := textinput.PreviousWordBoundary(text, end)
 		if previousErr == nil && starts(text[start:end]) {
 			return start, nil
 		}
@@ -284,26 +284,26 @@ func previousWordStart(text string, at int, starts func(segment string) bool) (i
 	return 0, err
 }
 
-func wordSegment(text string, at int, starts func(segment string) bool) (inputtext.Range, error) {
+func wordSegment(text string, at int, starts func(segment string) bool) (textinput.Range, error) {
 	start, err := previousWordStart(text, at, starts)
 	if err != nil {
-		return inputtext.Range{}, err
+		return textinput.Range{}, err
 	}
 	end, err := nextWordStart(text, at, starts)
 	if err != nil {
-		return inputtext.Range{}, err
+		return textinput.Range{}, err
 	}
-	return inputtext.PaintRange(text, inputtext.Range{Start: start, End: end})
+	return textinput.PaintRange(text, textinput.Range{Start: start, End: end})
 }
 
-func sentenceSegment(text string, at int) (inputtext.Range, error) {
-	end, err := inputtext.NextSentenceBoundary(text, at)
+func sentenceSegment(text string, at int) (textinput.Range, error) {
+	end, err := textinput.NextSentenceBoundary(text, at)
 	if err != nil {
-		return inputtext.Range{}, err
+		return textinput.Range{}, err
 	}
-	start, err := inputtext.PreviousSentenceBoundary(text, end)
+	start, err := textinput.PreviousSentenceBoundary(text, end)
 	if err != nil {
-		return inputtext.Range{}, err
+		return textinput.Range{}, err
 	}
-	return inputtext.PaintRange(text, inputtext.Range{Start: start, End: end})
+	return textinput.PaintRange(text, textinput.Range{Start: start, End: end})
 }

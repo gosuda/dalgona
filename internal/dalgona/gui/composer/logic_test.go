@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
 )
 
@@ -95,15 +95,15 @@ func TestMentionAtStartsOnlyAtAsciiAtWordBoundary(t *testing.T) {
 		caret int
 		ok    bool
 		query string
-		span  inputtext.Range
+		span  textinput.Range
 	}{
-		{text: "see @src/ma", caret: 11, ok: true, query: "src/ma", span: inputtext.Range{Start: 4, End: 11}},
-		{text: "@abc def", caret: 2, ok: true, query: "abc", span: inputtext.Range{Start: 0, End: 4}},
+		{text: "see @src/ma", caret: 11, ok: true, query: "src/ma", span: textinput.Range{Start: 4, End: 11}},
+		{text: "@abc def", caret: 2, ok: true, query: "abc", span: textinput.Range{Start: 0, End: 4}},
 		{text: "@abc def", caret: 7},
 		{text: "mail a@b", caret: 8},
 		{text: "\uff20file", caret: 7},
-		{text: "x\u3000@한글 y", caret: 11, ok: true, query: "한글", span: inputtext.Range{Start: 4, End: 11}},
-		{text: "@", caret: 1, ok: true, query: "", span: inputtext.Range{Start: 0, End: 1}},
+		{text: "x\u3000@한글 y", caret: 11, ok: true, query: "한글", span: textinput.Range{Start: 4, End: 11}},
+		{text: "@", caret: 1, ok: true, query: "", span: textinput.Range{Start: 0, End: 1}},
 	}
 	for _, c := range cases {
 		m, ok := mentionAt(c.text, c.caret)
@@ -127,7 +127,7 @@ func TestNormalizePasteConvertsLineEndingsAndKeepsFinalLF(t *testing.T) {
 	if chip != (state.Attachment{ID: "paste-1", Kind: state.AttachmentText, Text: p.text, Name: "Pasted text · 10 lines"}) {
 		t.Fatalf("chip = %+v", chip)
 	}
-	if _, err := normalizePaste("a\x00b"); !errors.Is(err, inputtext.DisallowedControl) {
+	if _, err := normalizePaste("a\x00b"); !errors.Is(err, textinput.DisallowedControl) {
 		t.Fatalf("NUL paste error = %v", err)
 	}
 }
@@ -232,10 +232,10 @@ func TestKeywordSpansConvertValidatedByteRanges(t *testing.T) {
 	if !ok || len(spans) != 2 {
 		t.Fatalf("spans = %+v %v", spans, ok)
 	}
-	if spans[0].Runes != (inputtext.Range{Start: 4, End: 8}) || spans[0].Paint != spans[0].Runes {
+	if spans[0].Runes != (textinput.Range{Start: 4, End: 8}) || spans[0].Paint != spans[0].Runes {
 		t.Fatalf("test span = %+v", spans[0])
 	}
-	if spans[1].Bytes != (inputtext.Range{Start: 15, End: 16}) || spans[1].Runes != (inputtext.Range{Start: 9, End: 10}) || spans[1].Paint != (inputtext.Range{Start: 9, End: 11}) {
+	if spans[1].Bytes != (textinput.Range{Start: 15, End: 16}) || spans[1].Runes != (textinput.Range{Start: 9, End: 10}) || spans[1].Paint != (textinput.Range{Start: 9, End: 11}) {
 		t.Fatalf("span inside a grapheme = %+v", spans[1])
 	}
 	if got := KeywordWords(append(spans, spans[0])); got != "Keywords: test, e" {
@@ -283,7 +283,7 @@ func TestRecallBrowsesHistoryAndRestoresDraft(t *testing.T) {
 		t.Fatalf("history = %q", history)
 	}
 	r := recall{browsing: -1}
-	draft := inputtext.Draft{Text: "draft", Selection: inputtext.Range{Start: 2, End: 2}}
+	draft := textinput.Draft{Text: "draft", Selection: textinput.Range{Start: 2, End: 2}}
 	requireOlderPrompts(t, &r, history, draft)
 	for _, want := range []string{"b", "c"} {
 		if got, ok := r.newer(history); !ok || got.Text != want {
@@ -295,11 +295,11 @@ func TestRecallBrowsesHistoryAndRestoresDraft(t *testing.T) {
 	}
 }
 
-func requireOlderPrompts(t *testing.T, r *recall, history []string, draft inputtext.Draft) {
+func requireOlderPrompts(t *testing.T, r *recall, history []string, draft textinput.Draft) {
 	t.Helper()
 	for _, want := range []string{"c", "b", "a"} {
 		got, ok := r.older(history, draft)
-		if !ok || got.Text != want || got.Selection != (inputtext.Range{}) {
+		if !ok || got.Text != want || got.Selection != (textinput.Range{}) {
 			t.Fatalf("older = %+v %v, want %q at start", got, ok, want)
 		}
 	}

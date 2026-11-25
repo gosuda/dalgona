@@ -100,7 +100,7 @@ Headless runs MUST read non-terminal stdin before any daemon request.
 The client MUST wait for EOF without a deadline.
 Use `</dev/null` or `ssh -n` when stdin is not prompt input.
 Input above 1048576 bytes MUST fail before any request.
-The client MUST replace invalid UTF-8 with U+FFFD.
+The client MUST reject malformed UTF-8 and NUL in stdin before any request, as the protocol specification requires.
 The client MUST remove trailing newlines from stdin.
 With both inputs present, the client MUST join stdin and the prompt with two newlines.
 With an empty prompt, stdin alone MUST supply the prompt.
@@ -142,9 +142,7 @@ The dalgona host MUST bind `[runners.<name>]` runners through the remote binder 
 `models`, `dalgona app-server`, `dalgona web`, `dalgona acp`, `pull`, and `runner gc` MUST open one session per process and dial the local daemon through its `Connect`.
 When `--remote <name>` is given, or `remote` is set in configuration, the session MUST select that configured endpoint through the shared client transport owner.
 The flag MUST win over the configuration.
-A leading `--local` MUST select the local endpoint for TUI and headless clients despite a configured default remote.
-It MUST NOT remove the remote catalog or change an existing thread's runner binding.
-It MUST conflict with every explicit `--remote` selector, including an empty `--remote=`.
+A leading `--local` MUST select the local endpoint for TUI and headless clients despite a configured default remote. It does so without removing the remote catalog or changing an existing thread's runner binding. It MUST conflict with every explicit `--remote` selector, including an empty `--remote=`.
 Without `--local`, an empty remote flag MUST retain its existing configuration fallback.
 A session MUST reject an unsupported headless transport before dialing it.
 Legacy daemon relays MUST retain their existing headless refusal.

@@ -18,6 +18,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
 	"github.com/gosuda/dalgona/internal/dal/model"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func platform() (family, name string) {
@@ -296,6 +297,9 @@ func (s *server) loginStart(ctx context.Context, params jsontext.Value) (jsontex
 	if err := decodeParams(params, stringMembers(fields)); err != nil {
 		return nil, err
 	}
+	if err := (textinput.Field{Name: "apiKey", SingleLine: true}).Check(p.APIKey); err != nil {
+		return nil, invalidParams(err.Error())
+	}
 	if _, err := s.credentials(); err != nil {
 		return nil, err
 	}
@@ -536,6 +540,9 @@ func (s *server) keywordsMatch(_ context.Context, params jsontext.Value) (jsonte
 	var p rpc.KeywordsMatchParams
 	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "text": &p.Text, "kind": &p.Kind})); err != nil {
 		return nil, err
+	}
+	if err := (textinput.Field{Name: "text", MaxBytes: maxKeywordText}).Check(p.Text); err != nil {
+		return nil, invalidParams(err.Error())
 	}
 	kind := agent.InputKind(cmp.Or(p.Kind, string(agent.InputPrompt)))
 	if kind != agent.InputPrompt && kind != agent.InputSteer {

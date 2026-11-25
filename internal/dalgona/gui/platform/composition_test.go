@@ -4,23 +4,23 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
-func prompt(maxScalars int) inputtext.Policy {
-	return inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Scalars, Max: maxScalars}}
+func prompt(maxScalars int) textinput.Policy {
+	return textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Scalars, Max: maxScalars}}
 }
 
-func newComposer(t *testing.T, policy inputtext.Policy, text string, selection inputtext.Range) *Composer {
+func newComposer(t *testing.T, policy textinput.Policy, text string, selection textinput.Range) *Composer {
 	t.Helper()
-	c, err := NewComposer(policy, inputtext.Draft{Text: text, Selection: selection})
+	c, err := NewComposer(policy, textinput.Draft{Text: text, Selection: selection})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return c
 }
 
-func caretAt(i int) inputtext.Range { return inputtext.Range{Start: i, End: i} }
+func caretAt(i int) textinput.Range { return textinput.Range{Start: i, End: i} }
 
 func TestCompositionCommitInsertsTextExactlyOnce(t *testing.T) {
 	c := newComposer(t, prompt(100), "", caretAt(0))
@@ -36,14 +36,14 @@ func TestCompositionCommitInsertsTextExactlyOnce(t *testing.T) {
 	if err := c.Commit("한글"); err != nil {
 		t.Fatal(err)
 	}
-	want := inputtext.Draft{Text: "한글", Selection: caretAt(len("한글"))}
+	want := textinput.Draft{Text: "한글", Selection: caretAt(len("한글"))}
 	if c.Draft() != want || c.Preedit() != "" || c.Composing() {
 		t.Fatalf("after commit: draft %+v, preedit %q, composing %v; want %+v with no composition", c.Draft(), c.Preedit(), c.Composing(), want)
 	}
 }
 
 func TestCompositionCancelRestoresCommittedTextAndSelection(t *testing.T) {
-	before := inputtext.Draft{Text: "abc", Selection: inputtext.Range{Start: 1, End: 2}}
+	before := textinput.Draft{Text: "abc", Selection: textinput.Range{Start: 1, End: 2}}
 	c := newComposer(t, prompt(100), before.Text, before.Selection)
 	c.Compose("か")
 	c.Compose("漢")
@@ -54,23 +54,23 @@ func TestCompositionCancelRestoresCommittedTextAndSelection(t *testing.T) {
 }
 
 func TestCompositionCommitReplacesTheSelection(t *testing.T) {
-	c := newComposer(t, prompt(100), "abcdef", inputtext.Range{Start: 2, End: 4})
+	c := newComposer(t, prompt(100), "abcdef", textinput.Range{Start: 2, End: 4})
 	c.Compose("中")
 	if err := c.Commit("中文"); err != nil {
 		t.Fatal(err)
 	}
-	want := inputtext.Draft{Text: "ab中文ef", Selection: caretAt(len("ab中文"))}
+	want := textinput.Draft{Text: "ab中文ef", Selection: caretAt(len("ab中文"))}
 	if c.Draft() != want {
 		t.Fatalf("draft %+v, want %+v", c.Draft(), want)
 	}
 }
 
 func TestCompositionRejectedCommitKeepsARecoverableCandidate(t *testing.T) {
-	before := inputtext.Draft{Text: "abcd", Selection: caretAt(4)}
+	before := textinput.Draft{Text: "abcd", Selection: caretAt(4)}
 	c := newComposer(t, prompt(5), before.Text, before.Selection)
 	c.Compose("ef")
 	err := c.Commit("ef")
-	if !errors.Is(err, inputtext.TextTooLarge) {
+	if !errors.Is(err, textinput.TextTooLarge) {
 		t.Fatalf("commit one scalar over the limit: error %v, want TextTooLarge", err)
 	}
 	if c.Draft() != before {
@@ -96,7 +96,7 @@ func TestCompositionCommitAtTheFieldLimit(t *testing.T) {
 	if err := joined.Commit("\u0301"); err != nil {
 		t.Fatalf("commit joining the adjacent grapheme at the limit: %v", err)
 	}
-	want := inputtext.Draft{Text: "abce\u0301", Selection: caretAt(len("abce\u0301"))}
+	want := textinput.Draft{Text: "abce\u0301", Selection: caretAt(len("abce\u0301"))}
 	if joined.Draft() != want {
 		t.Fatalf("joined commit draft %+v, want %+v", joined.Draft(), want)
 	}
@@ -127,7 +127,7 @@ func TestCompositionOwnsKeysThroughTheEndingKey(t *testing.T) {
 }
 
 func TestCompositionBlocksApplicationEditsWhileActive(t *testing.T) {
-	before := inputtext.Draft{Text: "abc", Selection: caretAt(3)}
+	before := textinput.Draft{Text: "abc", Selection: caretAt(3)}
 	c := newComposer(t, prompt(100), before.Text, before.Selection)
 	c.Compose("ㄱ")
 	if err := c.Replace("pasted"); !errors.Is(err, ErrComposing) {
@@ -143,19 +143,19 @@ func TestCompositionBlocksApplicationEditsWhileActive(t *testing.T) {
 
 func TestComposerSelectionRespectsGraphemeBoundaries(t *testing.T) {
 	c := newComposer(t, prompt(100), "e\u0301x", caretAt(0))
-	if err := c.Select(caretAt(1)); !errors.Is(err, inputtext.InvalidOffset) {
+	if err := c.Select(caretAt(1)); !errors.Is(err, textinput.InvalidOffset) {
 		t.Fatalf("selection inside a grapheme: error %v, want InvalidOffset", err)
 	}
-	if err := c.Select(inputtext.Range{Start: 0, End: len("e\u0301")}); err != nil {
+	if err := c.Select(textinput.Range{Start: 0, End: len("e\u0301")}); err != nil {
 		t.Fatalf("selection of a whole grapheme: %v", err)
 	}
 }
 
 func TestNewComposerRejectsAnInvalidRestoredDraft(t *testing.T) {
-	if _, err := NewComposer(prompt(100), inputtext.Draft{Text: "a\x00b"}); !errors.Is(err, inputtext.DisallowedControl) {
+	if _, err := NewComposer(prompt(100), textinput.Draft{Text: "a\x00b"}); !errors.Is(err, textinput.DisallowedControl) {
 		t.Fatalf("restored draft with NUL: error %v, want DisallowedControl", err)
 	}
-	if _, err := NewComposer(prompt(100), inputtext.Draft{Text: "e\u0301", Selection: caretAt(1)}); !errors.Is(err, inputtext.InvalidOffset) {
+	if _, err := NewComposer(prompt(100), textinput.Draft{Text: "e\u0301", Selection: caretAt(1)}); !errors.Is(err, textinput.InvalidOffset) {
 		t.Fatalf("restored selection inside a grapheme: error %v, want InvalidOffset", err)
 	}
 }

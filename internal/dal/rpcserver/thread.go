@@ -17,6 +17,7 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/agent"
 	"github.com/gosuda/dalgona/internal/dal/agent/event"
 	"github.com/gosuda/dalgona/internal/dal/config"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const defaultListLimit = 50
@@ -489,6 +490,9 @@ func (s *server) threadNameSet(ctx context.Context, params jsontext.Value) (json
 	var p rpc.ThreadNameSetParams
 	if err := decodeParams(params, stringMembers(map[string]*string{"threadId": &p.ThreadID, "name": &p.Name})); err != nil {
 		return nil, err
+	}
+	if err := (textinput.Field{Name: "name"}).Check(p.Name); err != nil {
+		return nil, invalidParams(err.Error())
 	}
 	thread, err := s.watched(ctx, p.ThreadID)
 	if err != nil {

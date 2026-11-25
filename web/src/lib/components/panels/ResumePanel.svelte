@@ -1,15 +1,11 @@
 <script lang="ts">
 import Panel from "#lib/components/panels/Panel.svelte";
 import { handoffFocus } from "#lib/focus.ts";
-import {
-	faultNotices,
-	refuseSingleLineInsertion,
-	searchEligible,
-	selectDeletedCluster,
-} from "#lib/inputtext.ts";
 import { threadTitle } from "#lib/labels.ts";
+import { oneLine } from "#lib/oneLine.ts";
 import { appendThreadPage } from "#lib/reducer.ts";
 import type { Session } from "#lib/session.svelte.ts";
+import { searchEligible } from "#lib/text/validate.ts";
 import type { ThreadSummary } from "#lib/types.ts";
 import type { ThreadSearchHit } from "#lib/validation.ts";
 
@@ -24,8 +20,8 @@ let nextCursor = $state<string | null>(null);
 let loading = $state(false);
 let listRequest = 0;
 let filter = $state("");
-let filterField: HTMLInputElement;
 let filterError = $state("");
+let filterField: HTMLInputElement;
 let error = $state("");
 let hits = $state<readonly ThreadSearchHit[]>([]);
 let searchError = $state("");
@@ -127,30 +123,18 @@ async function choose(threadId: string): Promise<void> {
 	}
 	session.closePanelIf(opened);
 }
-
-function guardInsertion(event: ClipboardEvent | DragEvent): void {
-	const fault = refuseSingleLineInsertion(event);
-	filterError = fault === null ? "" : faultNotices[fault];
-}
 </script>
 
 <Panel title="Open an earlier thread" {open} onClose={() => session.closePanel()}>
 	{#snippet children()}
 		<input
-			type="search"
-			bind:this={filterField}
-			bind:value={filter}
-			placeholder="Filter threads"
-			aria-label="Filter threads"
-			aria-invalid={filterError === "" ? "false" : "true"}
-			aria-describedby={filterError === "" ? undefined : "resume-filter-error"}
-			onpaste={guardInsertion}
-			ondrop={guardInsertion}
+			type="search" bind:this={filterField} bind:value={filter} placeholder="Filter threads" aria-label="Filter threads"
+			aria-invalid={filterError === "" ? undefined : "true"}
 			oninput={() => (filterError = "")}
-			onkeydown={(event) => selectDeletedCluster(event, event.currentTarget)}
+			{@attach oneLine((message) => (filterError = message))}
 		/>
 		{#if filterError !== ""}
-			<p class="error" id="resume-filter-error" role="alert">{filterError}</p>
+			<p class="error" role="alert">{filterError}</p>
 		{/if}
 		{#if opening}
 			<p role="status">Opening thread…</p>

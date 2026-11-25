@@ -5,7 +5,7 @@ package composer
 import (
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access/accesstest"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
@@ -18,10 +18,10 @@ func TestAccessibleComposerExposesAndEditsCanonicalText(t *testing.T) {
 	h.view.drafts[testKey] = state.Draft{Text: "a😀b", Revision: 1}
 	h.frame()
 	n := h.ax.Find(t, "Message", platform.RoleTextField)
-	if n.Value != "a😀b" || n.Selection != (inputtext.Range{Start: 6, End: 6}) || n.Placeholder == "" || n.Bounds.Empty() {
+	if n.Value != "a😀b" || n.Selection != (textinput.Range{Start: 6, End: 6}) || n.Placeholder == "" || n.Bounds.Empty() {
 		t.Fatalf("composer value, caret or placeholder missing: %+v", n)
 	}
-	selection := inputtext.Range{Start: 1, End: 5}
+	selection := textinput.Range{Start: 1, End: 5}
 	i := platform.AccessibilityIntent{Node: n.ID, Revision: h.ax.Tree.Snapshot().Revision(), Action: platform.ActionSelectText, Selection: selection}
 	if err := h.ax.Tree.Request(i); err != nil {
 		t.Fatal(err)

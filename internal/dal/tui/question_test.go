@@ -9,6 +9,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/gosuda/dalgona/internal/dal/rpc"
 )
 
 const questionParamsJSON = `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
@@ -96,16 +98,6 @@ func TestQuestionCardOtherText(t *testing.T) {
 	}
 }
 
-func TestQuestionCardFreeText(t *testing.T) {
-	t.Parallel()
-	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
-		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
-	m, _ := openQuestion(t, free)
-	if !m.approvals[0].card.typing {
-		t.Fatal("free-text question did not start in input mode")
-	}
-}
-
 func TestQuestionCardSubmitNowSkips(t *testing.T) {
 	t.Parallel()
 	m, answer := openQuestion(t, questionParamsJSON)
@@ -152,16 +144,17 @@ func TestQuestionCardClosedByTimedOutNotification(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("timed-out question printed %d rows, want 1", len(rows))
 	}
-	const timeoutKey = `question-timeout:"t1":"turn-1":"call-q":"req-1":0`
-	if key := rows[0].key; key != timeoutKey {
-		t.Fatalf("row key %q, want %s", key, timeoutKey)
+	const key = `question-status:"t1":"turn-1":"call-q":"req-1":timedOut`
+	if rows[0].key != key {
+		t.Fatalf("row key %q, want %s", rows[0].key, key)
 	}
 	if got := rows[0].text; got != "Database: Timed out\nFeatures: Timed out" {
 		t.Fatalf("row text %q", got)
 	}
-	m.commit(timeoutKey, []string{"again"})
+	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(`{"threadId":"t1","requestId":"req-1","resolution":"timedOut"}`)})
+	m.commit(key, []string{"again"})
 	if len(m.out.entries) != 1 {
-		t.Fatal("second commit with the same key was kept")
+		t.Fatal("a duplicate resolution or commit printed another status row")
 	}
 }
 
@@ -290,40 +283,150 @@ func TestQuestionCardCommitShowsStoredText(t *testing.T) {
 	}
 }
 
-func TestQuestionCardCommitsAnswerRow(t *testing.T) {
-	t.Parallel()
-	m, _ := openQuestion(t, questionParamsJSON)
-	m, _ = drive(t, m, press('s', 0, "s"))
-	if len(m.out.pending) == 0 && len(m.out.entries) == 0 {
-		t.Fatal("answer row was not committed")
+const answerResolved = `{"threadId":"t1","requestId":"req-1","resolution":"answered"}`
+
+func answerWarning(threadID, requestID, field string) notificationMsg {
+	return notificationMsg{method: "warning", params: []byte(`{"threadId":"` + threadID + `","message":"invalid text: ` + field +
+		`: text_too_large","requestId":"` + requestID + `","reason":"text_too_large","field":"` + field + `"}`)}
+}
+
+func submissions(m model) []string {
+	var keys []string
+	for _, entry := range m.out.entries {
+		if strings.HasPrefix(entry.key, "question-submission:") {
+			keys = append(keys, entry.key, entry.text)
+		}
 	}
-	const submissionKey = `question-submission:"t1":"turn-1":"call-q":"req-1":1`
-	if key := m.out.entries[len(m.out.entries)-1].key; key != submissionKey {
-		t.Fatalf("answer row key %q, want %s", key, submissionKey)
-	}
-	before := len(m.out.entries)
-	m.commit(submissionKey, []string{"again"})
-	if len(m.out.entries) != before {
-		t.Fatal("second commit with the same key was kept")
+	return keys
+}
+
+func sentAnswer(t *testing.T, answer chan requestAnswer) string {
+	t.Helper()
+	select {
+	case got := <-answer:
+		raw, err := json.Marshal(got.value, json.Deterministic(true))
+		if err != nil || got.err != nil {
+			t.Fatalf("answer = %v, %v", got.err, err)
+		}
+		return string(raw)
+	default:
+		t.Fatal("no answer was sent")
+		return ""
 	}
 }
 
-func TestQuestionAnswerRowsShareCallIDAcrossTurns(t *testing.T) {
+const firstSubmission = `question-submission:"t1":"turn-1":"call-q":"req-1":1`
+
+func sentQuestion(t *testing.T) (model, chan requestAnswer) {
+	t.Helper()
+	m, answer := openQuestion(t, questionParamsJSON)
+	m = typeKeys(t, m, "14")
+	m = typeKeys(t, m, " Ready  ")
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m, _ = drive(t, m, press('s', 0, "s"))
+	if got := sentAnswer(t, answer); got != `{"answers":{"q1":{"answers":["SQLite"]},"q2":{"answers":[" Ready  "]}}}` {
+		t.Fatalf("first answer = %s", got)
+	}
+	return m, answer
+}
+
+func TestQuestionSubmitKeepsTheCardUntilAMatchingWarning(t *testing.T) {
 	t.Parallel()
+	m, answer := sentQuestion(t)
+	card := m.approvals[0].card
+	if !card.sent || m.notice != "Answer sent; waiting for the agent" {
+		t.Fatalf("sent card = %v, notice %q", card.sent, m.notice)
+	}
+	first := []string{firstSubmission, "Database: Local submission #1: SQLite\nFeatures: Local submission #1: Ready"}
+	if got := submissions(m); !reflect.DeepEqual(got, first) {
+		t.Fatalf("entries = %q, want %q", got, first)
+	}
+	m, _ = drive(t, m, press('s', 0, "s"))
+	m, _ = drive(t, m, answerWarning("t2", "req-1", "answers.q2.answers[0]"))
+	m, _ = drive(t, m, answerWarning("t1", "req-9", "answers.q2.answers[0]"))
+	if len(answer) != 0 || card.attempts != 1 || !card.sent || len(submissions(m)) != 2 {
+		t.Fatalf("keys or foreign warnings moved a sent card: %d queued, attempt %d, sent %v", len(answer), card.attempts, card.sent)
+	}
+}
+
+func TestQuestionWarningReopensTheAnswerForACorrection(t *testing.T) {
+	t.Parallel()
+	m, answer := sentQuestion(t)
+	card := m.approvals[0].card
+	m, _ = drive(t, m, answerWarning("t1", "req-1", "answers.q2.answers[0]"))
+	if card.sent || card.index != 1 || !card.typing || m.input.field.value() != " Ready  " {
+		t.Fatalf("warning reopened sent=%v index=%d typing=%v field=%q", card.sent, card.index, card.typing, m.input.field.value())
+	}
+	assertContains(t, m.notice, "Answer not accepted: invalid text: answers.q2.answers[0]: text_too_large")
+	m = typeKeys(t, m, "!")
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m, _ = drive(t, m, press('s', 0, "s"))
+	if got := sentAnswer(t, answer); got != `{"answers":{"q1":{"answers":["SQLite"]},"q2":{"answers":[" Ready  !"]}}}` {
+		t.Fatalf("corrected answer = %s", got)
+	}
+	want := []string{
+		firstSubmission, "Database: Local submission #1: SQLite\nFeatures: Local submission #1: Ready",
+		`question-submission:"t1":"turn-1":"call-q":"req-1":2`, "Database: Local submission #2: SQLite\nFeatures: Local submission #2: Ready  !",
+	}
+	if got := submissions(m); !reflect.DeepEqual(got, want) {
+		t.Fatalf("entries = %q, want %q", got, want)
+	}
+	assertResolvedStaysClosed(t, m)
+}
+
+func assertResolvedStaysClosed(t *testing.T, m model) {
+	t.Helper()
+	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(answerResolved)})
+	if len(m.approvals) != 0 || m.notice != "Question answered" {
+		t.Fatalf("resolution left %d cards and notice %q", len(m.approvals), m.notice)
+	}
+	m, _ = drive(t, m, answerWarning("t1", "req-1", "answers.q2.answers[0]"))
+	if len(m.approvals) != 0 {
+		t.Fatal("a warning after resolution reopened the card")
+	}
+}
+
+func TestQuestionDismissAndSkipCommitLocalSubmissions(t *testing.T) {
+	t.Parallel()
+	m, answer := openQuestion(t, questionParamsJSON)
+	m, _ = drive(t, m, press('s', 0, "s"))
+	if got := sentAnswer(t, answer); got != `{"answers":{"q1":{"answers":[]},"q2":{"answers":[]}}}` {
+		t.Fatalf("skip answer = %s", got)
+	}
+	if got := submissions(m); len(got) != 2 || got[1] != "Database: Local submission #1: skip requested\nFeatures: Local submission #1: skip requested" {
+		t.Fatalf("skip entries = %q", got)
+	}
+	m, _ = drive(t, m, answerWarning("t1", "req-1", "answers.q1.answers[0]"))
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	if got := sentAnswer(t, answer); got != `{"answers":{}}` {
+		t.Fatalf("dismiss answer = %s", got)
+	}
+	if got := submissions(m); len(got) != 4 || got[3] != "Database: Local submission #2: dismiss requested\nFeatures: Local submission #2: dismiss requested" {
+		t.Fatalf("dismiss entries = %q", got)
+	}
+	if len(m.approvals) != 0 {
+		t.Fatal("a dismissed card stayed open")
+	}
+}
+
+func TestQuestionEntryKeysKeepEveryFieldApart(t *testing.T) {
+	t.Parallel()
+	card := func(turnID, itemID string) *questionCard {
+		return newQuestionCard(rpc.ToolRequestUserInputParams{ThreadID: "t1", TurnID: turnID, ItemID: itemID}, "req-1", nil)
+	}
+	if a, b := card(`a":"b`, "c").entryKey("question-submission"), card("a", `b":"c`).entryKey("question-submission"); a == b {
+		t.Fatalf("two identities share the key %s", a)
+	}
 	m, _ := openQuestion(t, questionParamsJSON)
 	m, _ = drive(t, m, press('s', 0, "s"))
-	m, _ = drive(t, m, requestResolved("t1", "req-1", "answered"))
+	m, _ = drive(t, m, notificationMsg{method: "serverRequest/resolved", params: []byte(answerResolved)})
 	second := strings.Replace(questionParamsJSON, `"turnId":"turn-1"`, `"turnId":"turn-2"`, 1)
 	m, _ = drive(t, m, questionRequest(make(chan requestAnswer, 1), second))
 	m, _ = drive(t, m, press('s', 0, "s"))
-	if len(m.out.entries) != 2 {
-		t.Fatalf("one call id in two turns printed %d answer rows, want 2", len(m.out.entries))
-	}
+	got := submissions(m)
 	want := []string{`question-submission:"t1":"turn-1":"call-q":"req-1":1`, `question-submission:"t1":"turn-2":"call-q":"req-1":1`}
-	for i, key := range want {
-		if m.out.entries[i].key != key {
-			t.Fatalf("row %d key %q, want %q", i, m.out.entries[i].key, key)
-		}
+	if len(got) != 2*len(want) || got[0] != want[0] || got[2] != want[1] {
+		t.Fatalf("two turns printed %q, want keys %q", got, want)
 	}
 }
 
@@ -584,49 +687,6 @@ func TestQuestionAnswerPreservesCanonicalText(t *testing.T) {
 	}
 	if !reflect.DeepEqual(decoded.Answers["q1"].Answers, []string{text}) {
 		t.Fatalf("answer = %s, want the canonical text %q", got, text)
-	}
-}
-
-func TestQuestionAnswerOverLimitRefusedWhole(t *testing.T) {
-	t.Parallel()
-	free := `{"threadId":"t1","turnId":"turn-1","itemId":"call-q","isBlocking":true,"questions":[` +
-		`{"id":"q1","header":"Name","question":"Name?","isOther":false,"isSecret":false,"multiSelect":false,"options":null}]}`
-	for _, route := range []string{"typing", "paste"} {
-		t.Run(route, func(t *testing.T) {
-			t.Parallel()
-			assertAnswerOverLimit(t, free, route)
-		})
-	}
-}
-
-func assertAnswerOverLimit(t *testing.T, question, route string) {
-	t.Helper()
-	m, answer := openQuestion(t, question)
-	m = pressKeys(t, typeText(t, m, "ab"), press(tea.KeyLeft, 0, ""))
-	text := "e" + strings.Repeat("\u0301", 2000)
-	var insertion tea.Msg = press(tea.KeyExtended, 0, text)
-	if route == "paste" {
-		insertion = tea.PasteMsg{Content: text}
-	}
-	m, _ = drive(t, m, insertion)
-	assertAnswerField(t, m, "ab", 1)
-	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
-	if !m.typingAnswer() || m.notice == "" {
-		t.Fatal("over-limit candidate advanced or did not explain how to correct it")
-	}
-	select {
-	case got := <-answer:
-		t.Fatalf("over-limit answer was sent: %#v", got)
-	default:
-	}
-	m = pressKeys(t, m, press('e', tea.ModAlt, ""), press(tea.KeyBackspace, 0, ""), press('x', 0, "x"), press(tea.KeyEnter, 0, ""))
-	assertAnswerField(t, m, "axb", 2)
-}
-
-func assertAnswerField(t *testing.T, m model, want string, caret int) {
-	t.Helper()
-	if got := m.input.field; got.value() != want || got.cursor != caret || !m.typingAnswer() {
-		t.Fatalf("answer field = %d scalars at %d, typing = %t; want %q at %d while typing", len(got.text), got.cursor, m.typingAnswer(), want, caret)
 	}
 }
 

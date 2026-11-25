@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 	workspaceExecText     = 64 << 10
 )
 
-var workspaceExecPolicy = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: workspaceExecText}}
+var workspaceExecPolicy = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: workspaceExecText}}
 
 type workspaceExecParams struct {
 	WorkspaceID string `json:"workspaceId"`

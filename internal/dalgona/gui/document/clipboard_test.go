@@ -10,7 +10,7 @@ import (
 
 	"gioui.org/io/input"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func clipboardText(t *testing.T, router *input.Router) (string, bool) {
@@ -61,7 +61,7 @@ func TestCopyTextWritesOnlyCompleteAllowedText(t *testing.T) {
 	}
 	router = input.Router{}
 	withNUL := Selection{Anchor: scope.Edge(0, false), Focus: scope.Edge(1, true)}
-	if err := scope.CopyText(context.Background(), router.Source(), withNUL, &pages{}); !errors.Is(err, inputtext.DisallowedControl) {
+	if err := scope.CopyText(context.Background(), router.Source(), withNUL, &pages{}); !errors.Is(err, textinput.DisallowedControl) {
 		t.Fatalf("NUL copy returned %v", err)
 	}
 	if got, ok := clipboardText(t, &router); ok {

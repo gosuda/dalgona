@@ -12,17 +12,18 @@ import (
 )
 
 type correctingClient struct {
-	answer   jsontext.Value
-	arrivals chan string
-	requests chan string
-	warnings chan map[string]string
-	resolved chan rpc.ServerRequestResolvedNotification
+	answer     jsontext.Value
+	requests   chan string
+	responders chan func(any) error
+	warnings   chan map[string]string
+	resolved   chan rpc.ServerRequestResolvedNotification
 }
 
 func newCorrectingClient(answer string) *correctingClient {
 	return &correctingClient{
-		answer: jsontext.Value(answer), arrivals: make(chan string, 16), requests: make(chan string, 16),
-		warnings: make(chan map[string]string, 16), resolved: make(chan rpc.ServerRequestResolvedNotification, 16),
+		answer: jsontext.Value(answer), requests: make(chan string, 16),
+		responders: make(chan func(any) error, 16),
+		warnings:   make(chan map[string]string, 16), resolved: make(chan rpc.ServerRequestResolvedNotification, 16),
 	}
 }
 
@@ -45,15 +46,18 @@ func (c *correctingClient) Notification(method string, params jsontext.Value) {
 	}
 }
 
-func (c *correctingClient) RequestArrived(method string, _ jsontext.Value) { c.arrivals <- method }
-
-func (c *correctingClient) Request(_ context.Context, _ string, params jsontext.Value) (any, error) {
+func (c *correctingClient) Request(ctx context.Context, _ string, params jsontext.Value) (any, error) {
 	var header rpc.RequestParams
 	if err := json.Unmarshal(params, &header); err != nil {
 		return nil, err
 	}
 	c.requests <- header.Details.RequestID
-	return c.answer, nil
+	respond := rpc.ClientResponder(ctx)
+	c.responders <- respond
+	if err := respond(c.answer); err != nil {
+		return nil, err
+	}
+	return nil, rpc.ErrResponded
 }
 
 func within[T any](t *testing.T, ch <-chan T, what string) T {
@@ -96,7 +100,7 @@ func resolutionOf(t *testing.T, observer *correctingClient, requestID string) st
 	}
 }
 
-func TestDialedClientCorrectsARejectedAnswerThroughRespond(t *testing.T) {
+func TestDialedClientCorrectsARejectedAnswerThroughResponder(t *testing.T) {
 	r := newDalgonaRig(t)
 	args := `{"questions":[{"header":"Database","question":"Which database?","options":[{"label":"SQLite","description":"One file."},{"label":"Postgres","description":"A server."}]}]}`
 	r.llm.push(llmReply{body: sseCall("call-q", "ask", args)}, llmReply{body: sseText("done")})
@@ -109,14 +113,12 @@ func TestDialedClientCorrectsARejectedAnswerThroughRespond(t *testing.T) {
 	if err := conn.Call(t.Context(), "turn/start", prompt(started.Thread.ID, "ask me"), nil); err != nil {
 		t.Fatal(err)
 	}
-	if arrival := within(t, observer.arrivals, "request arrival"); arrival != rpc.MethodRequest {
-		t.Fatalf("the first arrival was %s, want %s", arrival, rpc.MethodRequest)
-	}
 	requestID := within(t, observer.requests, "question request")
+	respond := within(t, observer.responders, "client responder")
 	if warning := within(t, observer.warnings, "correction warning"); warning["requestId"] != requestID || warning["field"] != "answers.q1.answers[0]" {
 		t.Fatalf("warning %v, want a field error for request %s", warning, requestID)
 	}
-	if err := conn.Respond(t.Context(), requestID, jsontext.Value(`{"answers":{"q1":{"answers":["Postgres"]}}}`)); err != nil {
+	if err := respond(jsontext.Value(`{"answers":{"q1":{"answers":["Postgres"]}}}`)); err != nil {
 		t.Fatal(err)
 	}
 	if resolution := resolutionOf(t, observer, requestID); resolution != "answered" {

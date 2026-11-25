@@ -160,7 +160,7 @@ It MUST NOT prevent local use or select the legacy daemon transport.
 A daemon remote `url` MUST use `https` or `wss` and include a host.
 It MUST NOT contain user information, a query, or a fragment.
 The client MUST join `/rpc` to the configured URL path.
-Both schemes select the same TLS-protected relay transport.
+Both schemes use the same TLS-protected relay transport.
 
 A relative `token_file` path MUST resolve against the product home.
 The token file MUST be a regular file and MUST NOT be a symlink.

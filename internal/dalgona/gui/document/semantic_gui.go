@@ -6,7 +6,7 @@ import (
 	"image"
 	"math"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 )
 
@@ -17,8 +17,8 @@ func (f *Flow) SemanticLines(span Span) []platform.TextLine {
 		if start >= end {
 			continue
 		}
-		space := inputtext.Range{Start: start - span.Start, End: end - span.Start}
-		if inputtext.CheckRange(f.Text[span.Start:span.End], space) != nil {
+		space := textinput.Range{Start: start - span.Start, End: end - span.Start}
+		if textinput.CheckRange(f.Text[span.Start:span.End], space) != nil {
 			continue
 		}
 		clusters := f.semanticClusters(line, Span{Start: start, End: end})
@@ -32,7 +32,7 @@ func (f *Flow) SemanticLines(span Span) []platform.TextLine {
 }
 
 func (f *Flow) semanticClusters(line Line, span Span) []platform.ClusterSpan {
-	boundaries := inputtext.Boundaries(f.Text[span.Start:span.End])
+	boundaries := textinput.Boundaries(f.Text[span.Start:span.End])
 	out := make([]platform.ClusterSpan, 0, len(boundaries)-1)
 	at := line.Clusters.Start
 	for i, edge := range boundaries[:len(boundaries)-1] {

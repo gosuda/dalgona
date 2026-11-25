@@ -14,8 +14,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
@@ -28,7 +28,7 @@ const (
 	archivedPage    = 50
 )
 
-var titlePolicy = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: titleLimitBytes}}
+var titlePolicy = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: titleLimitBytes}}
 
 func threadTitle(v *state.View, key state.ThreadKey) string {
 	if v == nil {
@@ -114,7 +114,7 @@ func (r *Rename) blocked(b binding, current string) string {
 	switch {
 	case !b.live:
 		return fmt.Sprintf("%s is %s; connect it to rename this thread.", b.endpoint, phaseWord(b.phase))
-	case inputtext.Blank(proposed):
+	case textinput.VisuallyBlank(proposed):
 		return "Enter a title."
 	case proposed == current:
 		return "The title is unchanged."
@@ -485,7 +485,7 @@ type Archived struct {
 }
 
 func newArchived(h *Hub) *Archived {
-	a := &Archived{filter: newField(inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: 1024}}, false)}
+	a := &Archived{filter: newField(textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: 1024}}, false)}
 	a.init(h)
 	return a
 }

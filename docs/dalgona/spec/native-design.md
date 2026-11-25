@@ -167,8 +167,7 @@ The sidebar MUST merge threads from every configured endpoint into endpoint lane
 Each lane header MUST show the endpoint display label and its phase word.
 The phase words display sentence case for the canonical phase tokens `idle`, `connecting`, `connected`, `reconnecting`, `offline`, `incompatible`, and `failed`.
 `Idle` MUST NOT carry a warning or failure treatment.
-A lane header MUST use text roles only and MUST NOT add a lane fill.
-It MUST NOT use the point, thread hue, or a per-endpoint accent.
+A lane header MUST use text roles only, with no lane fill, point, thread hue, or per-endpoint accent.
 The sidebar MUST stay between its registered minimum and maximum widths when space permits.
 The workspace MUST contain the header, transcript, and dock in that order.
 The transcript MUST scroll within its workspace column.

@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
-func uiaRange(start, end int) inputtext.Range {
-	return inputtext.Range{Start: start, End: end}
+func uiaRange(start, end int) textinput.Range {
+	return textinput.Range{Start: start, End: end}
 }
 
 func TestUIATextUnitsFollowTheTextUnitEnumeration(t *testing.T) {
@@ -54,7 +54,7 @@ func TestUIACharacterUnitStepsOverGraphemeClusters(t *testing.T) {
 
 func TestUIAWordUnitIncludesTrailingBreakCharacters(t *testing.T) {
 	text := "Hello, world  again\nnext"
-	expand := map[int]inputtext.Range{
+	expand := map[int]textinput.Range{
 		0:  uiaRange(0, 5),
 		3:  uiaRange(0, 5),
 		5:  uiaRange(5, 7),
@@ -76,7 +76,7 @@ func TestUIAWordUnitIncludesTrailingBreakCharacters(t *testing.T) {
 
 func TestUIAWordUnitFollowsUnicodeWordBoundariesInCJK(t *testing.T) {
 	text := "漢字テスト 한국어"
-	expand := map[int]inputtext.Range{0: uiaRange(0, 3), 3: uiaRange(3, 6), 9: uiaRange(6, 16), 15: uiaRange(6, 16), 19: uiaRange(16, 25), 25: uiaRange(16, 25)}
+	expand := map[int]textinput.Range{0: uiaRange(0, 3), 3: uiaRange(3, 6), 9: uiaRange(6, 16), 15: uiaRange(6, 16), 19: uiaRange(16, 25), 25: uiaRange(16, 25)}
 	for at, want := range expand {
 		if got := uiaExpand(text, uiaRange(at, at), uiaByWord); got != want {
 			t.Errorf("word around %d = %v (%q), want %v (%q)", at, got, text[got.Start:got.End], want, text[want.Start:want.End])
@@ -96,13 +96,13 @@ func TestUIAWordUnitFollowsUnicodeWordBoundariesInCJK(t *testing.T) {
 
 func TestUIALineAndParagraphUnitsBreakAfterLineFeeds(t *testing.T) {
 	text := "one\ntwo\n\nfour"
-	lines := map[int]inputtext.Range{0: uiaRange(0, 4), 5: uiaRange(4, 8), 8: uiaRange(8, 9), 10: uiaRange(9, 13), 13: uiaRange(9, 13)}
+	lines := map[int]textinput.Range{0: uiaRange(0, 4), 5: uiaRange(4, 8), 8: uiaRange(8, 9), 10: uiaRange(9, 13), 13: uiaRange(9, 13)}
 	for at, want := range lines {
 		if got := uiaExpand(text, uiaRange(at, at), uiaByLine); got != want {
 			t.Errorf("line around %d = %v, want %v", at, got, want)
 		}
 	}
-	paragraphs := map[int]inputtext.Range{0: uiaRange(0, 4), 5: uiaRange(4, 9), 8: uiaRange(4, 9), 10: uiaRange(9, 13)}
+	paragraphs := map[int]textinput.Range{0: uiaRange(0, 4), 5: uiaRange(4, 9), 8: uiaRange(4, 9), 10: uiaRange(9, 13)}
 	for at, want := range paragraphs {
 		if got := uiaExpand(text, uiaRange(at, at), uiaByParagraph); got != want {
 			t.Errorf("paragraph around %d = %v, want %v with the empty line merged", at, got, want)
@@ -113,9 +113,9 @@ func TestUIALineAndParagraphUnitsBreakAfterLineFeeds(t *testing.T) {
 func TestUIAMoveNormalizesNonDegenerateRanges(t *testing.T) {
 	text := "one\ntwo\nthree"
 	cases := []struct {
-		from  inputtext.Range
+		from  textinput.Range
 		count int32
-		want  inputtext.Range
+		want  textinput.Range
 		moved int32
 	}{
 		{uiaRange(1, 2), 1, uiaRange(4, 8), 1},
@@ -137,7 +137,7 @@ func TestUIAMoveEndpointCollapsesACrossedEndpoint(t *testing.T) {
 		endpoint int32
 		unit     uiaTextUnit
 		count    int32
-		want     inputtext.Range
+		want     textinput.Range
 		moved    int32
 	}{
 		{uiaEndpointStart, uiaByLine, 2, uiaRange(13, 13), 2},
@@ -201,22 +201,22 @@ func TestUIAGetTextHonorsMaxLengthAndTheTextObjectLimit(t *testing.T) {
 func TestUIAFindTextRespectsCaseAndClusters(t *testing.T) {
 	cases := []struct {
 		text     string
-		within   inputtext.Range
+		within   textinput.Range
 		needle   string
 		backward bool
 		fold     bool
-		want     inputtext.Range
+		want     textinput.Range
 		found    bool
 	}{
-		{"Alpha beta ALPHA", uiaRange(0, 16), "alpha", false, false, inputtext.Range{}, false},
+		{"Alpha beta ALPHA", uiaRange(0, 16), "alpha", false, false, textinput.Range{}, false},
 		{"Alpha beta ALPHA", uiaRange(0, 16), "alpha", false, true, uiaRange(0, 5), true},
 		{"Alpha beta ALPHA", uiaRange(0, 16), "alpha", true, true, uiaRange(11, 16), true},
 		{"Alpha beta ALPHA", uiaRange(1, 16), "alpha", false, true, uiaRange(11, 16), true},
 		{"Alpha beta ALPHA", uiaRange(0, 15), "alpha", true, true, uiaRange(0, 5), true},
-		{"e\u0301", uiaRange(0, 3), "e", false, false, inputtext.Range{}, false},
+		{"e\u0301", uiaRange(0, 3), "e", false, false, textinput.Range{}, false},
 		{"e\u0301", uiaRange(0, 3), "e\u0301", false, false, uiaRange(0, 3), true},
 		{"\u212A", uiaRange(0, 3), "k", false, true, uiaRange(0, 3), true},
-		{"abc", uiaRange(0, 3), "", false, false, inputtext.Range{}, false},
+		{"abc", uiaRange(0, 3), "", false, false, textinput.Range{}, false},
 	}
 	for _, c := range cases {
 		got, found := uiaFind(c.text, c.within, c.needle, c.backward, c.fold)

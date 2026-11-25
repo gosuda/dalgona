@@ -136,16 +136,16 @@ func TestRequestAnsweredBeforeTheTransportWaitsStillReplies(t *testing.T) {
 			synctest.Wait()
 			link := p.link("local")
 			header := requestHeader(p, link, p.next(link), "t1", "req-early")
-			p.owner.Arrived(link, rpc.MethodRequest, header)
+			out := make(chan answer, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				result, err := p.owner.Requested(ctx, link, rpc.MethodRequest, header)
+				out <- answer{result: result, err: err}
+			}()
 			synctest.Wait()
 			p.owner.Submit(Answer{Request: RequestKey{Thread: localThread, Request: "req-early"}, Result: jsontext.Value(`{"decision":"accept"}`)})
-			synctest.Wait()
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-			defer cancel()
-			result, err := p.owner.Requested(ctx, link, rpc.MethodRequest, header)
-			if raw, ok := result.(jsontext.Value); err != nil || !ok || string(raw) != `{"decision":"accept"}` {
-				t.Fatalf("the late wait received %v, %v", result, err)
-			}
+			expectAnswer(t, out, `{"decision":"accept"}`)
 		})
 	})
 }

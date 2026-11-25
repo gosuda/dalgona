@@ -9,22 +9,22 @@ import (
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const maxKeywordText = 64 << 10
 
 type textLocation struct {
 	path   string
-	policy inputtext.Policy
+	policy textinput.Policy
 }
 
-type textExtractor func(params jsontext.Value) ([]inputtext.Item, error)
+type textExtractor func(params jsontext.Value) ([]textinput.Item, error)
 
 var (
-	directTextPolicy  = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: frameBytes}}
-	apiKeyTextPolicy  = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: frameBytes}}
-	keywordTextPolicy = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: maxKeywordText}}
+	directTextPolicy  = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: frameBytes}}
+	apiKeyTextPolicy  = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: frameBytes}}
+	keywordTextPolicy = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: maxKeywordText}}
 )
 
 var fsTexts = directTexts("path", "sourcePath", "destinationPath", "dataBase64")
@@ -61,7 +61,7 @@ func directTexts(paths ...string) textExtractor {
 }
 
 func locatedTexts(locations ...textLocation) textExtractor {
-	return func(params jsontext.Value) ([]inputtext.Item, error) {
+	return func(params jsontext.Value) ([]textinput.Item, error) {
 		walk := textWalk{locations: locations}
 		if err := walk.value(jsontext.NewDecoder(bytes.NewReader(params)), "", ""); err != nil {
 			return nil, invalidParams(err.Error())
@@ -85,7 +85,7 @@ func checkText(extract textExtractor, params jsontext.Value) error {
 	if err != nil {
 		return err
 	}
-	if err := inputtext.CheckRequest(items); err != nil {
+	if err := textinput.CheckRequest(items); err != nil {
 		return invalidParams(err.Error())
 	}
 	return nil
@@ -93,7 +93,7 @@ func checkText(extract textExtractor, params jsontext.Value) error {
 
 type textWalk struct {
 	locations []textLocation
-	items     []inputtext.Item
+	items     []textinput.Item
 }
 
 func (w *textWalk) value(d *jsontext.Decoder, pattern, field string) error {
@@ -129,7 +129,7 @@ func (w *textWalk) elements(d *jsontext.Decoder, pattern, field string) error {
 	})
 }
 
-func (w *textWalk) collect(d *jsontext.Decoder, policy inputtext.Policy, field string) error {
+func (w *textWalk) collect(d *jsontext.Decoder, policy textinput.Policy, field string) error {
 	for depth := 0; ; {
 		token, err := d.ReadToken()
 		if err != nil {
@@ -137,7 +137,7 @@ func (w *textWalk) collect(d *jsontext.Decoder, policy inputtext.Policy, field s
 		}
 		switch token.Kind() {
 		case jsontext.KindString:
-			w.items = append(w.items, inputtext.Item{Field: field, Policy: policy, Text: token.String()})
+			w.items = append(w.items, textinput.Item{Field: field, Policy: policy, Text: token.String()})
 		case jsontext.KindBeginObject, jsontext.KindBeginArray:
 			depth++
 		case jsontext.KindEndObject, jsontext.KindEndArray:
@@ -150,13 +150,13 @@ func (w *textWalk) collect(d *jsontext.Decoder, policy inputtext.Policy, field s
 	}
 }
 
-func (w *textWalk) declared(pattern string) (inputtext.Policy, bool) {
+func (w *textWalk) declared(pattern string) (textinput.Policy, bool) {
 	for _, location := range w.locations {
 		if location.path == pattern {
 			return location.policy, true
 		}
 	}
-	return inputtext.Policy{}, false
+	return textinput.Policy{}, false
 }
 
 func (w *textWalk) leadsTo(pattern string) bool {

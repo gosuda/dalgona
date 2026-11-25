@@ -3,59 +3,24 @@ name: CI
 "on":
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["**"]
   pull_request:
   merge_group:
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * 1"
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
 env:
   GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
 
 jobs:
-  lint:
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: go tool golangci-lint fmt --diff
-      - run: go vet ./...
-      - run: go tool golangci-lint run ./...
-
-  test:
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        with:
-          python-version: "3.15"
-      - run: go test -race -count=1 ./...
-
-  vuln:
-    runs-on: depot-ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: go tool govulncheck ./...
-
   desktop:
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 40
@@ -135,37 +100,119 @@ jobs:
       - run: just desktop-check
       - run: just desktop-build
 
+  go:
+    name: ${{ matrix.check }}
+    needs: web
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: lint
+            lane: linux-lint
+            runner: depot-ubuntu-24.04
+            recipes: fmt-check vet lint
+          - check: test
+            lane: linux-test
+            runner: depot-ubuntu-24.04
+            recipes: test
+          - check: vuln
+            lane: linux-vuln
+            runner: depot-ubuntu-24.04
+            recipes: vuln
+          - check: Verify (macos-latest)
+            lane: macos
+            runner: macos-latest
+            recipes: verify-go
+          - check: Verify (windows-latest)
+            lane: windows
+            runner: windows-latest
+            recipes: verify-go
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require verified shared assets
+        env:
+          SHARED_RESULT: ${{ needs.web.result }}
+        run: |
+          if [ "$SHARED_RESULT" != success ]; then
+            printf 'Web verification ended with %s. Re-run the web job before Go verification.\n' "$SHARED_RESULT" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download this run's verified web assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: verified-web-assets
+          path: internal/dalgona/webui/dist
+          digest-mismatch: error
+      - name: Install Linux graphics development packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev pkg-config
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
+        with:
+          version: "0.13.9"
+          python-version: "3.15"
+          require-checksums: true
+          enable-cache: false
+      - run: uv python install 3.15
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3
+      - name: Verify Go contracts
+        env:
+          GOCACHE: "${{ runner.temp }}/dalgona-go-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}"
+        run: just ${{ matrix.recipes }}
   web:
     runs-on: depot-ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         id: checkout
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        id: node
         with:
           node-version: 24
-      - name: Corepack pnpm
+      - name: Activate the locked package manager
         id: corepack
-        run: corepack enable && corepack prepare pnpm@12.21.0 --activate && pnpm --version
-      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        id: setup-uv
+        if: ${{ !cancelled() && steps.node.outcome == 'success' }}
+        run: |
+          corepack enable
+          corepack prepare "$(node -p 'require("./web/package.json").packageManager')" --activate
+          pnpm --version
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d
+        id: python
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         with:
+          version: "0.13.9"
           python-version: "3.15"
+          require-checksums: true
+          enable-cache: false
       - name: Hashline model
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-uv.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
         run: uv run --no-project --python 3.15 docs/dal/spec/hashline/verify_model.py | cmp - docs/dal/spec/hashline/verification.json
-      - name: Spec style
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-uv.outcome == 'success' }}
+      - name: Core spec style
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
         run: uv run --no-project --python 3.15 docs/dal/spec/check_style.py docs/dal/spec
       - name: Dalgona spec style
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-uv.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
         run: uv run --no-project --python 3.15 docs/dal/spec/check_style.py docs/dalgona/spec
       - name: Spec style tests
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.setup-uv.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
         run: uv run --no-project --python 3.15 docs/dal/spec/check_style_test.py
       - name: Docs links
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        run: python3 docs/check_links.py
+        if: ${{ !cancelled() && steps.python.outcome == 'success' }}
+        run: uv run --no-project --python 3.15 docs/check_links.py
       - name: Web install
         id: web-install
         if: ${{ !cancelled() && steps.corepack.outcome == 'success' }}
@@ -173,7 +220,9 @@ jobs:
       - name: Web build
         id: web-build
         if: ${{ !cancelled() && steps.web-install.outcome == 'success' }}
-        run: pnpm -C web build
+        run: |
+          pnpm -C web build
+          touch internal/dalgona/webui/dist/.gitkeep
       - name: Web lint
         if: ${{ !cancelled() && steps.web-build.outcome == 'success' }}
         run: pnpm -C web exec biome ci
@@ -199,16 +248,15 @@ jobs:
       - name: Worker tests
         if: ${{ !cancelled() && steps.worker-install.outcome == 'success' }}
         run: pnpm -C deploy/cloudflare test
-      - name: Upload web dist
-        if: ${{ success() }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Upload verified web assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: web-dist
+          name: verified-web-assets
           path: internal/dalgona/webui/dist
-          include-hidden-files: true
-          retention-days: 7
-          overwrite: true
           if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 7
 
   verify-native:
     name: Verify (${{ matrix.os }})
@@ -234,7 +282,7 @@ jobs:
           fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: web-dist
+          name: verified-web-assets
           path: internal/dalgona/webui/dist
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

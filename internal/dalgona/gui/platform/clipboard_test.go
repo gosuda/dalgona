@@ -11,7 +11,7 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const exactSample = "line\r\nlone\rcr\n\u2028sep e\u0301 한글 \U0001F469\u200D\U0001F469\u200D\U0001F467 \uFEFF\U000E0001 \tend\n"
@@ -32,11 +32,11 @@ func TestReadTextRejectsTheWholeCandidate(t *testing.T) {
 		data string
 		want error
 	}{
-		{"malformed byte", "valid prefix \xff suffix", inputtext.InvalidEncoding},
-		{"encoded surrogate", "a\xed\xa0\x80b", inputtext.InvalidEncoding},
-		{"truncated scalar", "한\xea\xb8", inputtext.InvalidEncoding},
-		{"embedded NUL", "before\x00after", inputtext.DisallowedControl},
-		{"trailing NUL", "text\x00", inputtext.DisallowedControl},
+		{"malformed byte", "valid prefix \xff suffix", textinput.InvalidEncoding},
+		{"encoded surrogate", "a\xed\xa0\x80b", textinput.InvalidEncoding},
+		{"truncated scalar", "한\xea\xb8", textinput.InvalidEncoding},
+		{"embedded NUL", "before\x00after", textinput.DisallowedControl},
+		{"trailing NUL", "text\x00", textinput.DisallowedControl},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -97,8 +97,8 @@ func TestCheckCopyAcceptsOnlyExactlyTransferableText(t *testing.T) {
 		text string
 		want error
 	}{
-		{"embedded NUL", "a\x00b", inputtext.DisallowedControl},
-		{"malformed byte", "a\xffb", inputtext.InvalidEncoding},
+		{"embedded NUL", "a\x00b", textinput.DisallowedControl},
+		{"malformed byte", "a\xffb", textinput.InvalidEncoding},
 		{"over the transfer limit", strings.Repeat("a", 32*1024*1024+1), ErrTransferTooLarge},
 	}
 	for _, tc := range cases {
@@ -113,7 +113,7 @@ func TestPastedLineEndingsFollowTheFieldPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	multi, err := NewComposer(inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Scalars, Max: 100}}, inputtext.Draft{})
+	multi, err := NewComposer(textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Scalars, Max: 100}}, textinput.Draft{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,12 +123,12 @@ func TestPastedLineEndingsFollowTheFieldPolicy(t *testing.T) {
 	if got, want := multi.Draft().Text, "one\ntwo\nthree\n\u2028"; got != want {
 		t.Fatalf("multiline paste stored %q, want %q", got, want)
 	}
-	previous := inputtext.Draft{Text: "keep", Selection: inputtext.Range{Start: 1, End: 3}}
-	single, err := NewComposer(inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Scalars, Max: 100}}, previous)
+	previous := textinput.Draft{Text: "keep", Selection: textinput.Range{Start: 1, End: 3}}
+	single, err := NewComposer(textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Scalars, Max: 100}}, previous)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := single.Replace(pasted); !errors.Is(err, inputtext.LineBreakNotAllowed) {
+	if err := single.Replace(pasted); !errors.Is(err, textinput.LineBreakNotAllowed) {
 		t.Fatalf("single-line paste error %v, want LineBreakNotAllowed", err)
 	}
 	if single.Draft() != previous {
@@ -140,7 +140,7 @@ func TestPastedLineEndingsFollowTheFieldPolicy(t *testing.T) {
 }
 
 func TestPasteTargetRefusesAChangedBinding(t *testing.T) {
-	bound := PasteTarget{Window: 3, Endpoint: "local", Thread: "t1", Field: "composer", Revision: 7, Selection: inputtext.Range{Start: 2, End: 4}}
+	bound := PasteTarget{Window: 3, Endpoint: "local", Thread: "t1", Field: "composer", Revision: 7, Selection: textinput.Range{Start: 2, End: 4}}
 	if err := bound.Check(bound); err != nil {
 		t.Fatalf("an unchanged target refused the paste: %v", err)
 	}

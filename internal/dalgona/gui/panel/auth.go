@@ -9,8 +9,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
 )
@@ -37,8 +37,8 @@ var (
 		flowAPIKey: "API key", flowBrowser: "Sign in with the browser", flowManual: "Sign in and paste the code",
 		flowDevice: "Device code", flowCursor: "Cursor app",
 	}
-	keyPolicy   = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: apiKeyLimit}}
-	pastePolicy = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: pastedLimit}}
+	keyPolicy   = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: apiKeyLimit}}
+	pastePolicy = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: pastedLimit}}
 )
 
 type authTarget struct {

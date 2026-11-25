@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type Cluster struct {
@@ -259,7 +259,7 @@ func clusterEdges(text string, c Cluster) []int {
 	if c.Object {
 		return []int{c.Text.Start, c.Text.End}
 	}
-	inner := inputtext.Boundaries(text[c.Text.Start:c.Text.End])
+	inner := textinput.Boundaries(text[c.Text.Start:c.Text.End])
 	edges := make([]int, 0, max(len(inner), 2))
 	for _, b := range inner {
 		edges = append(edges, c.Text.Start+b)

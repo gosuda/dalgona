@@ -1,6 +1,6 @@
 # Native components
 
-Status: Required design. `internal/dalgona/gui/shell` implements C01 against headless tests. C01 covers regions with one active thread per window. C01 also covers request and composer dock, panel host, `?` key list routing, follow-up discard decision, and close confirmation by endpoint. The same package implements C02 against headless tests. C02 covers endpoint lanes with per-lane paging, retry, and offline retention. The same package implements C04, C05, C06, C07, and C08 against headless tests. `internal/dalgona/gui/decision` implements C15 and C16 against headless tests. Its answer field uses the platform composition editor with scripted composition tests. Native input-method checks remain open. Notification activation opens the named thread through `platform.Notifier` on Linux. The Windows and macOS notifiers are pending. `internal/dalgona/gui/manage` implements the C44 through C51 panels over an injected endpoint session and lifecycle. Headless tests cover C44, C45, C50, and C51. C46 through C49 have no tests yet. They still draw their own card instead of the C20 `panel.Frame`. This document certifies no desktop client.
+Status: Required design. `internal/dalgona/gui/shell` implements C01, C02, and C04 through C08 against headless tests. C01 covers regions with one active thread per window, request and composer dock, and panel host. It covers `?` key list routing, follow-up discard decision, and close confirmation by endpoint. C02 covers endpoint lanes with per-lane paging, retry, and offline retention. `internal/dalgona/gui/decision` implements C15 and C16 against headless tests. Its answer field uses the platform composition editor with scripted composition tests. Native input-method checks remain open. Notification activation opens the named thread through `platform.Notifier` on Linux. The Windows and macOS notifiers are pending. `internal/dalgona/gui/manage` implements the C44 through C51 panels over an injected endpoint session and lifecycle. Headless tests cover C44, C45, C50, and C51. C46 through C49 have no tests yet. They still draw their own card instead of the C20 `panel.Frame`. This document certifies no desktop client.
 The source baseline is `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 
 The [native decision](../decisions/native-client.md) selects Gio.
@@ -84,8 +84,7 @@ Its complete value MUST remain selectable and available to accessibility.
 The application MUST hold concurrent session state for every configured endpoint.
 Each endpoint session MUST own its phase, retry ladder, subscriptions, requests, budgets, and receipts.
 Every thread-scoped panel session and asynchronous result MUST include `EndpointID`.
-An endpoint loss MUST make only that endpoint's projections read-only.
-Other endpoint projections MUST remain live and actionable.
+An endpoint loss MUST make only that endpoint's projections read-only while other endpoint projections remain live and actionable.
 The open thread's endpoint alone MUST gate sending for that thread.
 Offline MUST block sending until explicit Connect succeeds.
 Selecting a thread MUST NOT disconnect or reconnect any endpoint.
@@ -110,11 +109,7 @@ Window-scoped asynchronous results MUST carry `windowId`, `EndpointID`, connecti
 An obsolete result MUST NOT replace the current window state.
 Closing a panel MUST preserve the composer draft and transcript anchor.
 
-Reconnection MUST follow the shared client lifecycle in [native architecture](native-architecture.md).
-It MUST affect only its target endpoint.
-It MUST reload that endpoint's navigation lane and resume its open threads.
-It MUST retain queued follow-ups by endpoint, window, and thread.
-It MUST NOT repeat a running turn or retry an uncertain write automatically.
+Reconnection MUST follow the shared client lifecycle in [native architecture](native-architecture.md). It MUST affect only its target endpoint. It MUST reload that endpoint's navigation lane and resume its open threads. It MUST retain queued follow-ups by endpoint, window, and thread.
 A resume error identifying an unknown thread MUST clear only that endpoint's matching open thread and transcript.
 Requests cached from a disconnected connection MUST lose their actionable state.
 Only requests from the current generation of the same endpoint session MAY become actionable again.
@@ -707,7 +702,7 @@ The viewer MUST distinguish missing content from empty output.
 
 ## C20: Common panel
 
-Status: `internal/dalgona/gui/panel` exports `Frame`, `Content`, `Button`, `Choice`, and `Check`. The package implements the card, body-only scrolling, and the Tab trap against headless tests. It also implements Escape after any field that claims it, the permanent Close or Cancel action, and busy progress against headless tests. The shell panel host restores focus. Text fields use `platform.Editor`. The V12 composition gate stays with its hardware checks.
+Status: `internal/dalgona/gui/panel` exports `Frame`, `Content`, `Button`, `Choice`, and `Check`. The package implements the card, body-only scrolling, the Tab trap, and Escape after any field that claims it. It implements the permanent Close or Cancel action and busy progress against headless tests. The shell panel host restores focus. Text fields use `platform.Editor`. The V12 composition gate stays with its hardware checks.
 
 Every modal panel MUST use one title, scrollable body, and reachable footer.
 Only the body MUST scroll when the panel exceeds the client area.

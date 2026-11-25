@@ -7,7 +7,9 @@ It MUST support manual runs.
 Feature branch pushes MUST use their pull request run instead of starting a second CI run.
 CI MUST NOT filter changed paths because checks read files across package boundaries.
 A newer run for the same ref MUST cancel the older run.
-A newer run for the same ref cancels the older run through the workflow concurrency group, which covers tag pushes as well.
+The workflow MUST also run its scheduled verification each Monday at 03:00 UTC.
+The workflow MUST use a concurrency group per ref.
+The concurrency group MUST cover tag pushes as well.
 
 ## Provider
 
@@ -16,6 +18,8 @@ A second CI provider MUST NOT run the same jobs, because the web and Cloudflare 
 The lint, test, vuln, and web CI jobs MUST run on Depot `depot-ubuntu-24.04` runners.
 Latchkey MUST NOT run CI.
 A job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
+Go setup MUST disable its shared cache. Each Go lane MUST use a build cache path
+scoped to the workflow run, attempt, and lane.
 
 ## Verification
 
@@ -28,6 +32,11 @@ The CI jobs MUST together run every check from the full verification command.
 | `test` | `test` |
 | `vuln` | `vuln` |
 | `web` | `hashline-model`, `spec-style`, `docs-links`, `web-check`, `cf-check` |
+| `Verify (macos-latest)` | `verify-go` |
+| `Verify (windows-latest)` | `verify-go` |
+
+The Go matrix MUST preserve these check names and MUST disable fail-fast.
+Linux Go lanes MUST install the graphics development packages needed to build the native client.
 
 Go tests MUST keep the race detector and `-count=1`.
 The `test` job MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
@@ -38,7 +47,7 @@ It MUST activate the `packageManager`-pinned pnpm through corepack before
 any pnpm call, because the runner image ships Node without pnpm.
 
 The `web` job MUST install `uv` so the model and specification checks run with the Python 3.15 that `just verify` uses.
-The `test` and `web` jobs install `uv` with Python 3.15 and run those checks through `uv run --python 3.15`, matching `just verify`.
+Every Python check in the workflow MUST use `uv run --no-project --python 3.15`.
 Web tests use Node and happy-dom. Cloudflare tests use local runtime stubs.
 Those tests MUST run once on Linux. They do not certify a live browser or Cloudflare deployment.
 
@@ -53,7 +62,7 @@ One `web` job run then lists every failing check that does not depend on a faile
 
 ## Native lanes
 
-The native macOS and Windows lanes run as `Verify (macos-latest)` and `Verify (windows-latest)` in the one workflow alongside the Linux Depot jobs.
+The macOS and Windows lanes MUST use the `macos-latest` and `windows-latest` GitHub-hosted runners.
 The `web` job uploads its `dist` artifact for the native jobs to download before Go verification.
 Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
 Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
@@ -62,7 +71,8 @@ A failing native job MUST NOT cancel the other native jobs.
 The `web` job MUST upload `internal/dalgona/webui/dist` only after all its checks pass.
 The artifact MUST include hidden files and MUST come from the same workflow run as its consumers.
 An upload with no files MUST fail.
-Each native job MUST download the artifact before Go verification so compilation embeds the same built assets.
+Every Go lane MUST download the artifact before Go verification so compilation embeds the same built assets.
+An artifact digest mismatch MUST fail the download.
 The artifact MUST expire after seven days.
 Rerunning the `web` job MUST replace its previous artifact.
 After expiry, a rerun MUST include the `web` job to rebuild the artifact.

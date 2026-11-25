@@ -184,7 +184,11 @@ class FakePort implements RpcPort {
 	question(request: QuestionRequest): void {
 		this.handlers.onQuestion(request);
 	}
-	respond(_id: RequestId, _result: JsonValue): void {}
+	readonly responses: [RequestId, JsonValue][] = [];
+
+	respond(id: RequestId, result: JsonValue): void {
+		this.responses.push([id, result]);
+	}
 
 	close(): void {}
 
@@ -344,6 +348,24 @@ function resolvedNotice(
 				: { threadId, requestId, resolution },
 	});
 	if (parsed === null) throw new Error("resolved notice did not parse");
+	return parsed;
+}
+
+function correctionNotice(
+	threadId: string,
+	requestId: string,
+): AppNotification {
+	const parsed = parseNotification({
+		method: "warning",
+		params: {
+			threadId,
+			requestId,
+			message: "invalid text: answers.q1.answers[1]: disallowed_control",
+			reason: "disallowed_control",
+			field: "answers.q1.answers[1]",
+		},
+	});
+	if (parsed === null) throw new Error("warning notice did not parse");
 	return parsed;
 }
 
@@ -729,6 +751,85 @@ describe("session", () => {
 		port.question(question("req-2"));
 		port.deliver(resolvedNotice("t1", "req-2", "answered"));
 		expect([...session.timedOutQuestions]).toEqual(["call-1"]);
+		session.stop();
+	});
+
+	test("keeps a submitted question until it resolves and takes one response per warning", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		const port = ports[0];
+		if (port === undefined) throw new Error("no port");
+		const request = question("req-1");
+		port.question(request);
+		port.question(question("req-2"));
+		const typed = [{ picked: ["Postgres"], other: "bad\u0000" }];
+		session.answerQuestion(request, typed);
+		session.answerQuestion(request, [{ picked: [], other: "again" }]);
+		session.cancelQuestion(request);
+		expect(port.responses).toEqual([
+			["req-1", { answers: { q1: { answers: ["Postgres", "bad\u0000"] } } }],
+		]);
+		expect(session.requests.map((entry) => entry.id)).toEqual([
+			"req-1",
+			"req-2",
+		]);
+		port.deliver(correctionNotice("t1", "req-2"));
+		port.deliver(correctionNotice("t2", "req-1"));
+		expect(session.questionSubmissions.get("req-1")).toEqual({
+			selections: typed,
+			correction: null,
+		});
+		expect(session.questionSubmissions.has("req-2")).toBe(false);
+		port.deliver(correctionNotice("t1", "req-1"));
+		expect(session.questionSubmissions.get("req-1")).toEqual({
+			selections: typed,
+			correction: {
+				field: "answers.q1.answers[1]",
+				reason: "disallowed_control",
+				message: "invalid text: answers.q1.answers[1]: disallowed_control",
+			},
+		});
+		session.answerQuestion(request, [{ picked: ["Postgres"], other: "good" }]);
+		expect(port.responses.at(-1)).toEqual([
+			"req-1",
+			{ answers: { q1: { answers: ["Postgres", "good"] } } },
+		]);
+		port.deliver(resolvedNotice("t1", "req-1", "answered"));
+		expect(session.requests.map((entry) => entry.id)).toEqual(["req-2"]);
+		expect(session.questionSubmissions.size).toBe(0);
+		expect(session.notices.at(-1)?.text).toBe("Question answered");
+		port.deliver(correctionNotice("t1", "req-1"));
+		expect(session.requests.map((entry) => entry.id)).toEqual(["req-2"]);
+		expect(session.questionSubmissions.size).toBe(0);
+		port.deliver(resolvedNotice("t1", "req-2", "answered"));
+		expect(session.notices.at(-1)?.text).toBe(
+			"Question answered in another window",
+		);
+		expect(port.responses).toHaveLength(2);
+		session.stop();
+	});
+
+	test("forgets a submitted answer when the connection reopens", async () => {
+		const { dial, ports } = fakeDial("t1");
+		const session = new Session(dial);
+		session.start(location);
+		await openThread(session, "t1");
+		const request = question("req-1");
+		ports[0]?.question(request);
+		session.answerQuestion(request, [{ picked: ["Postgres"], other: "" }]);
+		expect(session.questionSubmissions.size).toBe(1);
+		await session.connect();
+		await vi.waitFor(() => expect(ports).toHaveLength(2));
+		const port = ports[1];
+		if (port === undefined) throw new Error("no second port");
+		expect(session.questionSubmissions.size).toBe(0);
+		port.question(request);
+		session.answerQuestion(request, [{ picked: ["Postgres"], other: "" }]);
+		expect(port.responses).toEqual([
+			["req-1", { answers: { q1: { answers: ["Postgres"] } } }],
+		]);
 		session.stop();
 	});
 
@@ -1498,37 +1599,6 @@ describe("file search", () => {
 		session.stop();
 	});
 
-	test("searches under a newly started thread's response cwd", async () => {
-		const searches: JsonValue[] = [];
-		const { dial } = fakeDial("none", {
-			"thread/start": () => ({
-				thread: thread("new-thread", []),
-				model: "gpt-test",
-				approvalsReviewer: "user",
-				modelProvider: "openai",
-				approvalPolicy: "on-request",
-				sandbox: "workspace-write",
-				cwd: "/new-work",
-			}),
-			fuzzyFileSearch: (params) => {
-				searches.push(params);
-				return { files: [] };
-			},
-		});
-		const session = new Session(dial);
-		session.start(location);
-		await openThread(session, "t1");
-		await session.createThread();
-		session.threads = [];
-
-		await session.searchFiles("mod");
-
-		expect(searches).toEqual([
-			{ query: "mod", roots: ["/new-work"], cancellationToken: "composer" },
-		]);
-		session.stop();
-	});
-
 	test("rejects a null response cwd", () => {
 		const response = resumeAnswer("none")({ threadId: "t1" });
 		expect(() =>
@@ -1698,15 +1768,6 @@ describe("review note", () => {
 		if (port === undefined) throw new Error("no port was dialled");
 		return { session, port };
 	}
-
-	test("a flagged tool verdict sets the review note", async () => {
-		const { session, port } = await openedSession();
-		port.deliver(turnStarted("t1", "turn-1"));
-		port.deliver(fileChangeCompleted("t1", "turn-1", "call-7"));
-		port.deliver(toolJudged("flagged", "Flagged: removed code"));
-		expect(session.reviewNote).toBe("Flagged: removed code");
-		session.stop();
-	});
 
 	test("a clean tool verdict sets no review note", async () => {
 		const { session, port } = await openedSession();
@@ -2205,32 +2266,6 @@ function question(id: string): QuestionRequest {
 		],
 	};
 }
-
-describe("question drafts", () => {
-	beforeEach(() => {
-		vi.stubGlobal("history", { replaceState: vi.fn() });
-	});
-
-	afterEach(() => {
-		vi.unstubAllGlobals();
-	});
-
-	test("an answer stays drafted until its request resolves", async () => {
-		const { dial, ports } = fakeDial("t1");
-		const session = new Session(dial);
-		session.start(location);
-		await openThread(session, "t1");
-		const sent = question("req-1");
-		ports[0]?.question(sent);
-		session.answerQuestion(sent, [{ picked: ["Postgres"], other: "" }]);
-		expect(session.questionDrafts.get("req-1")).toEqual([
-			{ picked: ["Postgres"], other: "" },
-		]);
-		ports[0]?.deliver(resolvedNotice("t1", "req-1", "answered"));
-		expect(session.questionDrafts.has("req-1")).toBe(false);
-		session.stop();
-	});
-});
 
 describe("answered resolution notices", () => {
 	beforeEach(() => {

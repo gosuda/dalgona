@@ -10,8 +10,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const composerMaxRows = 6
@@ -127,20 +127,12 @@ func (m *model) draftLine(width int) (string, int) {
 
 func (m *model) fieldLine(mode inputMode, width int) (string, int) {
 	label := m.fieldLabel(mode)
-	field := &m.input.field
-	if mode == inputAnswer {
-		card := m.approvals[0].card
-		field = card.answerField(field)
-		if card.editingRejected {
-			label = "proposed answer: "
-		}
-	}
-	text := field.text
+	text := m.input.field.text
 	if mode == inputAPIKey {
 		text = []rune(strings.Repeat("*", len(text)))
 	}
 	room := terminalWidth(width) - m.screen.cells(label)
-	window, caret := fieldWindow(&m.screen, text, field.cursor, room)
+	window, caret := fieldWindow(&m.screen, text, m.input.field.cursor, room)
 	return m.screen.fit(label+window, terminalWidth(width)), m.screen.cells(label) + caret
 }
 
@@ -162,7 +154,7 @@ func fieldWindow(s *screenState, text []rune, cursor, room int) (string, int) {
 	if s.cells(displayText(field.source)) <= room {
 		return s.expandDisplay(field.source), s.cells(displayText(field.source[:at]))
 	}
-	field.stops = inputtext.Boundaries(field.source)
+	field.stops = textinput.Boundaries(field.source)
 	caret, _ := slices.BinarySearch(field.stops, at)
 	left, right := field.grow(s, caret, room)
 	prefix := ""

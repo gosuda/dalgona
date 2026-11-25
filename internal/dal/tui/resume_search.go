@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const resumeSearchDelay = 300 * time.Millisecond
@@ -62,7 +62,7 @@ func (m *model) resumeQuery() string {
 		return ""
 	}
 	query := m.input.field.value()
-	if !inputtext.Searchable(query) {
+	if !textinput.SearchEligible(query) {
 		return ""
 	}
 	return query

@@ -1,15 +1,24 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import corpus from "../../../docs/dal/spec/input-text-cases.json";
 import {
-	answerFault,
-	correctionOf,
-	MAX_ANSWER,
+	answerError,
+	correctedQuestion,
+	correctionText,
 	parseQuestionRequest,
-	parseQuestionWarning,
 	questionResponse,
 	resolutionNotice,
 } from "./question";
 import type { JsonValue, QuestionRequest } from "./types";
+
+const corpus = JSON.parse(
+	readFileSync(
+		fileURLToPath(
+			new URL("../../../docs/dal/spec/input-text-cases.json", import.meta.url),
+		),
+		"utf8",
+	),
+) as { vectors: { id: string; text: string; policy: string }[] };
 
 const vendored: JsonValue = {
 	threadId: "thread-1",
@@ -109,207 +118,107 @@ describe("question request", () => {
 		).toBeNull();
 	});
 
-	test("treats null options as free text", () => {
+	test("orders labels then the typed text exactly as typed", () => {
 		const request = requestOf(vendored);
-		expect(request.questions[1]?.options).toEqual([]);
-	});
-
-	test("orders labels then the exact typed text", () => {
-		const request = requestOf(vendored);
-		const typed = `  ${"x".repeat(1996)}  `;
+		const typed = `  ${"x".repeat(2100)}  `;
 		expect(
 			questionResponse(request, [
 				{ picked: ["Postgres", "SQLite"], other: typed },
-				{ picked: [], other: "" },
+				{ picked: [], other: "\u3000 " },
 			]),
 		).toEqual({
 			answers: {
 				q1: { answers: ["SQLite", "Postgres", typed] },
-				q2: { answers: [] },
+				q2: { answers: ["\u3000 "] },
 			},
 		});
 	});
 
-	test("a whitespace-only answer stays as typed", () => {
+	test("sends an empty list for an unanswered question", () => {
 		const request = requestOf(vendored);
-		expect(
-			questionResponse(request, [
-				{ picked: [], other: " \u00a0\u3000 " },
-				{ picked: [], other: "\n" },
-			]),
-		).toEqual({
-			answers: {
-				q1: { answers: [" \u00a0\u3000 "] },
-				q2: { answers: ["\n"] },
-			},
+		expect(questionResponse(request, [])).toEqual({
+			answers: { q1: { answers: [] }, q2: { answers: [] } },
 		});
 	});
 
-	test("every accepted corpus vector is a valid answer sent unchanged", () => {
-		const request = requestOf(vendored);
-		for (const vector of corpus.vectors.filter(
-			(entry) => entry.policy === "accept",
-		)) {
-			expect(answerFault(vector.text), vector.id).toBeNull();
-			expect(
-				questionResponse(request, [
-					{ picked: [], other: vector.text },
-					{ picked: [], other: "" },
-				]),
-				vector.id,
-			).toEqual({
-				answers: { q1: { answers: [vector.text] }, q2: { answers: [] } },
+	test.each(corpus.vectors.filter((v) => v.policy === "accept"))(
+		"$id reaches the response unchanged",
+		(v) => {
+			const request = requestOf(vendored);
+			const response = questionResponse(request, [
+				{ picked: [], other: "" },
+				{ picked: [], other: v.text },
+			]);
+			expect(response).toEqual({
+				answers: { q1: { answers: [] }, q2: { answers: [v.text] } },
 			});
-		}
-	});
-});
+			expect(answerError(v.text)).toBeNull();
+		},
+	);
 
-describe("answer quota", () => {
-	test("allows 2000 scalars and refuses 2001 whole", () => {
-		expect(MAX_ANSWER).toBe(2000);
-		expect(answerFault("x".repeat(2000))).toBeNull();
-		expect(answerFault("x".repeat(2001))).toBe("text_too_large");
-	});
-
-	test("counts each supplementary scalar once, not as two UTF-16 units", () => {
-		const emoji = "\u{1F600}".repeat(2000);
-		expect(emoji.length).toBe(4000);
-		expect(answerFault(emoji)).toBeNull();
-		expect(answerFault(`${emoji}x`)).toBe("text_too_large");
-	});
-
-	test("refuses one cluster of 2001 scalars without splitting it", () => {
-		expect(answerFault(`e${"\u0301".repeat(2000)}`)).toBe("text_too_large");
-		expect(answerFault(`e${"\u0301".repeat(100000)}`)).toBe("text_too_large");
-	});
-
-	test("refuses NUL and lone surrogates", () => {
-		expect(answerFault("a\0b")).toBe("disallowed_control");
-		expect(answerFault("a\ud800")).toBe("invalid_encoding");
-		expect(answerFault("\udc00")).toBe("invalid_encoding");
-	});
-});
-
-describe("required question fields", () => {
-	function withQuestion(question: Record<string, JsonValue>): JsonValue {
-		return {
-			threadId: "thread-1",
-			turnId: "turn-1",
-			itemId: "call-q",
-			questions: [
-				{
-					id: "q1",
-					header: "Database",
-					question: "Which database?",
-					isOther: true,
-					options: [{ label: "SQLite", description: "One file." }],
-					...question,
-				},
-			],
-		};
-	}
-
-	test("rejects blank or formatting-only required fields", () => {
-		const blanks = [
-			{ header: " \u3000" },
-			{ question: "\u200d\ufe0f" },
-			{ header: "\x1b[2J\x1b]0;title\x07" },
-			{ question: "\u202e\u2066" },
-			{ options: [{ label: "\u00ad", description: "One file." }] },
-			{ options: [{ label: "SQLite", description: "\t\n" }] },
-		];
-		for (const fields of blanks) {
-			expect(
-				parseQuestionRequest("req-1", withQuestion(fields)),
-				JSON.stringify(fields),
-			).toBeNull();
-		}
-	});
-
-	test("rejects NUL and lone surrogates in model text", () => {
-		const invalid = [
-			{ header: "Data\0base" },
-			{ question: "Which\ud800?" },
-			{
-				options: [
-					{ label: "SQLite", description: "One file.", preview: "\udc00" },
-				],
-			},
-		];
-		for (const fields of invalid) {
-			expect(
-				parseQuestionRequest("req-1", withQuestion(fields)),
-				JSON.stringify(fields),
-			).toBeNull();
-		}
-	});
-
-	test("keeps accepted required text exactly, padding included", () => {
-		const request = parseQuestionRequest(
-			"req-1",
-			withQuestion({
-				header: "  Database\u200d ",
-				question: "\u3000Which database?\n",
-				options: [{ label: " SQLite\r\n", description: "\x1b[1mOne file." }],
-			}),
-		);
-		const question = request?.questions[0];
-		expect(question?.header).toBe("  Database\u200d ");
-		expect(question?.question).toBe("\u3000Which database?\n");
-		expect(question?.options[0]?.label).toBe(" SQLite\r\n");
-		expect(question?.options[0]?.description).toBe("\x1b[1mOne file.");
-	});
-});
-
-describe("resolution notices", () => {
 	test("maps each resolution to its notice", () => {
-		expect(resolutionNotice("answered")).toBe(
+		expect(resolutionNotice("answered", false)).toBe(
 			"Question answered in another window",
 		);
-		expect(resolutionNotice("cancelled")).toBe(
+		expect(resolutionNotice("cancelled", false)).toBe(
 			"Question dismissed in another window",
 		);
-		expect(resolutionNotice("interrupted")).toBe(
+		expect(resolutionNotice("interrupted", false)).toBe(
 			"Question closed: the turn was interrupted",
 		);
-		expect(resolutionNotice("declined")).toBe(
+		expect(resolutionNotice("declined", false)).toBe(
 			"Question closed: the agent continues without an answer",
 		);
-		expect(resolutionNotice("timedOut")).toBe("Question timed out");
-		expect(resolutionNotice(null)).toBeNull();
+		expect(resolutionNotice("timedOut", false)).toBe("Question timed out");
+		expect(resolutionNotice(null, false)).toBeNull();
+	});
+
+	test("does not name a window after this window submitted", () => {
+		expect(resolutionNotice("answered", true)).toBe("Question answered");
+		expect(resolutionNotice("timedOut", true)).toBe("Question timed out");
 	});
 });
 
-describe("question corrections", () => {
-	const warning = {
-		threadId: "thread-1",
-		message: "invalid text: answers.q.1.answers[2]: text_too_large",
-		requestId: "req-1",
-		reason: "text_too_large",
-		field: "answers.q.1.answers[2]",
-	};
-
-	test("parses a warning that names a question request", () => {
-		expect(parseQuestionWarning(warning)).toEqual(warning);
-		expect(
-			parseQuestionWarning({ threadId: null, message: "disk" }),
-		).toBeNull();
-		expect(
-			parseQuestionWarning({ ...warning, requestId: undefined }),
-		).toBeNull();
-		expect(parseQuestionWarning({ ...warning, field: 3 })).toBeNull();
+describe("answer text", () => {
+	test("counts the quota in Unicode scalars", () => {
+		expect(answerError("a".repeat(2000))).toBeNull();
+		expect(answerError("\u{1F600}".repeat(2000))).toBeNull();
+		expect(answerError("a".repeat(2001))).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
+		);
+		expect(answerError(`e${"\u0301".repeat(2000)}`)).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
+		);
 	});
 
-	test("reads the question and answer index from the field path", () => {
-		expect(correctionOf(warning)).toEqual({
-			questionId: "q.1",
-			answerIndex: 2,
-			reason: "text_too_large",
-		});
-		expect(correctionOf({ ...warning, field: "answers.q1" })).toEqual({
-			questionId: null,
-			answerIndex: null,
-			reason: "text_too_large",
-		});
+	test("refuses NUL and a lone surrogate", () => {
+		expect(answerError("keep\u0000this")).toBe(
+			"Remove the NUL character from this answer.",
+		);
+		expect(answerError("bad\ud800")).toBe(
+			"Retype this answer: it holds an incomplete character.",
+		);
+	});
+
+	test("keeps whitespace-only text as an answer", () => {
+		expect(answerError(" \u3000\t")).toBeNull();
+	});
+
+	test("reads the question from a correction field", () => {
+		expect(correctedQuestion("answers.q1.answers[0]")).toBe("q1");
+		expect(correctedQuestion("answers.a.answers[1].answers[12]")).toBe(
+			"a.answers[1]",
+		);
+		expect(correctedQuestion("answers.q1")).toBeNull();
+		expect(correctedQuestion("input")).toBeNull();
+	});
+
+	test("explains a correction by its reason", () => {
+		expect(correctionText("text_too_large", "invalid text")).toBe(
+			"Shorten this answer to 2000 characters or fewer.",
+		);
+		expect(correctionText("something_new", "invalid text: q1")).toBe(
+			"invalid text: q1",
+		);
 	});
 });

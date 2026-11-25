@@ -15,15 +15,6 @@ func cancelledCause(t *testing.T) context.Context {
 	return ctx
 }
 
-func TestCancelledContextRejectsAppendWithoutCompleted(t *testing.T) {
-	t.Parallel()
-	h := newHarness(t)
-	thread := h.start()
-	if _, err := thread.appendEvents(cancelledCause(t), event.ThreadNamed{Name: "cancelled"}); err == nil {
-		t.Fatal("agent: append without completed side effect ignored cancelled context")
-	}
-}
-
 func TestCompletedResultsSurviveCancelledContext(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

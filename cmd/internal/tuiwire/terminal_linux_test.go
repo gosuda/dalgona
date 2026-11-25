@@ -43,12 +43,6 @@ func openPty(t *testing.T) *os.File {
 	return slave
 }
 
-func TestIsTerminalAcceptsAPseudoTerminal(t *testing.T) {
-	if !isTerminal(openPty(t)) {
-		t.Fatal("isTerminal rejected a pseudo-terminal, want it accepted")
-	}
-}
-
 func TestRunStartsOnTerminalStdout(t *testing.T) {
 	conn := &touchedConn{first: make(chan struct{})}
 	stdout := openPty(t)

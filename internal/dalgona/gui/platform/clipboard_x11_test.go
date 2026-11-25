@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -393,9 +393,9 @@ func TestX11ClipboardRejectsUndecodableOffers(t *testing.T) {
 		offer x11Offer
 		want  error
 	}{
-		{x11Offer{"UTF8_STRING", []byte("ok\xff\xfe")}, inputtext.InvalidEncoding},
-		{x11Offer{"text/plain;charset=utf-8", []byte("\xed\xa0\x80")}, inputtext.InvalidEncoding},
-		{x11Offer{"UTF8_STRING", []byte("a\x00b")}, inputtext.DisallowedControl},
+		{x11Offer{"UTF8_STRING", []byte("ok\xff\xfe")}, textinput.InvalidEncoding},
+		{x11Offer{"text/plain;charset=utf-8", []byte("\xed\xa0\x80")}, textinput.InvalidEncoding},
+		{x11Offer{"UTF8_STRING", []byte("a\x00b")}, textinput.DisallowedControl},
 		{x11Offer{"x-special/gnome-copied-files", []byte("move\nfile:///tmp/a")}, ErrUnsupportedPaste},
 		{x11Offer{"text/uri-list", []byte("file:///tmp/a\r\nhttps://example.org/b\r\n")}, ErrNotLocalFile},
 	}

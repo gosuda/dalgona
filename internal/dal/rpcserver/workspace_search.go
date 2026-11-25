@@ -14,9 +14,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dal/runner"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dal/tool/search"
 )
 
@@ -28,7 +28,7 @@ const (
 	workspaceSearchKeep   = 500
 )
 
-var workspaceQueryPolicy = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: workspaceQueryBytes}}
+var workspaceQueryPolicy = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: workspaceQueryBytes}}
 
 type workspaceSpan struct {
 	Start string `json:"start"`
@@ -69,7 +69,7 @@ func (s *server) workspaceSearch(ctx context.Context, params jsontext.Value) (js
 	if err != nil {
 		return nil, err
 	}
-	if checkErr := inputtext.CheckRequest([]inputtext.Item{{Field: "query", Policy: workspaceQueryPolicy, Text: p.Query}}); checkErr != nil {
+	if checkErr := textinput.CheckRequest([]textinput.Item{{Field: "query", Policy: workspaceQueryPolicy, Text: p.Query}}); checkErr != nil {
 		return nil, textError(checkErr)
 	}
 	if p.Query == "" {

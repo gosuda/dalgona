@@ -9,7 +9,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access/accesstest"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/document"
@@ -82,8 +82,8 @@ func TestAccessibilityAcceptedReplacementDoesNotClobberNewText(t *testing.T) {
 func checkQueuedReplacement(t *testing.T, role platform.Role) {
 	t.Helper()
 	ax := accesstest.New()
-	policy := inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Scalars, Max: 80}}
-	editor, err := platform.NewEditor(policy, inputtext.Draft{Text: "first"})
+	policy := textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Scalars, Max: 80}}
+	editor, err := platform.NewEditor(policy, textinput.Draft{Text: "first"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func checkQueuedReplacement(t *testing.T, role platform.Role) {
 	}
 	draw(t, ax, register, nil)
 	old := ax.Find(t, "Edit", role)
-	if err = editor.SetDraft(inputtext.Draft{Text: "new typing"}); err != nil {
+	if err = editor.SetDraft(textinput.Draft{Text: "new typing"}); err != nil {
 		t.Fatal(err)
 	}
 	draw(t, ax, register, func() {

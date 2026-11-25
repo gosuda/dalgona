@@ -5,20 +5,20 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const geometryText = "Hi 😀 yo\nok"
 
 func geometryNode() SemanticNode {
 	return SemanticNode{ID: "reply", Role: RoleDocument, Name: "Reply", Value: geometryText, Bounds: image.Rect(0, 90, 200, 150), Lines: []TextLine{
-		{Range: inputtext.Range{Start: 0, End: 11}, Bounds: image.Rect(10, 100, 110, 120), Clusters: []ClusterSpan{{10, 20}, {20, 30}, {30, 40}, {40, 60}, {60, 70}, {70, 80}, {80, 90}, {90, 90}}},
-		{Range: inputtext.Range{Start: 11, End: 13}, Bounds: image.Rect(10, 120, 110, 140), Clusters: []ClusterSpan{{10, 20}, {20, 30}}},
+		{Range: textinput.Range{Start: 0, End: 11}, Bounds: image.Rect(10, 100, 110, 120), Clusters: []ClusterSpan{{10, 20}, {20, 30}, {30, 40}, {40, 60}, {60, 70}, {70, 80}, {80, 90}, {90, 90}}},
+		{Range: textinput.Range{Start: 11, End: 13}, Bounds: image.Rect(10, 120, 110, 140), Clusters: []ClusterSpan{{10, 20}, {20, 30}}},
 	}}
 }
 
 func asciiLine(start, end, y int) TextLine {
-	line := TextLine{Range: inputtext.Range{Start: start, End: end}, Bounds: image.Rect(0, y, 10*(end-start), y+10)}
+	line := TextLine{Range: textinput.Range{Start: start, End: end}, Bounds: image.Rect(0, y, 10*(end-start), y+10)}
 	for k := range end - start {
 		line.Clusters = append(line.Clusters, ClusterSpan{Left: 10 * k, Right: 10*k + 10})
 	}
@@ -41,7 +41,7 @@ func TestCheckSemanticsValidatesTextLines(t *testing.T) {
 		"span ends before it starts": func(n *SemanticNode) { n.Lines[0].Clusters[1] = ClusterSpan{30, 20} },
 		"lines out of order":         func(n *SemanticNode) { n.Lines[0], n.Lines[1] = n.Lines[1], n.Lines[0] },
 		"lines overlap": func(n *SemanticNode) {
-			n.Lines[1] = TextLine{Range: inputtext.Range{Start: 10, End: 13}, Bounds: n.Lines[1].Bounds, Clusters: []ClusterSpan{{10, 10}, {10, 20}, {20, 30}}}
+			n.Lines[1] = TextLine{Range: textinput.Range{Start: 10, End: 13}, Bounds: n.Lines[1].Bounds, Clusters: []ClusterSpan{{10, 10}, {10, 20}, {20, 30}}}
 		},
 		"secure field line covers text": func(n *SemanticNode) {
 			*n = SemanticNode{ID: "token", Role: RoleSecureField, Name: "Token", Action: "Edit", Lines: []TextLine{asciiLine(0, 1, 0)}}
@@ -70,13 +70,13 @@ func TestSemanticNodeMeasuresCharactersAndRanges(t *testing.T) {
 			t.Errorf("character box at %d = %v %t, want %v", offset, got, ok, want)
 		}
 	}
-	if got := n.rangeBoxes(inputtext.Range{Start: 1, End: 12}); !slices.Equal(got, []image.Rectangle{image.Rect(20, 100, 90, 120), image.Rect(10, 120, 20, 140)}) {
+	if got := n.rangeBoxes(textinput.Range{Start: 1, End: 12}); !slices.Equal(got, []image.Rectangle{image.Rect(20, 100, 90, 120), image.Rect(10, 120, 20, 140)}) {
 		t.Errorf("range boxes %v, want one box for each line part", got)
 	}
-	if got, ok := n.rangeBox(inputtext.Range{Start: 1, End: 12}); !ok || got != image.Rect(10, 100, 90, 140) {
+	if got, ok := n.rangeBox(textinput.Range{Start: 1, End: 12}); !ok || got != image.Rect(10, 100, 90, 140) {
 		t.Errorf("range box %v %t", got, ok)
 	}
-	if got := n.rangeBoxes(inputtext.Range{Start: 3, End: 3}); len(got) != 0 {
+	if got := n.rangeBoxes(textinput.Range{Start: 3, End: 3}); len(got) != 0 {
 		t.Errorf("an empty range has boxes %v", got)
 	}
 }
@@ -87,14 +87,14 @@ func TestTextRangeGeometryFallsBackToNodeBounds(t *testing.T) {
 	if _, ok := n.characterBox(3); ok {
 		t.Error("a node without line geometry reported a character box")
 	}
-	if got, ok := n.rangeBox(inputtext.Range{Start: 0, End: 13}); !ok || got != n.Bounds {
+	if got, ok := n.rangeBox(textinput.Range{Start: 0, End: 13}); !ok || got != n.Bounds {
 		t.Errorf("a range without line geometry has box %v %t, want the node box", got, ok)
 	}
-	if got := n.rangeBoxes(inputtext.Range{Start: 3, End: 3}); len(got) != 0 {
+	if got := n.rangeBoxes(textinput.Range{Start: 3, End: 3}); len(got) != 0 {
 		t.Errorf("an empty range without line geometry has boxes %v", got)
 	}
 	n.Bounds = image.Rectangle{}
-	if got := n.rangeBoxes(inputtext.Range{Start: 0, End: 13}); len(got) != 0 {
+	if got := n.rangeBoxes(textinput.Range{Start: 0, End: 13}); len(got) != 0 {
 		t.Errorf("an off-screen node without line geometry has boxes %v", got)
 	}
 }
@@ -126,7 +126,7 @@ func TestSemanticNodeFindsTheCharacterNearAPoint(t *testing.T) {
 
 func TestTextLinesPartitionTheTextAroundGeometry(t *testing.T) {
 	type part struct {
-		r       inputtext.Range
+		r       textinput.Range
 		laidOut bool
 	}
 	cases := []struct {
@@ -135,13 +135,13 @@ func TestTextLinesPartitionTheTextAroundGeometry(t *testing.T) {
 		lines []TextLine
 		want  []part
 	}{
-		{"middle line laid out", "ab\ncd\nef", []TextLine{asciiLine(3, 6, 10)}, []part{{inputtext.Range{Start: 0, End: 3}, false}, {inputtext.Range{Start: 3, End: 6}, true}, {inputtext.Range{Start: 6, End: 8}, false}}},
-		{"geometry inside one hard line", "abcdefgh", []TextLine{asciiLine(2, 4, 0)}, []part{{inputtext.Range{Start: 0, End: 2}, false}, {inputtext.Range{Start: 2, End: 4}, true}, {inputtext.Range{Start: 4, End: 8}, false}}},
-		{"soft wrap", "abcdef", []TextLine{asciiLine(0, 3, 0), asciiLine(3, 6, 10)}, []part{{inputtext.Range{Start: 0, End: 3}, true}, {inputtext.Range{Start: 3, End: 6}, true}}},
-		{"trailing break", "ab\n", nil, []part{{inputtext.Range{Start: 0, End: 3}, false}, {inputtext.Range{Start: 3, End: 3}, false}}},
-		{"trailing break laid out", "ab\n", []TextLine{asciiLine(0, 3, 0)}, []part{{inputtext.Range{Start: 0, End: 3}, true}, {inputtext.Range{Start: 3, End: 3}, false}}},
-		{"carriage return and line feed", "a\r\nb", nil, []part{{inputtext.Range{Start: 0, End: 3}, false}, {inputtext.Range{Start: 3, End: 4}, false}}},
-		{"empty text", "", nil, []part{{inputtext.Range{}, false}}},
+		{"middle line laid out", "ab\ncd\nef", []TextLine{asciiLine(3, 6, 10)}, []part{{textinput.Range{Start: 0, End: 3}, false}, {textinput.Range{Start: 3, End: 6}, true}, {textinput.Range{Start: 6, End: 8}, false}}},
+		{"geometry inside one hard line", "abcdefgh", []TextLine{asciiLine(2, 4, 0)}, []part{{textinput.Range{Start: 0, End: 2}, false}, {textinput.Range{Start: 2, End: 4}, true}, {textinput.Range{Start: 4, End: 8}, false}}},
+		{"soft wrap", "abcdef", []TextLine{asciiLine(0, 3, 0), asciiLine(3, 6, 10)}, []part{{textinput.Range{Start: 0, End: 3}, true}, {textinput.Range{Start: 3, End: 6}, true}}},
+		{"trailing break", "ab\n", nil, []part{{textinput.Range{Start: 0, End: 3}, false}, {textinput.Range{Start: 3, End: 3}, false}}},
+		{"trailing break laid out", "ab\n", []TextLine{asciiLine(0, 3, 0)}, []part{{textinput.Range{Start: 0, End: 3}, true}, {textinput.Range{Start: 3, End: 3}, false}}},
+		{"carriage return and line feed", "a\r\nb", nil, []part{{textinput.Range{Start: 0, End: 3}, false}, {textinput.Range{Start: 3, End: 4}, false}}},
+		{"empty text", "", nil, []part{{textinput.Range{}, false}}},
 	}
 	for _, c := range cases {
 		n := SemanticNode{ID: "t", Role: RoleDocument, Value: c.value, Lines: c.lines}
@@ -170,7 +170,7 @@ func TestWordAndSentenceSegmentsFollowUnicodeBoundaries(t *testing.T) {
 	if _, err := wordSegment(text, 15, letterWord); err == nil {
 		t.Error("an offset inside a scalar was accepted")
 	}
-	if r, err := wordSegment("", 0, letterWord); err != nil || r != (inputtext.Range{}) {
+	if r, err := wordSegment("", 0, letterWord); err != nil || r != (textinput.Range{}) {
 		t.Errorf("word in empty text = %v, %v", r, err)
 	}
 }

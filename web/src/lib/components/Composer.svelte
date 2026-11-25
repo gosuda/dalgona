@@ -24,13 +24,7 @@ import CompletionList from "#lib/components/CompletionList.svelte";
 import FollowupQueue from "#lib/components/FollowupQueue.svelte";
 import { handoffFocus } from "#lib/focus.ts";
 import { isImeKey } from "#lib/ime.ts";
-import {
-	faultNotices,
-	isWhitespaceOnly,
-	multilineText,
-	selectDeletedCluster,
-	textFault,
-} from "#lib/inputtext.ts";
+import { checkText, isBlank, newlinesToLF } from "#lib/text/validate.ts";
 import type { FileMatch, KeywordMatch } from "#lib/types.ts";
 
 const INTERRUPT_GUARD_MS = 2000;
@@ -138,13 +132,6 @@ const mention = $derived(
 		: mentionAt(text, Math.min(caret, text.length)),
 );
 const mentionQuery = $derived(mention?.query ?? null);
-const searchableQuery = $derived(
-	mentionQuery !== null &&
-		mentionQuery !== "" &&
-		textFault(mentionQuery) === null
-		? mentionQuery
-		: null,
-);
 const searchRoot = $derived(
 	disabled || !fileSearchRoot ? null : fileSearchRoot,
 );
@@ -166,7 +153,8 @@ const filePending = $derived(
 	!paletteOpen &&
 		!mentionClosed &&
 		searchRoot !== null &&
-		searchableQuery !== null &&
+		mentionQuery !== null &&
+		mentionQuery !== "" &&
 		onFileSearch !== undefined &&
 		currentFileResult === null,
 );
@@ -233,7 +221,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 $effect(() => {
 	const draft = text;
 	const seq = ++matchSeq;
-	if (!onMatch || isWhitespaceOnly(draft) || textFault(draft) !== null) {
+	if (!onMatch || isBlank(draft)) {
 		matches = [];
 		return;
 	}
@@ -255,7 +243,7 @@ $effect(() => {
 
 $effect(() => {
 	const root = searchRoot;
-	const query = searchableQuery;
+	const query = mentionQuery;
 	const seq = ++fileSeq;
 	fileResult = null;
 	fileActive = 0;
@@ -314,23 +302,30 @@ function messageText(): string | null {
 	return parsed.kind === "message" ? parsed.text : null;
 }
 
-function textRefusal(value: string, blankNotice: string): string | null {
-	const fault = textFault(value);
-	if (fault !== null) return faultNotices[fault];
-	return isWhitespaceOnly(value) ? blankNotice : null;
-}
-
 function validText(): string | null {
 	const value = messageText();
 	if (value === null) return null;
-	const refusal = textRefusal(value, "Enter a message before sending.");
-	if (refusal === null) {
-		error = "";
-		return value;
+	if (isBlank(value)) {
+		error = "Enter a message before sending.";
+		textarea?.focus();
+		return null;
 	}
-	error = refusal;
+	if (refused([value])) return null;
+	error = "";
+	return value;
+}
+
+function refused(parts: readonly string[]): boolean {
+	const reason = parts
+		.map((part) => checkText(part))
+		.find((found) => found !== undefined);
+	if (reason === undefined) return false;
+	error =
+		reason === "disallowed_control"
+			? "The message holds a NUL character. Remove it before sending."
+			: "The message holds an incomplete character. Retype it before sending.";
 	textarea?.focus();
-	return null;
+	return true;
 }
 
 function clearDraft(): void {
@@ -396,13 +391,7 @@ function onPaste(event: ClipboardEvent): void {
 		for (const file of images) void attachImage(file);
 		return;
 	}
-	const pasted = multilineText(data.getData("text/plain"));
-	const fault = textFault(pasted);
-	if (fault !== null) {
-		event.preventDefault();
-		error = faultNotices[fault];
-		return;
-	}
+	const pasted = newlinesToLF(data.getData("text/plain"));
 	const body = pasted.endsWith("\n") ? pasted.slice(0, -1) : pasted;
 	const lines = body.split("\n").length;
 	if (lines < PASTE_CHIP_LINES) return;
@@ -410,58 +399,33 @@ function onPaste(event: ClipboardEvent): void {
 	chips = [...chips, { kind: "paste", id: ++nextChipId, text: pasted, lines }];
 }
 
-function hasAttachments(attachments: Attachments): boolean {
-	return attachments.texts.length > 0 || attachments.images.length > 0;
-}
-
-function sendableBody(typed: string, attachments: Attachments): string | null {
-	if (hasAttachments(attachments) && typed === "") {
-		error = "";
-		return "";
-	}
-	if (hasAttachments(attachments) && isWhitespaceOnly(typed)) {
-		const fault = textFault(typed);
-		if (fault !== null) {
-			error = faultNotices[fault];
-			textarea?.focus();
-			return null;
-		}
-		error = "";
-		return typed;
-	}
-	return validText();
-}
-
 function sendDraft(): void {
 	const typed = messageText();
 	if (typed === null) return;
 	const attachments = attachmentsOf(chips);
-	const body = sendableBody(typed, attachments);
-	if (body === null) return;
-	const assembled = [body, ...attachments.texts]
-		.filter((part) => part !== "")
-		.join("\n\n");
-	const fault = textFault(assembled);
-	if (fault !== null) {
-		error = faultNotices[fault];
-		textarea?.focus();
+	if (
+		isBlank(typed) &&
+		attachments.texts.length === 0 &&
+		attachments.images.length === 0
+	) {
+		validText();
 		return;
 	}
-	if (messageBytes(body, attachments) > MAX_MESSAGE_BYTES) {
+	if (refused([typed, ...attachments.texts])) return;
+	if (messageBytes(typed, attachments) > MAX_MESSAGE_BYTES) {
 		error =
 			"The message and images are too large to send together. Remove an image.";
 		return;
 	}
 	error = "";
-	onSend(body, attachments);
+	onSend(typed, attachments);
 	clearDraft();
 	chips = [];
 }
 
 function runShell(command: string): void {
-	const refusal = textRefusal(command, "Enter a command after !.");
-	if (refusal !== null) {
-		error = refusal;
+	if (isBlank(command)) {
+		error = "Enter a command after !.";
 		return;
 	}
 	error = "";
@@ -563,7 +527,6 @@ function onKeydown(event: KeyboardEvent): void {
 		event.preventDefault();
 		return;
 	}
-	if (textarea !== undefined) selectDeletedCluster(event, textarea);
 	if (event.key !== "Enter") return;
 	if (event.altKey && running) {
 		event.preventDefault();
@@ -603,9 +566,6 @@ function onKeydown(event: KeyboardEvent): void {
 			onkeydown={onKeydown}
 			onpaste={onPaste}
 			oninput={(event) => {
-				if (!(event instanceof InputEvent && event.isComposing)) {
-					text = multilineText(text);
-				}
 				syncCaret(event.currentTarget);
 				browsing = null;
 				paletteClosed = false;

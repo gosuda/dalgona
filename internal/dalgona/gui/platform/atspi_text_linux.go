@@ -8,7 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -41,15 +41,15 @@ func atspiTextOf(n SemanticNode) string {
 	return n.Value
 }
 
-func atspiSelectionOf(n SemanticNode) inputtext.Range {
+func atspiSelectionOf(n SemanticNode) textinput.Range {
 	if n.Role == RoleSecureField {
-		return inputtext.Range{}
+		return textinput.Range{}
 	}
 	return n.Selection
 }
 
 func atspiCharacters(text string, offset int) (int32, error) {
-	characters, err := inputtext.Convert(text, offset, inputtext.Bytes, inputtext.Scalars)
+	characters, err := textinput.Convert(text, offset, textinput.Bytes, textinput.Scalars)
 	if err != nil {
 		return 0, dbus.Error{Name: "org.freedesktop.DBus.Error.Failed", Body: []any{"the published selection does not fall on a character boundary; publish a semantic tree with valid selection offsets"}}
 	}
@@ -57,28 +57,28 @@ func atspiCharacters(text string, offset int) (int32, error) {
 }
 
 func atspiByteOffset(text string, characters int) (int, error) {
-	offset, err := inputtext.Convert(text, characters, inputtext.Scalars, inputtext.Bytes)
+	offset, err := textinput.Convert(text, characters, textinput.Scalars, textinput.Bytes)
 	if err != nil {
-		return 0, atspiInvalid("character offset %d is outside the text of %d characters; ask CharacterCount first", characters, inputtext.Count(text, inputtext.Scalars))
+		return 0, atspiInvalid("character offset %d is outside the text of %d characters; ask CharacterCount first", characters, textinput.Count(text, textinput.Scalars))
 	}
 	return offset, nil
 }
 
-func atspiTextRange(text string, start, end int32) (inputtext.Range, error) {
+func atspiTextRange(text string, start, end int32) (textinput.Range, error) {
 	if start > end {
-		return inputtext.Range{}, atspiInvalid("the range %d to %d ends before it starts; pass the smaller offset first", start, end)
+		return textinput.Range{}, atspiInvalid("the range %d to %d ends before it starts; pass the smaller offset first", start, end)
 	}
 	first, err := atspiByteOffset(text, int(start))
 	if err != nil {
-		return inputtext.Range{}, err
+		return textinput.Range{}, err
 	}
 	last, err := atspiByteOffset(text, int(end))
 	if err != nil {
-		return inputtext.Range{}, err
+		return textinput.Range{}, err
 	}
-	r := inputtext.Range{Start: first, End: last}
-	if inputtext.CheckRange(text, r) != nil {
-		return inputtext.Range{}, atspiInvalid("the range %d to %d splits a grapheme cluster; move both ends to whole displayed characters", start, end)
+	r := textinput.Range{Start: first, End: last}
+	if textinput.CheckRange(text, r) != nil {
+		return textinput.Range{}, atspiInvalid("the range %d to %d splits a grapheme cluster; move both ends to whole displayed characters", start, end)
 	}
 	return r, nil
 }
@@ -90,10 +90,10 @@ var atspiTextProperties = map[string]atspiProperty{
 			return nil, err
 		}
 		if o.node.TextContainer {
-			length, err := o.textView().length(inputtext.Scalars)
+			length, err := o.textView().length(textinput.Scalars)
 			return clampInt32(length), atspiTextError(err)
 		}
-		return clampInt32(inputtext.Count(atspiTextOf(o.node), inputtext.Scalars)), nil
+		return clampInt32(textinput.Count(atspiTextOf(o.node), textinput.Scalars)), nil
 	},
 	"CaretOffset": func(o *atspiObject) (any, error) {
 		if err := o.requireText(); err != nil {
@@ -135,7 +135,7 @@ func atspiTextError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, inputtext.InvalidOffset) {
+	if errors.Is(err, textinput.InvalidOffset) {
 		return atspiInvalid("the offset leaves the text or splits a character")
 	}
 	return dbus.Error{Name: "org.freedesktop.DBus.Error.Failed", Body: []any{err.Error()}}
@@ -147,12 +147,12 @@ func atspiGetText(o *atspiObject, args []any) ([]any, error) {
 		if end >= 0 {
 			start = min(start, end)
 		}
-		text, err := o.textView().readUnits(start, end, inputtext.Scalars)
+		text, err := o.textView().readUnits(start, end, textinput.Scalars)
 		return []any{text}, atspiTextError(err)
 	}
 	text := atspiTextOf(o.node)
 	end := int(args[1].(int32))
-	if count := inputtext.Count(text, inputtext.Scalars); end < 0 || end > count {
+	if count := textinput.Count(text, textinput.Scalars); end < 0 || end > count {
 		end = count
 	}
 	first, err := atspiByteOffset(text, min(max(int(args[0].(int32)), 0), end))
@@ -171,7 +171,7 @@ func atspiStringAtOffset(o *atspiObject, args []any) ([]any, error) {
 		return atspiGroupSegment(o, args)
 	}
 	text := atspiTextOf(o.node)
-	at, err := atspiByteOffset(text, min(max(int(args[0].(int32)), 0), inputtext.Count(text, inputtext.Scalars)))
+	at, err := atspiByteOffset(text, min(max(int(args[0].(int32)), 0), textinput.Count(text, textinput.Scalars)))
 	if err != nil {
 		return nil, err
 	}
@@ -193,7 +193,7 @@ func atspiStringAtOffset(o *atspiObject, args []any) ([]any, error) {
 
 func atspiSegment(n SemanticNode, at int, granularity uint32) (int, int, error) {
 	text := atspiTextOf(n)
-	var segment inputtext.Range
+	var segment textinput.Range
 	var err error
 	switch granularity {
 	case atspiGranularityChar:
@@ -221,7 +221,7 @@ func atspiCluster(text string, at int) (int, int, error) {
 		return at, at, nil
 	}
 	_, size := utf8.DecodeRuneInString(text[at:])
-	cluster, err := inputtext.PaintRange(text, inputtext.Range{Start: at, End: at + size})
+	cluster, err := textinput.PaintRange(text, textinput.Range{Start: at, End: at + size})
 	if err != nil {
 		return 0, 0, atspiInvalid("offset %d does not start a character; ask CharacterCount first", at)
 	}
@@ -259,7 +259,7 @@ func atspiCharacterAtOffset(o *atspiObject, args []any) ([]any, error) {
 	text, offset := atspiTextOf(o.node), int(args[0].(int32))
 	at, err := atspiByteOffset(text, offset)
 	if err != nil || at == len(text) {
-		return nil, atspiInvalid("character offset %d is outside the text of %d characters; ask CharacterCount first", offset, inputtext.Count(text, inputtext.Scalars))
+		return nil, atspiInvalid("character offset %d is outside the text of %d characters; ask CharacterCount first", offset, textinput.Count(text, textinput.Scalars))
 	}
 	r, _ := utf8.DecodeRuneInString(text[at:])
 	return []any{r}, nil
@@ -290,7 +290,7 @@ func atspiRangeExtents(o *atspiObject, args []any) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	box, ok := o.node.rangeBox(inputtext.Range{Start: start, End: end})
+	box, ok := o.node.rangeBox(textinput.Range{Start: start, End: end})
 	return o.textBox(box, ok, args[2].(uint32))
 }
 
@@ -331,7 +331,7 @@ func (o *atspiObject) groupSelection() (int32, int32, error) {
 	if r.Start.Node == "" {
 		return 0, 0, nil
 	}
-	start, end, err := v.unitOffsets(r, inputtext.Scalars)
+	start, end, err := v.unitOffsets(r, textinput.Scalars)
 	return clampInt32(start), clampInt32(end), atspiTextError(err)
 }
 
@@ -398,7 +398,7 @@ func atspiRemoveSelection(o *atspiObject, args []any) ([]any, error) {
 
 func (o *atspiObject) selectText(start, end int32) ([]any, error) {
 	if o.node.TextContainer {
-		err := o.textView().selectUnits(int(start), int(end), inputtext.Scalars)
+		err := o.textView().selectUnits(int(start), int(end), textinput.Scalars)
 		return []any{err == nil}, atspiTextError(err)
 	}
 	if o.node.Role == RoleSecureField {
@@ -457,5 +457,5 @@ func (o *atspiObject) edit(value string, caret int) ([]any, error) {
 	if !utf8.ValidString(value) {
 		return nil, atspiInvalid("the edited text is not valid UTF-8; send UTF-8 text")
 	}
-	return o.request(ActionSetValue, value, inputtext.Range{Start: caret, End: caret})
+	return o.request(ActionSetValue, value, textinput.Range{Start: caret, End: caret})
 }

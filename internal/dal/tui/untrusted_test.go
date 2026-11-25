@@ -115,25 +115,29 @@ func TestPastedControlsShowAsVisibleEscapesAndStayInTheDraft(t *testing.T) {
 		name  string
 		open  func(t *testing.T) model
 		value func(m model) string
+		exact string
 	}{
-		{"composer", paletteModel, func(m model) string { return m.input.composer.Value() }},
-		{"filter", func(t *testing.T) model { return openModelPicker(t, new(fakeCaller)) }, func(m model) string { return m.input.field.value() }},
+		{"composer", paletteModel, func(m model) string { return m.input.composer.Value() }, "x<U+001B>]0;pwn<U+0007>y<U+202E>"},
+		{"filter", func(t *testing.T) model { return openModelPicker(t, new(fakeCaller)) }, func(m model) string { return m.input.field.value() }, ""},
 	}
 	for _, field := range fields {
 		t.Run(field.name, func(t *testing.T) {
 			t.Parallel()
-			checkPastedControlsVisible(t, field.open, field.value, hostile)
+			checkPastedControlsVisible(t, field.open, field.value, field.exact, hostile)
 		})
 	}
 }
 
-func checkPastedControlsVisible(t *testing.T, open func(t *testing.T) model, value func(m model) string, hostile string) {
+func checkPastedControlsVisible(t *testing.T, open func(t *testing.T) model, value func(m model) string, exact, hostile string) {
 	t.Helper()
 	m, _ := drive(t, open(t), tea.PasteMsg{Content: hostile})
 	if got := value(m); got != hostile {
 		t.Fatalf("draft holds %q, want the pasted text %q", got, hostile)
 	}
 	view := m.View().Content
+	if exact != "" && !strings.Contains(view, exact) {
+		t.Fatalf("view does not show the pasted controls as escapes:\n%q", view)
+	}
 	for _, raw := range []string{"\x1b]", "\x07", "\u202e"} {
 		if strings.Contains(view, raw) {
 			t.Errorf("view emits the raw control %q:\n%q", raw, view)
@@ -156,15 +160,18 @@ func TestUntrustedThreadNameIsSanitizedInState(t *testing.T) {
 	}
 }
 
-func TestUntrustedApprovalThreadIsSanitized(t *testing.T) {
+func TestUntrustedApprovalThreadShowsAsEscapes(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	m.thread.id = "t1"
 	answer := make(chan requestAnswer, 1)
 	params := []byte(`{"threadId":"t1\u001b]0;pwn\u0007y\u202e","turnId":"turn-1","itemId":"c1","command":"echo hi","reason":"why"}`)
 	m, _ = drive(t, m, serverRequestMsg{method: "item/commandExecution/requestApproval", params: params, answer: answer})
+	if got, want := m.approvals[0].threadID, "t1\x1b]0;pwn\ay\u202e"; got != want {
+		t.Fatalf("approval thread id = %q, want the decoded id %q", got, want)
+	}
 	view := m.View().Content
-	if !strings.Contains(view, "thread t1y\n") {
+	if !strings.Contains(view, "thread t1<U+001B>]0;pwn<U+0007>y<U+202E>\n") {
 		t.Fatalf("approval view lost the thread id text:\n%q", view)
 	}
 	if strings.Contains(view, "\x1b]0;") || strings.Contains(view, "\u202e") {

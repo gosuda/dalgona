@@ -12,7 +12,7 @@ import (
 	_ "image/png"
 	"strings"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
 )
 
@@ -26,7 +26,7 @@ const (
 	imagePixelLimit  = 32_000_000
 )
 
-var messagePolicy = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: inputBudgetBytes}}
+var messagePolicy = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: inputBudgetBytes}}
 
 type refusal string
 
@@ -71,7 +71,7 @@ type pastedText struct {
 }
 
 func normalizePaste(candidate string) (pastedText, error) {
-	adapted, err := inputtext.Draft{}.Replace(messagePolicy, candidate)
+	adapted, err := textinput.Draft{}.Replace(messagePolicy, candidate)
 	if err != nil {
 		return pastedText{}, err
 	}

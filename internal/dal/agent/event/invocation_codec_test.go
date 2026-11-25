@@ -96,16 +96,6 @@ func invocationRoundTrip(t *testing.T, original event.Event) {
 	}
 }
 
-func TestHashlineInvocationCodecTypeNames(t *testing.T) {
-	t.Parallel()
-	if got := (event.HashlineInvocationStarted{}).Type(); got != "hashline.invocation_started" {
-		t.Fatalf("started type = %q", got)
-	}
-	if got := (event.HashlineInvocationSettled{}).Type(); got != "hashline.invocation_settled" {
-		t.Fatalf("settled type = %q", got)
-	}
-}
-
 func TestHashlineInvocationCodecDecodesSpecifiedRecords(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

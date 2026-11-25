@@ -30,8 +30,8 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/document"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/giodraw"
@@ -182,10 +182,10 @@ func (r *reviewer) busy() bool {
 }
 
 func (t *Transcript) openReview(gtx layout.Context, target *row, opener event.Tag) {
-	find, err := platform.NewEditor(inputtext.Policy{
-		Lines: inputtext.SingleLine,
-		Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: document.PageBytes},
-	}, inputtext.Draft{})
+	find, err := platform.NewEditor(textinput.Policy{
+		Lines: textinput.SingleLine,
+		Limit: textinput.Limit{Unit: textinput.Bytes, Max: document.PageBytes},
+	}, textinput.Draft{})
 	if err != nil {
 		t.notice = "Full text could not open: " + err.Error()
 		return
@@ -1068,7 +1068,7 @@ func (p logicalPager) Page(ctx context.Context, ref document.Ref, offset, limit 
 		return "", document.ErrUnknown
 	}
 	if offset < 0 || offset > ref.Length || limit < 0 {
-		return "", inputtext.InvalidOffset
+		return "", textinput.InvalidOffset
 	}
 	return p.r.readLogical(ctx, lf, offset, min(limit, ref.Length-offset))
 }
@@ -1407,7 +1407,7 @@ type spillWindow struct {
 func (w spillWindow) clip(f *logicalField, shown string, span spillBounds) error {
 	from, to := span.from.Offset, span.to.Offset
 	if from < 0 || to < from || to > len(shown) {
-		return inputtext.InvalidOffset
+		return textinput.InvalidOffset
 	}
 	start, end := 0, f.bytes
 	if span.partialStart && from >= w.prefix {
@@ -1545,7 +1545,7 @@ func stageReviewCopy(ctx context.Context, l *logical, pager document.Pager, writ
 	c := &reviewCopy{file: file}
 	err = write(ctx, pager, c)
 	if err == nil && c.used != 0 {
-		err = inputtext.InvalidEncoding
+		err = textinput.InvalidEncoding
 	}
 	if err == nil {
 		err = ctx.Err()
@@ -1586,7 +1586,7 @@ func (c *reviewCopy) WriteString(text string) (int, error) {
 		return 0, platform.ErrTransferTooLarge
 	}
 	if strings.IndexByte(text, 0) >= 0 {
-		return 0, inputtext.DisallowedControl
+		return 0, textinput.DisallowedControl
 	}
 	if err := c.checkEncoding(text); err != nil {
 		return 0, err
@@ -1610,7 +1610,7 @@ func (c *reviewCopy) checkEncoding(text string) error {
 			return nil
 		}
 	}
-	return inputtext.InvalidEncoding
+	return textinput.InvalidEncoding
 }
 
 func (c *reviewCopy) consumeTail(text string) (string, error) {
@@ -1626,7 +1626,7 @@ func (c *reviewCopy) consumeTail(text string) (string, error) {
 		return "", nil
 	}
 	if _, width := utf8.DecodeRune(c.tail[:c.used]); width == 1 {
-		return "", inputtext.InvalidEncoding
+		return "", textinput.InvalidEncoding
 	}
 	c.used = 0
 	return text, nil

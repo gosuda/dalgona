@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 var markdownWords = []string{
@@ -264,7 +264,7 @@ func checkPositions(t *testing.T, d *Document) {
 		if len(b.Projection.Runs) == 0 {
 			continue
 		}
-		for _, boundary := range inputtext.Boundaries(b.Projection.Text) {
+		for _, boundary := range textinput.Boundaries(b.Projection.Text) {
 			if _, inside := b.Projection.insideAtomic(boundary); inside {
 				continue
 			}

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -113,6 +114,10 @@ func TestCtrlCSavesDraft(t *testing.T) {
 	}
 }
 
+func leaksChipAtom(text string) bool {
+	return strings.ContainsAny(text, chipPlaceholder+string(utf8.RuneError))
+}
+
 func chipDraftModel(t *testing.T, client caller, pasted string) model {
 	t.Helper()
 	m := newTestModel(client, Options{})
@@ -147,6 +152,9 @@ func TestCtrlCSavesChipDraftExpanded(t *testing.T) {
 	}
 	if got := len(m.input.composer.chips); got != 0 {
 		t.Fatalf("recalled prompt holds %d chips, want plain text", got)
+	}
+	if leaksChipAtom(m.input.composer.Value()) {
+		t.Fatalf("recalled draft holds a chip atom: %q", m.input.composer.Value())
 	}
 }
 
@@ -1038,6 +1046,9 @@ func TestHistoryRecallRestoresChips(t *testing.T) {
 	if got := m.input.composer.Expanded(); got != original {
 		t.Fatalf("down restored %q, want %q", got, original)
 	}
+	if leaksChipAtom(m.input.composer.Expanded()) {
+		t.Fatalf("restored draft holds a chip atom: %q", m.input.composer.Expanded())
+	}
 	if got := len(m.input.composer.chips); got != 2 {
 		t.Fatalf("restored draft holds %d chips, want 2", got)
 	}
@@ -1415,7 +1426,7 @@ func TestPromptHistoryLoadsFullPrompt(t *testing.T) {
 	}
 }
 
-func TestPromptHistoryRowCutsAtAClusterAndEscapesControls(t *testing.T) {
+func TestPromptHistoryRowCutsAtAClusterAndStripsControls(t *testing.T) {
 	t.Parallel()
 	head := strings.Repeat("a", 1023)
 	hostile := "x\u001b]0;pwn\u0007y\u202e"
@@ -1427,8 +1438,8 @@ func TestPromptHistoryRowCutsAtAClusterAndEscapesControls(t *testing.T) {
 	if len(labels) != 2 || labels[1] != head {
 		t.Fatalf("row of the long prompt = %q, want its 1023 bytes before the cluster that crosses byte 1024", labels)
 	}
-	if strings.ContainsAny(labels[0], "\u001b\u0007\u202e") || !strings.Contains(labels[0], "]0;pwn") {
-		t.Fatalf("row of the control prompt = %q, want visible escapes around its text", labels[0])
+	if strings.ContainsAny(labels[0], "\u001b\u0007\u202e") {
+		t.Fatalf("row of the control prompt = %q, want no raw controls", labels[0])
 	}
 	if got := historyTexts(m); got[1] != hostile {
 		t.Fatalf("history holds %q, want the prompt unchanged %q", got[1], hostile)

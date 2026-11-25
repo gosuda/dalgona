@@ -6,11 +6,11 @@ import (
 	"image"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (v textView) atspiPart(offset int) (SemanticNode, int, error) {
-	p, err := v.point(offset, inputtext.Scalars)
+	p, err := v.point(offset, textinput.Scalars)
 	if err != nil {
 		return SemanticNode{}, 0, err
 	}
@@ -28,7 +28,7 @@ func (v textView) atspiPart(offset int) (SemanticNode, int, error) {
 			return n, p.offset(n), err
 		}
 	}
-	return SemanticNode{}, 0, inputtext.InvalidOffset
+	return SemanticNode{}, 0, textinput.InvalidOffset
 }
 
 func atspiGroupSegment(o *atspiObject, args []any) ([]any, error) {
@@ -42,9 +42,9 @@ func atspiGroupSegment(o *atspiObject, args []any) ([]any, error) {
 		return nil, err
 	}
 	end = objectEnd(n.Value[:end], start)
-	base := offset - inputtext.Count(n.Value[:at], inputtext.Scalars)
-	first := clampInt32(base + inputtext.Count(n.Value[:start], inputtext.Scalars))
-	last := clampInt32(base + inputtext.Count(n.Value[:end], inputtext.Scalars))
+	base := offset - textinput.Count(n.Value[:at], textinput.Scalars)
+	first := clampInt32(base + textinput.Count(n.Value[:start], textinput.Scalars))
+	last := clampInt32(base + textinput.Count(n.Value[:end], textinput.Scalars))
 	return []any{n.Value[start:end], first, last}, nil
 }
 
@@ -72,7 +72,7 @@ func atspiGroupCharacterBox(o *atspiObject, args []any) ([]any, error) {
 func atspiGroupRangeBox(o *atspiObject, args []any) ([]any, error) {
 	first, last := int(args[0].(int32)), int(args[1].(int32))
 	view := o.textView()
-	r, err := view.unitsRange(min(first, last), max(first, last), inputtext.Scalars)
+	r, err := view.unitsRange(min(first, last), max(first, last), textinput.Scalars)
 	if err != nil {
 		return nil, atspiTextError(err)
 	}
@@ -92,7 +92,7 @@ func atspiGroupOffsetAtPoint(o *atspiObject, point image.Point) ([]any, error) {
 			continue
 		}
 		at := line.nearest(n.Value, point.X)
-		offset, err := v.offset(TextPoint{Node: id, Byte: at}, inputtext.Scalars)
+		offset, err := v.offset(TextPoint{Node: id, Byte: at}, textinput.Scalars)
 		return []any{clampInt32(offset)}, atspiTextError(err)
 	}
 	return []any{int32(-1)}, nil

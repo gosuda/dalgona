@@ -11,7 +11,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
@@ -49,12 +49,12 @@ type localDraft struct {
 
 type pendingSubmit struct {
 	revision uint64
-	draft    inputtext.Draft
+	draft    textinput.Draft
 	chips    []state.Attachment
 }
 
 func New(host Host) (*Dock, error) {
-	ed, err := platform.NewEditor(messagePolicy, inputtext.Draft{})
+	ed, err := platform.NewEditor(messagePolicy, textinput.Draft{})
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (d *Dock) bind(env frame) {
 
 func (d *Dock) load(v state.Draft) {
 	end := len(v.Text)
-	if d.setEditor(inputtext.Draft{Text: v.Text, Selection: inputtext.Range{Start: end, End: end}}) != nil {
+	if d.setEditor(textinput.Draft{Text: v.Text, Selection: textinput.Range{Start: end, End: end}}) != nil {
 		return
 	}
 	d.releaseChips()
@@ -147,7 +147,7 @@ func (d *Dock) load(v state.Draft) {
 	d.palette.reopen()
 }
 
-func (d *Dock) setEditor(next inputtext.Draft) error {
+func (d *Dock) setEditor(next textinput.Draft) error {
 	if err := d.editor.SetDraft(next); err != nil {
 		d.notice.fail(rejectionText(err))
 		return err
@@ -214,7 +214,7 @@ func (d *Dock) nextChipID(kind string) string {
 }
 
 func (d *Dock) clearField(env frame) {
-	if d.setEditor(inputtext.Draft{}) == nil {
+	if d.setEditor(textinput.Draft{}) == nil {
 		d.push(env)
 	}
 	d.recall.reset()

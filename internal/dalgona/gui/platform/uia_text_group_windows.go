@@ -6,7 +6,7 @@ import (
 	"errors"
 	"image"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (q uiaQuery) textView() textView {
@@ -35,7 +35,7 @@ func (q uiaQuery) rangeQuery(r *uiaTextRange) (uiaRangeQuery, uintptr) {
 	return uiaRangeQuery{uiaQuery: q, rng: r, text: text, span: span, logical: logical}, uiaOK
 }
 
-func (r *uiaTextRange) ranges() (inputtext.Range, TextRange) {
+func (r *uiaTextRange) ranges() (textinput.Range, TextRange) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.span, r.logical
@@ -48,7 +48,7 @@ func (r *uiaTextRange) storeLogical(span TextRange) {
 }
 
 func (q uiaQuery) newLogical(span TextRange) *uiaTextRange {
-	r := newUIATextRange(q.element, inputtext.Range{})
+	r := newUIATextRange(q.element, textinput.Range{})
 	r.logical = span
 	return r
 }
@@ -181,7 +181,7 @@ func uiaRangeStatus(err error) uintptr {
 		return uiaRetryLater
 	case errors.Is(err, ErrElementUnavailable):
 		return uiaUnavailable
-	case errors.Is(err, inputtext.InvalidOffset):
+	case errors.Is(err, textinput.InvalidOffset):
 		return uiaInvalidArg
 	default:
 		return uiaFail
@@ -192,7 +192,7 @@ func partRange(id NodeID) TextRange {
 	return TextRange{Start: TextPoint{Node: id}, End: TextPoint{Node: id, End: true}}
 }
 
-func partSpan(id NodeID, span inputtext.Range) TextRange {
+func partSpan(id NodeID, span textinput.Range) TextRange {
 	return TextRange{Start: TextPoint{Node: id, Byte: span.Start}, End: TextPoint{Node: id, Byte: span.End}}
 }
 

@@ -1,12 +1,13 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { waitFor } from "@testing-library/dom";
 import { cleanup, fireEvent, render, screen } from "@testing-library/svelte";
 import { tick } from "svelte";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { NO_ATTACHMENTS } from "#lib/attachments.ts";
 import Composer from "#lib/components/Composer.svelte";
 import { appliedRule } from "#lib/css-rule.ts";
+import { isBlank } from "#lib/text/validate.ts";
 import type { FileMatch } from "#lib/types.ts";
-import corpus from "../../../../docs/dal/spec/input-text-cases.json";
 
 function baseProps() {
 	return {
@@ -881,16 +882,28 @@ describe("shell mode", () => {
 		expect((field as HTMLTextAreaElement).value).toBe("!ls");
 	});
 
-	test("an empty shell line is refused and runs nothing", async () => {
-		const onShell = vi.fn();
+	test("a blank shell line is refused and runs nothing", async () => {
+		for (const value of ["!", "! \u3000\t"]) {
+			cleanup();
+			const onShell = vi.fn();
+			render(Composer, { props: { ...baseProps(), onShell } });
+			const field = screen.getByRole("textbox", { name: "Message" });
+			await fireEvent.input(field, { target: { value } });
+			await fireEvent.keyDown(field, { key: "Enter" });
+			expect(onShell).not.toHaveBeenCalled();
+			expect(document.querySelector(".error")?.textContent).toBe(
+				"Enter a command after !.",
+			);
+		}
+	});
+
+	test("Enter runs the shell command with its exact spaces", async () => {
+		const onShell = vi.fn(() => null);
 		render(Composer, { props: { ...baseProps(), onShell } });
 		const field = screen.getByRole("textbox", { name: "Message" });
-		await fireEvent.input(field, { target: { value: "!" } });
+		await fireEvent.input(field, { target: { value: "!  echo hi  " } });
 		await fireEvent.keyDown(field, { key: "Enter" });
-		expect(onShell).not.toHaveBeenCalled();
-		expect(document.querySelector(".error")?.textContent).toBe(
-			"Enter a command after !.",
-		);
+		expect(onShell).toHaveBeenCalledWith("  echo hi  ");
 	});
 });
 
@@ -1071,7 +1084,17 @@ describe("composer under a request", () => {
 	});
 });
 
-describe("exact composer text", () => {
+const corpus = JSON.parse(
+	readFileSync(
+		resolve(
+			import.meta.dirname,
+			"../../../../docs/dal/spec/input-text-cases.json",
+		),
+		"utf8",
+	),
+) as { vectors: { id: string; text: string; policy: string }[] };
+
+describe("exact message text", () => {
 	afterEach(cleanup);
 
 	function field(): HTMLTextAreaElement {
@@ -1080,253 +1103,104 @@ describe("exact composer text", () => {
 		}) as HTMLTextAreaElement;
 	}
 
-	function composerError(): string {
-		return document.getElementById("composer-error")?.textContent ?? "";
-	}
-
-	test("send, steer and queue keep the typed padding", async () => {
-		const onSend = vi.fn();
-		const view = render(Composer, { props: { ...baseProps(), onSend } });
-		await fireEvent.input(field(), { target: { value: "  fix it \t" } });
-		await fireEvent.keyDown(field(), { key: "Enter" });
-		expect(onSend).toHaveBeenCalledWith("  fix it \t", NO_ATTACHMENTS);
-		view.unmount();
-
-		const onSteer = vi.fn();
-		const onFollowup = vi.fn();
-		render(Composer, {
-			props: { ...baseProps(), running: true, onSteer, onFollowup },
-		});
-		await fireEvent.input(field(), { target: { value: "\u3000steer " } });
-		await fireEvent.keyDown(field(), { key: "Enter" });
-		expect(onSteer).toHaveBeenCalledWith("\u3000steer ");
-		await fireEvent.input(field(), { target: { value: " later\n" } });
-		await fireEvent.keyDown(field(), { key: "Enter", altKey: true });
-		expect(onFollowup).toHaveBeenCalledWith(" later\n");
-	});
-
-	test("each corpus vector is sent unchanged or refused whole", async () => {
-		const refusals: Readonly<Record<string, string>> = {
-			spaces_preserved: "Enter a message before sending.",
-			raw_crlf: "Enter a message before sending.",
-			nul: "This text has a NUL character. Remove it to continue.",
-		};
+	test.each(
+		corpus.vectors.filter((v) => v.policy === "accept" && !isBlank(v.text)),
+	)("$id is sent unchanged", async (v) => {
 		const onSend = vi.fn();
 		render(Composer, { props: { ...baseProps(), onSend } });
-		for (const vector of corpus.vectors) {
-			onSend.mockClear();
-			await fireEvent.input(field(), { target: { value: vector.text } });
-			await fireEvent.keyDown(field(), { key: "Enter" });
-			const refusal = refusals[vector.id];
-			if (refusal === undefined) {
-				expect(onSend, vector.id).toHaveBeenCalledWith(
-					vector.text,
-					NO_ATTACHMENTS,
-				);
-				continue;
-			}
-			expect(onSend, vector.id).not.toHaveBeenCalled();
-			expect(composerError(), vector.id).toBe(refusal);
-		}
+		await fireEvent.input(field(), { target: { value: v.text } });
+		await fireEvent.keyDown(field(), { key: "Enter" });
+		expect(onSend).toHaveBeenCalledWith(v.text, { texts: [], images: [] });
 	});
 
-	test("a whitespace-only message by Unicode White_Space is refused", async () => {
+	test("sends padding and trailing lines as typed", async () => {
 		const onSend = vi.fn();
 		render(Composer, { props: { ...baseProps(), onSend } });
-		await fireEvent.input(field(), { target: { value: " \u0085\u2028" } });
+		await fireEvent.input(field(), { target: { value: "  fix it\u3000\n\n" } });
 		await fireEvent.keyDown(field(), { key: "Enter" });
-		expect(onSend).not.toHaveBeenCalled();
-		expect(composerError()).toBe("Enter a message before sending.");
-		expect(field().value).toBe(" \u0085\u2028");
+		expect(onSend).toHaveBeenCalledWith("  fix it\u3000\n\n", {
+			texts: [],
+			images: [],
+		});
 	});
 
-	test("CRLF typed into the draft converts once and keeps its final LF through edit and steer", async () => {
-		const onFollowup = vi.fn();
-		const onSteer = vi.fn();
-		const onEditFollowup = vi.fn(() => "a\nb\n");
-		render(Composer, {
-			props: {
-				...baseProps(),
-				running: true,
-				followups: ["a"],
-				onFollowup,
-				onSteer,
-				onEditFollowup,
-			},
-		});
-		await fireEvent.input(field(), { target: { value: "a\r\nb\r\n" } });
-		expect(field().value).toBe("a\nb\n");
-		await fireEvent.keyDown(field(), { key: "Enter", altKey: true });
-		expect(onFollowup).toHaveBeenCalledWith("a\nb\n");
-		await fireEvent.click(screen.getByRole("button", { name: /Edit/ }));
-		expect(field().value).toBe("a\nb\n");
+	test("keeps a whitespace-only draft unsent with an error", async () => {
+		const props = baseProps();
+		render(Composer, { props });
+		await fireEvent.input(field(), { target: { value: " \u00a0\u3000\t" } });
 		await fireEvent.keyDown(field(), { key: "Enter" });
-		expect(onSteer).toHaveBeenCalledWith("a\nb\n");
-	});
-
-	test("a pasted CRLF chip converts once and keeps its final LF", async () => {
-		const onSend = vi.fn();
-		render(Composer, { props: { ...baseProps(), onSend } });
-		const lines = Array.from({ length: 10 }, (_, index) => `line ${index + 1}`);
-		await fireEvent.paste(field(), {
-			clipboardData: pastedText(`${lines.join("\r\n")}\r\n`),
-		});
-		await fireEvent.click(screen.getByRole("button", { name: "Show" }));
-		expect(document.querySelector(".chips pre")?.textContent).toBe(
-			`${lines.join("\n")}\n`,
+		expect(props.onSend).not.toHaveBeenCalled();
+		expect(field().value).toBe(" \u00a0\u3000\t");
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"Enter a message before sending.",
 		);
+	});
+
+	test("steers and queues the exact text while a turn runs", async () => {
+		const props = { ...baseProps(), running: true };
+		render(Composer, { props });
+		await fireEvent.input(field(), { target: { value: "  steer this  " } });
+		await fireEvent.keyDown(field(), { key: "Enter" });
+		expect(props.onSteer).toHaveBeenCalledWith("  steer this  ");
+		await fireEvent.input(field(), { target: { value: "\tqueue this\n" } });
+		await fireEvent.keyDown(field(), { key: "Enter", altKey: true });
+		expect(props.onFollowup).toHaveBeenCalledWith("\tqueue this\n");
+		for (const value of ["\u3000", "nul\u0000"]) {
+			await fireEvent.input(field(), { target: { value } });
+			await fireEvent.keyDown(field(), { key: "Enter" });
+			await fireEvent.keyDown(field(), { key: "Enter", altKey: true });
+			expect(field().value).toBe(value);
+		}
+		expect(props.onSteer).toHaveBeenCalledTimes(1);
+		expect(props.onFollowup).toHaveBeenCalledTimes(1);
+	});
+
+	test("keeps a NUL or a lone surrogate unsent with an error", async () => {
+		const props = { ...baseProps() };
+		render(Composer, { props });
+		await fireEvent.input(field(), { target: { value: "keep\u0000this" } });
+		await fireEvent.keyDown(field(), { key: "Enter" });
+		expect(field().value).toBe("keep\u0000this");
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"The message holds a NUL character. Remove it before sending.",
+		);
+		await fireEvent.input(field(), { target: { value: "bad\ud800" } });
+		await fireEvent.keyDown(field(), { key: "Enter" });
+		expect(document.getElementById("composer-error")?.textContent).toBe(
+			"The message holds an incomplete character. Retype it before sending.",
+		);
+		expect(props.onSend).not.toHaveBeenCalled();
+	});
+
+	test("sends whitespace typed with a chip as typed", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const pasted = Array.from({ length: 12 }, (_, index) => `${index}`).join(
+			"\n",
+		);
+		await fireEvent.paste(field(), { clipboardData: pastedText(pasted) });
+		await fireEvent.input(field(), { target: { value: " \u3000" } });
+		await fireEvent.keyDown(field(), { key: "Enter" });
+		expect(onSend).toHaveBeenCalledWith(" \u3000", {
+			texts: [pasted],
+			images: [],
+		});
+	});
+
+	test("folds pasted CRLF and CR to LF once", async () => {
+		const onSend = vi.fn();
+		render(Composer, { props: { ...baseProps(), onSend } });
+		const pasted = Array.from(
+			{ length: 12 },
+			(_, index) => `line ${index + 1}`,
+		).join("\r\n");
+		await fireEvent.paste(field(), {
+			clipboardData: pastedText(`${pasted}\rtail\r\n`),
+		});
 		await fireEvent.keyDown(field(), { key: "Enter" });
 		expect(onSend).toHaveBeenCalledWith("", {
-			texts: [`${lines.join("\n")}\n`],
+			texts: [`${pasted.replaceAll("\r\n", "\n")}\ntail\n`],
 			images: [],
 		});
-	});
-
-	test("private-use characters beside a paste chip stay text", async () => {
-		const onSend = vi.fn();
-		render(Composer, { props: { ...baseProps(), onSend } });
-		const pasted = Array.from(
-			{ length: 10 },
-			(_, index) => `\u{100000}${index}\ue000`,
-		).join("\n");
-		await fireEvent.paste(field(), { clipboardData: pastedText(pasted) });
-		await fireEvent.paste(field(), { clipboardData: pastedText(pasted) });
-		await fireEvent.input(field(), {
-			target: { value: "\ue000 see \u{F0001}" },
-		});
-		const removes = screen.getAllByRole("button", { name: "Remove" });
-		await fireEvent.click(removes[0] as HTMLElement);
-		expect(field().value).toBe("\ue000 see \u{F0001}");
-		await fireEvent.keyDown(field(), { key: "Enter" });
-		expect(onSend).toHaveBeenCalledWith("\ue000 see \u{F0001}", {
-			texts: [pasted],
-			images: [],
-		});
-	});
-
-	test("a lone surrogate reaches no search, keyword call or send", async () => {
-		vi.useFakeTimers();
-		try {
-			const onSend = vi.fn();
-			const onMatch = vi.fn(() => Promise.resolve([]));
-			const onFileSearch = vi.fn(() => Promise.resolve([]));
-			render(Composer, {
-				props: { ...baseProps(), onSend, onMatch, onFileSearch },
-			});
-			await fireEvent.input(field(), { target: { value: "@ab\ud83d" } });
-			await vi.advanceTimersByTimeAsync(200);
-			expect(onMatch).not.toHaveBeenCalled();
-			expect(onFileSearch).not.toHaveBeenCalled();
-			await fireEvent.keyDown(field(), { key: "Enter" });
-			expect(onSend).not.toHaveBeenCalled();
-			expect(composerError()).toBe(
-				"This text has an incomplete character. Retype the last character.",
-			);
-			expect(field().value).toBe("@ab\ud83d");
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	test("a paste holding NUL is refused whole", async () => {
-		render(Composer, { props: baseProps() });
-		await fireEvent.input(field(), { target: { value: "keep" } });
-		field().setSelectionRange(2, 2);
-		const inserted = await fireEvent.paste(field(), {
-			clipboardData: pastedText("a\0b"),
-		});
-		expect(inserted).toBe(false);
-		expect(composerError()).toBe(
-			"This text has a NUL character. Remove it to continue.",
-		);
-		expect(field().value).toBe("keep");
-		expect([field().selectionStart, field().selectionEnd]).toEqual([2, 2]);
-	});
-
-	test("Backspace and Delete select the whole adjacent cluster first", async () => {
-		render(Composer, { props: baseProps() });
-		const family = "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}";
-		await fireEvent.input(field(), {
-			target: { value: `a${family}e\u0301` },
-		});
-		field().setSelectionRange(9, 9);
-		await fireEvent.keyDown(field(), { key: "Backspace" });
-		expect([field().selectionStart, field().selectionEnd]).toEqual([1, 9]);
-		field().setSelectionRange(9, 9);
-		await fireEvent.keyDown(field(), { key: "Delete" });
-		expect([field().selectionStart, field().selectionEnd]).toEqual([9, 11]);
-		field().setSelectionRange(11, 11);
-		await fireEvent.keyDown(field(), { key: "Backspace", isComposing: true });
-		expect([field().selectionStart, field().selectionEnd]).toEqual([11, 11]);
-	});
-});
-
-describe("composer send validation", () => {
-	afterEach(cleanup);
-
-	function field(): HTMLTextAreaElement {
-		return screen.getByRole("textbox", {
-			name: "Message",
-		}) as HTMLTextAreaElement;
-	}
-
-	function composerError(): string {
-		return document.getElementById("composer-error")?.textContent ?? "";
-	}
-
-	test("a shell chip with a NUL keeps the draft and chips unsent", async () => {
-		const onShell = vi.fn(() =>
-			Promise.resolve({
-				n: 1,
-				exitCode: 0,
-				lines: 1,
-				text: "Output of `ls` (exit 0):\n```\na\0b\n```",
-			}),
-		);
-		const onSend = vi.fn();
-		render(Composer, { props: { ...baseProps(), onShell, onSend } });
-		const box = field();
-		await fireEvent.input(box, { target: { value: "!ls" } });
-		await fireEvent.keyDown(box, { key: "Enter" });
-		await waitFor(() => {
-			expect(screen.getByText("[Shell #1 exit 0, 1 line]")).toBeTruthy();
-		});
-		await fireEvent.input(box, { target: { value: "please review" } });
-		await fireEvent.keyDown(box, { key: "Enter" });
-		expect(onSend).not.toHaveBeenCalled();
-		expect(composerError()).toBe(
-			"This text has a NUL character. Remove it to continue.",
-		);
-		expect(box.value).toBe("please review");
-		expect(screen.getByText("[Shell #1 exit 0, 1 line]")).toBeTruthy();
-	});
-
-	test("an attachment-backed send preserves typed NEL text", async () => {
-		const onSend = vi.fn();
-		render(Composer, { props: { ...baseProps(), onSend } });
-		const pasted = Array.from(
-			{ length: 10 },
-			(_, index) => `line ${index + 1}`,
-		).join("\n");
-		await fireEvent.paste(field(), { clipboardData: pastedText(pasted) });
-		expect(screen.getByText("Pasted text · 10 lines")).toBeTruthy();
-		await fireEvent.input(field(), {
-			target: { value: String.fromCodePoint(0x85) },
-		});
-		await fireEvent.keyDown(field(), { key: "Enter" });
-		expect(onSend).toHaveBeenCalledWith(String.fromCodePoint(0x85), {
-			texts: [pasted],
-			images: [],
-		});
-	});
-
-	test("Shift+Delete leaves the caret for the browser Cut command", async () => {
-		render(Composer, { props: baseProps() });
-		await fireEvent.input(field(), { target: { value: "ab" } });
-		field().setSelectionRange(1, 1);
-		await fireEvent.keyDown(field(), { key: "Delete", shiftKey: true });
-		expect([field().selectionStart, field().selectionEnd]).toEqual([1, 1]);
-		await fireEvent.keyDown(field(), { key: "Delete" });
-		expect([field().selectionStart, field().selectionEnd]).toEqual([1, 2]);
 	});
 });

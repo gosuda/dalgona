@@ -19,6 +19,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -197,12 +198,12 @@ func sandboxPolicy(mode string) string {
 func (m *model) submitPrompt() tea.Cmd {
 	composer := m.input.composer
 	text := composer.Expanded()
+	if textinput.Blank(text) {
+		text = ""
+	}
 	images := composer.images()
-	if len(images) == 0 && whitespaceOnly(text) {
-		if len(composer.chips) != 0 {
-			return nil
-		}
-		return m.startQueuedFollowup()
+	if command, done := m.submitEmpty(text, images); done {
+		return command
 	}
 	text, command, done := m.slashSubmit(composer, text)
 	if done {
@@ -219,6 +220,16 @@ func (m *model) submitPrompt() tea.Cmd {
 		return m.sendSteer(text, items)
 	}
 	return m.sendPrompt(text, items)
+}
+
+func (m *model) submitEmpty(text string, images []chip) (tea.Cmd, bool) {
+	if text != "" || len(images) != 0 {
+		return nil, false
+	}
+	if len(m.input.composer.chips) != 0 {
+		return nil, true
+	}
+	return m.startQueuedFollowup(), true
 }
 
 func (m *model) slashSubmit(composer editor, text string) (string, tea.Cmd, bool) {
@@ -307,7 +318,7 @@ func promptInput(text string, images []chip) []rpc.InputItem {
 func (m *model) queueFollowup() tea.Cmd {
 	composer := m.input.composer
 	text := composer.Expanded()
-	if whitespaceOnly(text) {
+	if textinput.Blank(text) {
 		return nil
 	}
 	if busyWord(m.thread.state) == "" && composer.readsSlash() {
@@ -738,7 +749,7 @@ func (m *model) restoreComposer(text string) {
 	if text == "" {
 		return
 	}
-	verbatim := strings.HasPrefix(strings.TrimSpace(text), "/")
+	verbatim := slashStart([]rune(text)) >= 0
 	current := m.input.composer.Expanded()
 	if current != "" {
 		text += "\n" + current
@@ -981,7 +992,7 @@ const (
 
 func (m *model) runShell() tea.Cmd {
 	command := m.input.composer.Expanded()
-	if whitespaceOnly(command) {
+	if textinput.Blank(command) {
 		return nil
 	}
 	if m.machineOffline() {
@@ -1018,7 +1029,7 @@ func (m *model) shellCommand(n int, command string) tea.Cmd {
 func (m *model) applyShell(msg shellResultMsg) {
 	key := "shell:" + strconv.Itoa(msg.n)
 	ms := msg.elapsed.Milliseconds()
-	command := sanitizeText(msg.command)
+	command := textinput.DisplayLine(msg.command)
 	if msg.err != nil {
 		m.commit(key, m.renderRow(row{label: "!", subject: command, state: "Failed", duration: durationText(&ms), body: textLines(sanitizeText(msg.err.Error()))}))
 		return

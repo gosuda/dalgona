@@ -13,7 +13,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/unit"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/giodraw"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
@@ -22,18 +22,18 @@ import (
 
 const secretMask = '•'
 
-var faultNotices = map[inputtext.Reason]string{
-	inputtext.InvalidEncoding:     "This text has an incomplete character. Retype the last character.",
-	inputtext.DisallowedControl:   "This text has a NUL character. Remove it to continue.",
-	inputtext.LineBreakNotAllowed: "This field takes one line. Paste or drop text without line breaks.",
+var faultNotices = map[textinput.Reason]string{
+	textinput.InvalidEncoding:     "This text has an incomplete character. Retype the last character.",
+	textinput.DisallowedControl:   "This text has a NUL character. Remove it to continue.",
+	textinput.LineBreakNotAllowed: "This field takes one line. Paste or drop text without line breaks.",
 }
 
-func faultNotice(err error, policy inputtext.Policy) string {
-	var reason inputtext.Reason
+func faultNotice(err error, policy textinput.Policy) string {
+	var reason textinput.Reason
 	if !errors.As(err, &reason) {
 		return err.Error()
 	}
-	if reason == inputtext.TextTooLarge {
+	if reason == textinput.TextTooLarge {
 		return "This text is over the " + strconv.Itoa(policy.Limit.Max) + " " + unitName(policy.Limit.Unit) + " limit. Shorten it to continue."
 	}
 	if notice, ok := faultNotices[reason]; ok {
@@ -42,8 +42,8 @@ func faultNotice(err error, policy inputtext.Policy) string {
 	return string(reason)
 }
 
-func unitName(u inputtext.Unit) string {
-	if u == inputtext.Bytes {
+func unitName(u textinput.Unit) string {
+	if u == textinput.Bytes {
 		return "byte"
 	}
 	return "character"
@@ -52,7 +52,7 @@ func unitName(u inputtext.Unit) string {
 type field struct {
 	editor *platform.Editor
 	label  string
-	policy inputtext.Policy
+	policy textinput.Policy
 	secret bool
 	fault  string
 }
@@ -61,7 +61,7 @@ type fieldEvents struct {
 	submit, cancel, changed bool
 }
 
-func newField(label string, policy inputtext.Policy) field {
+func newField(label string, policy textinput.Policy) field {
 	return field{label: label, policy: policy}
 }
 
@@ -69,7 +69,7 @@ func (f *field) ensure() *platform.Editor {
 	if f.editor != nil {
 		return f.editor
 	}
-	editor, err := platform.NewEditor(f.policy, inputtext.Draft{})
+	editor, err := platform.NewEditor(f.policy, textinput.Draft{})
 	if err != nil {
 		f.fault = err.Error()
 		return nil
@@ -92,7 +92,7 @@ func (f *field) clear() {
 	if f.editor == nil {
 		return
 	}
-	if err := f.editor.SetDraft(inputtext.Draft{}); err != nil {
+	if err := f.editor.SetDraft(textinput.Draft{}); err != nil {
 		f.editor = nil
 	}
 	f.fault = ""

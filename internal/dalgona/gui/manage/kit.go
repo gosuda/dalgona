@@ -14,7 +14,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/giodraw"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
@@ -268,13 +268,13 @@ func (t *toggle) layout(gtx layout.Context, env scene, label string, off bool) l
 
 type field struct {
 	editor  *platform.Editor
-	policy  inputtext.Policy
+	policy  textinput.Policy
 	secret  bool
 	refusal string
 	escaped bool
 }
 
-func newField(policy inputtext.Policy, secret bool) *field {
+func newField(policy textinput.Policy, secret bool) *field {
 	return &field{policy: policy, secret: secret}
 }
 
@@ -282,7 +282,7 @@ func (f *field) ensure() *platform.Editor {
 	if f.editor != nil {
 		return f.editor
 	}
-	editor, err := platform.NewEditor(f.policy, inputtext.Draft{})
+	editor, err := platform.NewEditor(f.policy, textinput.Draft{})
 	if err != nil {
 		f.refusal = refusalText(err)
 		return nil
@@ -307,7 +307,7 @@ func (f *field) set(s string) {
 		return
 	}
 	f.refusal = ""
-	if err := e.SetDraft(inputtext.Draft{Text: s, Selection: inputtext.Range{Start: len(s), End: len(s)}}); err != nil {
+	if err := e.SetDraft(textinput.Draft{Text: s, Selection: textinput.Range{Start: len(s), End: len(s)}}); err != nil {
 		f.refusal = refusalText(err)
 	}
 }
@@ -336,7 +336,7 @@ func (f *field) update(gtx layout.Context) (changed, submitted bool) {
 }
 
 func (f *field) enter(e *platform.Editor) bool {
-	if f.policy.Lines != inputtext.MultiLine {
+	if f.policy.Lines != textinput.MultiLine {
 		return true
 	}
 	if err := e.Replace(e.Draft().Selection, "\n"); err != nil {
@@ -403,7 +403,7 @@ func (f *field) box(gtx layout.Context, env scene, p theme.Palette, off bool) la
 	width := gtx.Constraints.Max.X
 	inner := gtx
 	inner.Constraints = layout.Constraints{Min: image.Pt(max(0, width-2*inline), 0), Max: image.Pt(max(0, width-2*inline), 1<<24)}
-	if f.policy.Lines == inputtext.SingleLine {
+	if f.policy.Lines == textinput.SingleLine {
 		inner.Constraints.Max.Y = dp(gtx, theme.ControlHeight)
 	}
 	if off {

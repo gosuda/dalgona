@@ -7,8 +7,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -20,8 +19,9 @@ const (
 const shellPlaceholder = "Shell · enter runs · esc leaves"
 
 const (
-	pasteChipLines = 10
-	pasteLimit     = 1 << 20
+	pasteChipLines  = 10
+	pasteLimit      = 1 << 20
+	chipPlaceholder = "\ufffc"
 )
 
 type chip struct {
@@ -48,41 +48,43 @@ const (
 type textField struct {
 	text   []rune
 	cursor int
+	limit  int
 }
 
 func (f textField) value() string {
 	return string(f.text)
 }
 
-func (f textField) draft() inputtext.Draft {
+func (f textField) draft() textinput.Draft {
 	at := len(string(f.text[:f.cursor]))
-	return inputtext.Draft{Text: string(f.text), Selection: inputtext.Range{Start: at, End: at}}
+	return textinput.Draft{Text: string(f.text), Selection: textinput.Range{Start: at, End: at}}
 }
 
-func (f *textField) apply(draft inputtext.Draft) {
+func (f *textField) apply(draft textinput.Draft) {
 	f.text = []rune(draft.Text)
 	f.cursor = utf8.RuneCountInString(draft.Text[:draft.Selection.Start])
 }
 
-func (f *textField) insert(text string) bool {
-	if text == "" {
-		return false
+func (f *textField) insert(text string) error {
+	if err := (textinput.Field{Name: "field", SingleLine: true}).Check(text); err != nil {
+		return err
 	}
-	before := f.draft()
-	next, err := before.Replace(fieldPolicy, text)
-	if err != nil || next == before {
-		return false
+	runes := []rune(text)
+	if f.limit > 0 && len(f.text)+len(runes) > f.limit {
+		return &textinput.Error{Field: "field", Reason: textinput.TextTooLarge}
 	}
-	f.apply(next)
-	return true
+
+	f.text = slices.Insert(f.text, f.cursor, runes...)
+	f.cursor += len(runes)
+	return nil
 }
 
 func (f *textField) edit(key string) bool {
 	switch key {
 	case "backspace":
-		return f.remove(inputtext.Draft.DeleteBackward)
+		return f.remove(textinput.Draft.DeleteBackward)
 	case "delete":
-		return f.remove(inputtext.Draft.DeleteForward)
+		return f.remove(textinput.Draft.DeleteForward)
 	case "left":
 		f.step(false)
 	case "right":
@@ -91,7 +93,7 @@ func (f *textField) edit(key string) bool {
 	return false
 }
 
-func (f *textField) remove(op func(inputtext.Draft) (inputtext.Draft, error)) bool {
+func (f *textField) remove(op func(textinput.Draft) (textinput.Draft, error)) bool {
 	before := f.draft()
 	next, err := op(before)
 	if err != nil || next == before {
@@ -104,11 +106,12 @@ func (f *textField) remove(op func(inputtext.Draft) (inputtext.Draft, error)) bo
 func (f *textField) step(forward bool) {
 	text := string(f.text)
 	at := len(string(f.text[:f.cursor]))
+	snapped, _ := textinput.PaintRange(text, textinput.Range{Start: at, End: at})
 	var next int
 	if forward {
-		next, _ = inputtext.NextBoundary(text, at)
+		next, _ = textinput.NextClusterBoundary(text, snapped.Start)
 	} else {
-		next, _ = inputtext.PreviousBoundary(text, at)
+		next, _ = textinput.PreviousClusterBoundary(text, snapped.End)
 	}
 	f.cursor = utf8.RuneCountInString(text[:next])
 }
@@ -159,15 +162,6 @@ func (c editor) Value() string {
 
 func (c editor) empty() bool {
 	return len(c.text) == 0 && len(c.chips) == 0
-}
-
-func whitespaceOnly(text string) bool {
-	for _, r := range text {
-		if !inputtext.IsWhitespace(r) {
-			return false
-		}
-	}
-	return true
 }
 
 func (c *editor) SetValue(value string) {
@@ -364,7 +358,7 @@ func (c editor) layout(s *screenState, width int, spans []keywordSpan, t theme) 
 			lines[i] = t.paint(roleText, s.fit(ch.label, editorCells(width)))
 			continue
 		}
-		lines[i] = s.expandFrom(c.markedRow(s, r.text, localSpans(spans, r), t), r.col)
+		lines[i] = s.expandFrom(s.nfc(c.markedRow(s, r.text, localSpans(spans, r), t)), r.col)
 	}
 	if c.Value() == "" && len(c.chips) == 0 {
 		lines[0] = t.paint(roleDim, s.fit(c.placeholder, editorCells(width)))
@@ -411,7 +405,7 @@ func (c *editor) updateKey(s *screenState, msg tea.KeyPressMsg) {
 		return
 	}
 	if msg.Text != "" {
-		c.insert([]rune(msg.Text))
+		c.insert([]rune(textinput.NewlinesToLF(msg.Text)))
 	}
 }
 
@@ -517,8 +511,9 @@ func (c *editor) placeOnRow(s *screenState, row editorRow, col int) {
 
 func (c editor) runeAt(s *screenState, row editorRow, col int) int {
 	offset, cells, runes := 0, 0, row.runeStart
+
 	for offset < len(row.text) {
-		size, _ := inputtext.NextBoundary(row.text[offset:], 0)
+		size, _ := textinput.NextClusterBoundary(row.text[offset:], 0)
 		cluster := row.text[offset : offset+size]
 		cells += s.cellsFrom(displayText(cluster), row.col+cells)
 		if cells > col {
@@ -563,13 +558,13 @@ func (c editor) segmentEnd() int {
 func (c editor) previousStop() int {
 	start := c.segmentStart()
 	head := string(c.text[start:c.cursor])
-	stop, _ := inputtext.PreviousBoundary(head, len(head))
+	stop, _ := textinput.PreviousClusterBoundary(head, len(head))
 	return start + utf8.RuneCountInString(head[:stop])
 }
 
 func (c editor) nextStop() int {
 	tail := string(c.text[c.cursor:c.segmentEnd()])
-	stop, _ := inputtext.NextBoundary(tail, 0)
+	stop, _ := textinput.NextClusterBoundary(tail, 0)
 	return c.cursor + utf8.RuneCountInString(tail[:stop])
 }
 
@@ -584,7 +579,7 @@ func (c editor) wordStart() int {
 		} else if !inWord {
 			word, inWord = at, true
 		}
-		size, _ := inputtext.NextBoundary(head[at:], 0)
+		size, _ := textinput.NextClusterBoundary(head[at:], 0)
 		at += size
 	}
 	return start + utf8.RuneCountInString(head[:word])
@@ -601,7 +596,7 @@ func clustersForward(text string, start int, kind func(string) bool) int {
 		if !kind(text[start:]) {
 			break
 		}
-		size, _ := inputtext.NextBoundary(text[start:], 0)
+		size, _ := textinput.NextClusterBoundary(text[start:], 0)
 		start += size
 	}
 	return start
@@ -609,7 +604,7 @@ func clustersForward(text string, start int, kind func(string) bool) int {
 
 func spaceCluster(cluster string) bool {
 	r, _ := utf8.DecodeRuneInString(cluster)
-	return inputtext.IsWhitespace(r)
+	return textinput.IsWhiteSpace(r)
 }
 
 func wordCluster(cluster string) bool {
@@ -687,7 +682,8 @@ func (c *editor) repairCaret() {
 	start := c.segmentStart()
 	text := string(c.text[start:c.segmentEnd()])
 	before := len(string(c.text[start : c.cursor-1]))
-	next, _ := inputtext.NextBoundary(text, before)
+	snapped, _ := textinput.PaintRange(text, textinput.Range{Start: before, End: before})
+	next, _ := textinput.NextClusterBoundary(text, snapped.Start)
 	c.cursor = start + utf8.RuneCountInString(text[:next])
 }
 

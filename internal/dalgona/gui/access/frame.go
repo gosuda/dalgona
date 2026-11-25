@@ -18,7 +18,7 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/document"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 )
@@ -213,7 +213,7 @@ func (f *Frame) register(n platform.SemanticNode, a Actions) int {
 		n.Parent = f.scope + "/" + a.parent
 	}
 	if n.Role == platform.RoleSecureField {
-		n.Value, n.Lines, n.Selection = "", nil, inputtext.Range{}
+		n.Value, n.Lines, n.Selection = "", nil, textinput.Range{}
 	} else if a.Editor != nil {
 		draft := a.Editor.Draft()
 		n.Value, n.Selection = draft.Text, draft.Selection
@@ -452,7 +452,7 @@ func (f *Frame) selectText(s *platform.SemanticSnapshot, n platform.SemanticNode
 	a.Selection.Selection, a.Selection.Selected = selection, true
 }
 
-func (a Actions) positionsTo(end Actions, span inputtext.Range, sameNode bool) (document.Selection, error) {
+func (a Actions) positionsTo(end Actions, span textinput.Range, sameNode bool) (document.Selection, error) {
 	anchor, err := a.TextPosition(span.Start, document.After)
 	if err != nil {
 		return document.Selection{}, err
@@ -470,7 +470,7 @@ func (a Actions) selectableThrough(end Actions) bool {
 }
 
 func validCaret(text string, at int) bool {
-	return inputtext.CheckRange(text, inputtext.Range{Start: at, End: at}) == nil
+	return textinput.CheckRange(text, textinput.Range{Start: at, End: at}) == nil
 }
 
 func (a Actions) stale(i platform.AccessibilityIntent) bool {
@@ -535,5 +535,5 @@ func (a Actions) edit(i platform.AccessibilityIntent) error {
 	if i.Action == platform.ActionSelectText {
 		return a.Editor.Select(i.Selection)
 	}
-	return a.Editor.Replace(inputtext.Range{End: len(a.Editor.Draft().Text)}, i.Value)
+	return a.Editor.Replace(textinput.Range{End: len(a.Editor.Draft().Text)}, i.Value)
 }

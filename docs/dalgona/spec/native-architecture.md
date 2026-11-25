@@ -42,8 +42,7 @@ Candidate A preserves existing startup behavior with little extraction.
 Its helper process adds another failure boundary and exposes startup diagnostics through stderr.
 Its complete design still needs history, authentication, filesystem, and PTY extensions.
 
-Candidate B shares endpoint lifecycle code and connects directly to trusted local IPC, a box bridge, or a daemon relay.
-It preserves separate daemons and simultaneous endpoint sessions while removing the proxy process from desktop operation.
+Candidate B shares endpoint lifecycle code and connects directly to trusted local IPC, a box bridge, or a daemon relay. It preserves separate daemons and simultaneous endpoint sessions while removing the proxy process from desktop operation.
 Its complete design requires deliberate package separation and migration of existing entry points.
 
 The [native client decision](../decisions/native-client.md) records the qualitative comparison and selection.
@@ -89,8 +88,7 @@ Paths MUST NOT convert between endpoint domains.
 An offline remote MUST NOT fall back to the local file system.
 
 Drafts and preferences belong to the GUI. Credentials, provider sessions, and workspace authority belong to their backend owners.
-The GUI MUST NOT persist bearer credentials, OAuth codes, terminal input, or approval answers in its restore state.
-Tokens MUST NOT enter GUI restore state or logs.
+The GUI MUST NOT persist bearer credentials, OAuth codes, terminal input, approval answers, or any token in its restore state. Tokens MUST NOT enter logs.
 Windows do not share a mutable composer draft merely because they display the same thread.
 Each send intent carries an immutable draft revision from its owning window.
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-import { type DisplayReveal, displaySegments } from "#lib/inputtext.ts";
+import { type DisplayReveal, displaySegments } from "#lib/text/segments.ts";
 
 interface Props {
 	readonly text: string;

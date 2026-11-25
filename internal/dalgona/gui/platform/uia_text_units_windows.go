@@ -2,7 +2,7 @@
 
 package platform
 
-import "github.com/gosuda/dalgona/internal/dal/inputtext"
+import "github.com/gosuda/dalgona/internal/dal/textinput"
 
 type uiaSegment struct {
 	point TextPoint
@@ -150,15 +150,15 @@ func (rq uiaRangeQuery) findLogical(needle string, backward, fold bool, out *uin
 	if err != nil {
 		return uiaRangeStatus(err)
 	}
-	found, ok := uiaFind(text, inputtext.Range{End: len(text)}, needle, backward, fold)
+	found, ok := uiaFind(text, textinput.Range{End: len(text)}, needle, backward, fold)
 	if !ok {
 		return uiaOK
 	}
-	base, err := view.offset(rq.logical.Start, inputtext.Bytes)
+	base, err := view.offset(rq.logical.Start, textinput.Bytes)
 	if err != nil {
 		return uiaRangeStatus(err)
 	}
-	span, err := view.unitsRange(base+found.Start, base+found.End, inputtext.Bytes)
+	span, err := view.unitsRange(base+found.Start, base+found.End, textinput.Bytes)
 	if err != nil {
 		return uiaRangeStatus(err)
 	}

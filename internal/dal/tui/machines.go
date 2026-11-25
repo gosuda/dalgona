@@ -45,7 +45,6 @@ type Machines interface {
 	Connect(string) error
 	Disconnect(string) error
 	Call(context.Context, Link, string, any, any) error
-	Respond(context.Context, Link, string, any) error
 	Close() error
 }
 
@@ -64,10 +63,6 @@ type machineCaller struct {
 
 func (c machineCaller) Call(ctx context.Context, method string, params, result any) error {
 	return c.set.Call(ctx, c.link, method, params, result)
-}
-
-func (c machineCaller) Respond(ctx context.Context, requestID string, result any) error {
-	return c.set.Respond(ctx, c.link, requestID, result)
 }
 
 type machineMsg struct {

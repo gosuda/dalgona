@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 var ErrNoLayout = errors.New("document row has no layout; load the document and lay out the row, then retry")
@@ -17,7 +17,7 @@ func (d *Document) At(block, offset int, affinity Affinity) (Position, error) {
 	}
 	p := d.blocks[block].Projection
 	if offset < 0 || offset > len(p.Text) {
-		return Position{}, fmt.Errorf("%w: projected offset %d of %d", inputtext.InvalidOffset, offset, len(p.Text))
+		return Position{}, fmt.Errorf("%w: projected offset %d of %d", textinput.InvalidOffset, offset, len(p.Text))
 	}
 	return d.at(block, snap(p, offset, affinity), affinity), nil
 }

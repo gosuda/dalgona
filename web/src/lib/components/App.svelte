@@ -200,10 +200,7 @@ function onWindowKeydown(event: KeyboardEvent): void {
 					position={shownPosition}
 					total={openRequests.length}
 					subagent={subagentTitle}
-					answered={session.answeredQuestions.has(session.currentRequest.id)}
-					correction={session.questionCorrections.get(session.currentRequest.id) ?? null}
-					draft={session.questionDrafts.get(session.currentRequest.id) ?? null}
-					onDraft={(request, selections) => session.saveQuestionDraft(request.id, selections)}
+					submission={session.questionSubmissions.get(session.currentRequest.id) ?? null}
 					onSubmit={(request, selections) => session.answerQuestion(request, selections)}
 					onDismiss={(request) => session.cancelQuestion(request)}
 				/>

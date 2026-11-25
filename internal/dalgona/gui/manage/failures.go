@@ -11,8 +11,8 @@ import (
 	"gioui.org/layout"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
@@ -26,7 +26,7 @@ const (
 	ghNotice          = "Gh mode reads a token once through `gh auth token --hostname github.com --no-refresh` each time it reports; dalgona never logs in, refreshes, or borrows another credential."
 )
 
-var confirmPolicy = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: 16}}
+var confirmPolicy = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: 16}}
 
 type Failures struct {
 	base

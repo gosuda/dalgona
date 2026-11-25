@@ -19,8 +19,8 @@ import (
 	"gioui.org/op"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
@@ -36,7 +36,7 @@ const (
 
 var (
 	filesRights = []string{"read", "write"}
-	pathPolicy  = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: pathLimitBytes}}
+	pathPolicy  = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: pathLimitBytes}}
 )
 
 type grantPhase uint8
@@ -755,10 +755,10 @@ func (f *Files) updateMutations(gtx layout.Context, b binding) {
 
 func (f *Files) updateCreate(gtx layout.Context, b binding, busy bool) {
 	name := f.newName.text()
-	if clicked(gtx, &f.mkdir, busy || inputtext.Blank(name)) {
+	if clicked(gtx, &f.mkdir, busy || textinput.VisuallyBlank(name)) {
 		f.mutate(b, methodWorkspaceMkdir, mkdirParams{WorkspaceID: f.lease.grant.WorkspaceID, Path: path.Join(f.dir, name), Recursive: false})
 	}
-	if clicked(gtx, &f.mkfile, busy || inputtext.Blank(name)) {
+	if clicked(gtx, &f.mkfile, busy || textinput.VisuallyBlank(name)) {
 		f.doc.create(f, b, path.Join(f.dir, name))
 	}
 }
@@ -773,7 +773,7 @@ func (f *Files) updateConfirm(gtx layout.Context, b binding, busy bool) {
 		f.leaveTarget(e.path)
 		f.mutate(b, methodWorkspaceRemove, removeParams{WorkspaceID: f.lease.grant.WorkspaceID, Path: e.path, ExpectedRevision: e.meta.Revision, Recursive: e.meta.Kind == "directory"})
 	}
-	if f.renaming != nil && clicked(gtx, &f.confirm, busy || inputtext.Blank(f.renameTo.text())) {
+	if f.renaming != nil && clicked(gtx, &f.confirm, busy || textinput.VisuallyBlank(f.renameTo.text())) {
 		e := *f.renaming
 		f.renaming = nil
 		f.leaveTarget(e.path)
@@ -934,8 +934,8 @@ func (f *Files) browser(env scene) []layout.Widget {
 			return f.newName.layout(gtx, env, "New name", f.op.running())
 		},
 		buttons(env,
-			action{click: &f.mkfile, label: "Create file", variant: secondary, off: f.op.running() || inputtext.Blank(f.newName.text())},
-			action{click: &f.mkdir, label: "Create folder", variant: secondary, off: f.op.running() || inputtext.Blank(f.newName.text())}),
+			action{click: &f.mkfile, label: "Create file", variant: secondary, off: f.op.running() || textinput.VisuallyBlank(f.newName.text())},
+			action{click: &f.mkdir, label: "Create folder", variant: secondary, off: f.op.running() || textinput.VisuallyBlank(f.newName.text())}),
 		f.op.line(env),
 	}
 	out = append(out, f.confirmWidgets(env)...)

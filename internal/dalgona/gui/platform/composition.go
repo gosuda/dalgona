@@ -3,7 +3,7 @@ package platform
 import (
 	"errors"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 var ErrComposing = errors.New("text composition is active; finish or cancel the composition first")
@@ -14,15 +14,15 @@ type KeyPress struct {
 }
 
 type Composer struct {
-	policy   inputtext.Policy
-	draft    inputtext.Draft
+	policy   textinput.Policy
+	draft    textinput.Draft
 	preedit  string
 	active   bool
 	rejected string
 }
 
-func NewComposer(policy inputtext.Policy, draft inputtext.Draft) (*Composer, error) {
-	if err := inputtext.CheckRange(draft.Text, draft.Selection); err != nil {
+func NewComposer(policy textinput.Policy, draft textinput.Draft) (*Composer, error) {
+	if err := textinput.CheckRange(draft.Text, draft.Selection); err != nil {
 		return nil, err
 	}
 	if err := policy.Check(draft.Text); err != nil {
@@ -31,7 +31,7 @@ func NewComposer(policy inputtext.Policy, draft inputtext.Draft) (*Composer, err
 	return &Composer{policy: policy, draft: draft}, nil
 }
 
-func (c *Composer) Draft() inputtext.Draft { return c.draft }
+func (c *Composer) Draft() textinput.Draft { return c.draft }
 
 func (c *Composer) Preedit() string { return c.preedit }
 
@@ -65,11 +65,11 @@ func (c *Composer) Replace(candidate string) error {
 	return c.apply(candidate)
 }
 
-func (c *Composer) Select(r inputtext.Range) error {
+func (c *Composer) Select(r textinput.Range) error {
 	if c.active {
 		return ErrComposing
 	}
-	if err := inputtext.CheckRange(c.draft.Text, r); err != nil {
+	if err := textinput.CheckRange(c.draft.Text, r); err != nil {
 		return err
 	}
 	c.draft.Selection = r

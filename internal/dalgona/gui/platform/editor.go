@@ -24,7 +24,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type EditorEventKind uint8
@@ -73,13 +73,13 @@ type Editor struct {
 	Wake      func()
 
 	widget        widget.Editor
-	policy        inputtext.Policy
+	policy        textinput.Policy
 	composer      *Composer
 	view          string
 	selection     key.Range
 	composition   key.Range
 	ime           imeMirror
-	published     inputtext.Draft
+	published     textinput.Draft
 	revision      uint64
 	rejected      string
 	history       []transaction
@@ -104,8 +104,8 @@ type transaction struct {
 	at       int
 	removed  string
 	inserted string
-	before   inputtext.Range
-	after    inputtext.Range
+	before   textinput.Range
+	after    textinput.Range
 }
 
 type pasteRequest struct {
@@ -124,7 +124,7 @@ type clipboardResult struct {
 	err     error
 }
 
-func NewEditor(policy inputtext.Policy, draft inputtext.Draft) (*Editor, error) {
+func NewEditor(policy textinput.Policy, draft textinput.Draft) (*Editor, error) {
 	composer, err := NewComposer(policy, draft)
 	if err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func NewEditor(policy inputtext.Policy, draft inputtext.Draft) (*Editor, error) 
 		composition:   noRuneRange,
 		unmarkCommits: runtime.GOOS == "darwin",
 	}
-	e.widget.SingleLine = policy.Lines == inputtext.SingleLine
+	e.widget.SingleLine = policy.Lines == textinput.SingleLine
 	e.showCanonical()
 	return e, nil
 }
@@ -145,7 +145,7 @@ func (e *Editor) Tag() event.Tag { return &e.widget }
 
 func (e *Editor) Composing() bool { return e.composer.Composing() }
 
-func (e *Editor) Draft() inputtext.Draft { return e.composer.Draft() }
+func (e *Editor) Draft() textinput.Draft { return e.composer.Draft() }
 
 func (e *Editor) Revision() uint64 { return e.revision }
 
@@ -159,7 +159,7 @@ func (e *Editor) Claim(names ...key.Name) {
 	e.claimed = append(e.claimed[:0], names...)
 }
 
-func (e *Editor) Select(r inputtext.Range) error {
+func (e *Editor) Select(r textinput.Range) error {
 	if err := e.composer.Select(r); err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func (e *Editor) Select(r inputtext.Range) error {
 	return nil
 }
 
-func (e *Editor) Replace(r inputtext.Range, candidate string) error {
+func (e *Editor) Replace(r textinput.Range, candidate string) error {
 	if e.composer.Composing() {
 		return ErrComposing
 	}
@@ -187,7 +187,7 @@ func (e *Editor) Replace(r inputtext.Range, candidate string) error {
 	return nil
 }
 
-func (e *Editor) SetDraft(d inputtext.Draft) error {
+func (e *Editor) SetDraft(d textinput.Draft) error {
 	if e.composer.Composing() {
 		return ErrComposing
 	}
@@ -377,7 +377,7 @@ func (e *Editor) press(gtx layout.Context, k key.Event) {
 }
 
 func (e *Editor) enter(k key.Event) {
-	if e.policy.Lines == inputtext.MultiLine && k.Modifiers == key.ModShift {
+	if e.policy.Lines == textinput.MultiLine && k.Modifiers == key.ModShift {
 		e.insert("\n")
 		return
 	}
@@ -446,7 +446,7 @@ func (e *Editor) settle() {
 	e.resetMirror()
 }
 
-func (e *Editor) commitDiff(before inputtext.Draft, candidate string) bool {
+func (e *Editor) commitDiff(before textinput.Draft, candidate string) bool {
 	r, inserted, err := editedRange(before.Text, candidate)
 	if err == nil {
 		err = e.composer.Select(r)
@@ -468,7 +468,7 @@ func (e *Editor) adoptMirror(at int) {
 		e.adoptSelection(m.text, m.selection)
 		return
 	}
-	err := e.composer.Select(inputtext.Range{Start: at, End: at + len(m.anchor)})
+	err := e.composer.Select(textinput.Range{Start: at, End: at + len(m.anchor)})
 	if !m.active {
 		e.showCanonical()
 		return
@@ -598,7 +598,7 @@ func (e *Editor) insert(candidate string) {
 	}
 }
 
-func (e *Editor) record(before, after inputtext.Draft) {
+func (e *Editor) record(before, after textinput.Draft) {
 	p := sharedPrefixLen(before.Text, after.Text)
 	s := sharedSuffixLen(before.Text[p:], after.Text[p:])
 	for _, undone := range e.history[e.applied:] {
@@ -632,7 +632,7 @@ func (e *Editor) undo() {
 	}
 	tx := e.history[e.applied-1]
 	text := e.composer.Draft().Text
-	if e.restore(inputtext.Draft{Text: text[:tx.at] + tx.removed + text[tx.at+len(tx.inserted):], Selection: tx.before}) {
+	if e.restore(textinput.Draft{Text: text[:tx.at] + tx.removed + text[tx.at+len(tx.inserted):], Selection: tx.before}) {
 		e.applied--
 	}
 }
@@ -643,12 +643,12 @@ func (e *Editor) redo() {
 	}
 	tx := e.history[e.applied]
 	text := e.composer.Draft().Text
-	if e.restore(inputtext.Draft{Text: text[:tx.at] + tx.inserted + text[tx.at+len(tx.removed):], Selection: tx.after}) {
+	if e.restore(textinput.Draft{Text: text[:tx.at] + tx.inserted + text[tx.at+len(tx.removed):], Selection: tx.after}) {
 		e.applied++
 	}
 }
 
-func (e *Editor) restore(d inputtext.Draft) bool {
+func (e *Editor) restore(d textinput.Draft) bool {
 	if err := e.adopt(d); err != nil {
 		e.emit(EditorEvent{Kind: EditorRejected, Err: err})
 		return false
@@ -656,7 +656,7 @@ func (e *Editor) restore(d inputtext.Draft) bool {
 	return true
 }
 
-func (e *Editor) adopt(d inputtext.Draft) error {
+func (e *Editor) adopt(d textinput.Draft) error {
 	composer, err := NewComposer(e.policy, d)
 	if err != nil {
 		return err
@@ -947,9 +947,9 @@ func runeSpanBytes(s string, r key.Range) (start, end int) {
 	return start, start + runeByteOffset(s[start:], r.End-r.Start)
 }
 
-func runeRangeBytes(s string, r key.Range) inputtext.Range {
+func runeRangeBytes(s string, r key.Range) textinput.Range {
 	start, end := runeSpanBytes(s, clampRuneRange(r, utf8.RuneCountInString(s)))
-	return inputtext.Range{Start: start, End: end}
+	return textinput.Range{Start: start, End: end}
 }
 
 func runeByteOffset(s string, runes int) int {
@@ -986,10 +986,10 @@ func sharedSuffixLen(a, b string) int {
 	return i
 }
 
-func editedRange(old, next string) (inputtext.Range, string, error) {
+func editedRange(old, next string) (textinput.Range, string, error) {
 	p := sharedPrefixLen(old, next)
 	s := sharedSuffixLen(old[p:], next[p:])
-	r, err := inputtext.PaintRange(old, inputtext.Range{Start: p, End: len(old) - s})
+	r, err := textinput.PaintRange(old, textinput.Range{Start: p, End: len(old) - s})
 	if err != nil {
 		return r, "", err
 	}

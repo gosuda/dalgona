@@ -11,7 +11,7 @@ import (
 	"gioui.org/layout"
 	"gioui.org/op"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/access"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/document"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
@@ -415,7 +415,7 @@ func (p *pane) rowAccess(gtx layout.Context, index int, row accessibleRow, objec
 		n.TextGroup = access.Parent(gtx)
 		selected := p.selectedSpan(p.order[p.vp.Row(index).Entry], row.block, object.span)
 		if selected.Len() > 0 {
-			n.Selection = inputtext.Range{Start: selected.Start - object.span.Start, End: selected.End - object.span.Start}
+			n.Selection = textinput.Range{Start: selected.Start - object.span.Start, End: selected.End - object.span.Start}
 		}
 	}
 	return n

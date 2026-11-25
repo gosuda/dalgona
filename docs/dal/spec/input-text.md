@@ -3,14 +3,14 @@
 ## I01. Status and authority
 
 This contract defines required input behavior for the Gio GUI, TUI, web client, and daemon.
-The package `internal/dal/inputtext` implements the client-independent rules of I02 through I05, I07, and I10.
+The package `internal/dal/textinput` implements the client-independent rules of I02 through I05, I07, and I10.
 It decodes strict UTF-8 and UTF-16, checks field policies and quotas, converts coordinates, and edits drafts on grapheme boundaries.
 It also implements required-field eligibility, the escape recognition profile of [Ask tool](ask.md), and conversation-search eligibility.
 Its segmentation tables come from the pinned Unicode 18.0.0 data files, and its tests run the upstream GraphemeBreakTest, WordBreakTest, and SentenceBreakTest.
 It also reports the untailored word and sentence boundaries of UAX #29 revision 49 for accessibility text navigation.
-Those boundaries accept any scalar offset and can fall inside a grapheme cluster, so edits still use the cluster boundaries of I05.
-The daemon checks request text with this package at dispatch, as [Protocol](protocol.md#text-inputs) lists. The GUI and web client do not use this package yet.
-This contract is not evidence that those implementations already conform.
+Those boundaries accept any scalar offset, including inside a grapheme cluster. Edits still use the I05 cluster boundaries.
+The daemon checks request text with this package at dispatch, as [Protocol](protocol.md#text-inputs) lists.
+It is specification work, not evidence that those implementations already conform.
 The inspected source baseline is `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 
 The contract covers prompts, question answers, titles, search, review instructions, paths, credentials, completions, pasted text, and recovered drafts.
@@ -108,9 +108,11 @@ Transient platform composition storage MAY contain incomplete encoding. It MUST 
 Committed editing MUST use Unicode 18.0.0 default extended grapheme clusters from [UAX #29, revision 49](https://www.unicode.org/reports/tr29/tr29-49.html).
 This is the selected conformance target. A runtime's advertised Unicode version alone MUST NOT prove conformance.
 Implementation changes MUST pin the segmentation data, algorithm revision, and conformance artifact hashes.
-`internal/dal/inputtext/ucdgen.go` checks the SHA-256 of each pinned Unicode 18.0.0 data file before it writes the property table.
+`internal/dal/textinput/ucdgen.go` checks the SHA-256 of each pinned Unicode 18.0.0 data file before it writes the Go property table and `web/src/lib/text/tables.ts`.
 The conformance test checks the SHA-256 of the vendored GraphemeBreakTest-18.0.0 file.
 The [shared corpus](input-text-cases.json) supplements the upstream [GraphemeBreakTest](https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakTest.txt).
+Go adapters MUST segment with `internal/dal/textinput`, and web adapters MUST segment with `web/src/lib/text`.
+[Text input package](../decisions/text-input.md) records the pinned data, generator, and conformance hashes.
 
 Forward and backward movement MUST cross complete clusters in logical text order.
 Backspace and Delete MUST remove a whole adjacent cluster when there is no selection.
@@ -192,6 +194,8 @@ Font fallback, shaping, and display escaping MUST share that mapping.
 
 Terminals MUST NOT execute escape sequences from user, model, server, or pasted text outside a declared raw-terminal surface.
 Accepted non-layout controls MUST have visible escapes in editable fields and decision details.
+A visible escape MUST read `<U+`, four to six uppercase hexadecimal digits, and `>`.
+An exposed projection escapes every scalar except printable ASCII, and it escapes `<` so distinct sources keep distinct projections.
 LF and TAB MAY use their declared line and tab layout.
 Model-authored question projections retain the explicit display transformations in [Ask tool](ask.md).
 Bidirectional controls MUST be inspectable and isolated from surrounding labels, paths, endpoints, and action names.
@@ -306,24 +310,10 @@ Synthetic composition events and rendered CJK strings MUST NOT substitute for ac
 TUI evidence MUST name supported terminal/IME pairs and test bracketed paste alongside committed text delivery.
 Headless passing tests MUST NOT be reported as visual, terminal-width, or IME acceptance.
 
-## I13. Required implementation changes
-
-The source baseline contains the following migration work.
-These observations identify required changes, not a claim that this documentation changes runtime behavior.
-
-|Source|Observed behavior|Required change|
-|---|---|---|
-|[TUI input](../../../internal/dal/tui/input.go)|Single-line paste keeps its first line. Private-use scalars encode chips.|Reject multiline edits whole and keep chip metadata outside text.|
-|[TUI sanitization](../../../internal/dal/tui/sanitize.go)|Cleanup removes formatting, noncharacters, and supplementary private-use text.|Separate canonical input from safe display projection.|
-|[Web answers](../../../web/src/lib/question.ts), [question card](../../../web/src/lib/components/QuestionCard.svelte)|Answer processing trims and truncates. HTML length uses UTF-16.|Use the shared scalar quota and atomic rejection.|
-|[Web composer](../../../web/src/lib/components/Composer.svelte)|Submission trims typed text.|Separate send eligibility from preserved payload.|
-|[Answer cleanup](../../../internal/dal/tool/ask/clean.go), [results](../../../internal/dal/tool/ask/result.go)|User answers are cleaned and truncated.|Validate exact text before claiming a question outcome.|
-|[RPC connection](../../../internal/dal/rpc/conn.go)|The response dispatcher consumes its waiter before typed answer validation.|Retain pending questions through correction and migrate first-party response ownership.|
-|[Agent submission](../../../internal/dal/agent/entry.go)|Tool preparation precedes complete shared text validation.|Validate before discovery, masking storage, and journal effects.|
-|[CLI input](../../../internal/dal/app/cli.go)|Invalid stdin UTF-8 receives replacement characters.|Reject malformed input and retain the explicitly named newline exception.|
+## I13. Implementation proof
 
 An implementation MUST migrate every affected caller together for each changed boundary.
-Tests MUST detect the listed defects through behavior and independent expected text.
+Tests MUST detect text defects through behavior and independent expected text.
 Source assertions, snapshot updates, and a passing style check MUST NOT count as Unicode behavior proof.
 
 ## I14. Standards and API references

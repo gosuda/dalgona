@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type Role uint8
@@ -69,7 +69,7 @@ type SemanticNode struct {
 	Target       NodeID
 	Reason       string
 	Bounds       image.Rectangle
-	Selection    inputtext.Range
+	Selection    textinput.Range
 	Level        int
 	RowSpan      int
 	ColumnSpan   int
@@ -236,11 +236,11 @@ func (s *SemanticSnapshot) Lookup(id NodeID, revision uint64) (SemanticNode, err
 
 const TextObjectLimit = 64 << 10
 
-func TextObjects(text string) []inputtext.Range {
-	objects := make([]inputtext.Range, 0, len(text)/TextObjectLimit+1)
+func TextObjects(text string) []textinput.Range {
+	objects := make([]textinput.Range, 0, len(text)/TextObjectLimit+1)
 	for start := 0; start < len(text); {
 		end := objectEnd(text, start)
-		objects = append(objects, inputtext.Range{Start: start, End: end})
+		objects = append(objects, textinput.Range{Start: start, End: end})
 		start = end
 	}
 	return objects
@@ -252,7 +252,7 @@ func objectEnd(text string, start int) int {
 	}
 	end := start
 	for {
-		next, err := inputtext.NextBoundary(text, end)
+		next, err := textinput.NextClusterBoundary(text, end)
 		if err != nil || next == end || next-start > TextObjectLimit {
 			break
 		}

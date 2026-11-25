@@ -190,8 +190,6 @@ type keywordRecorder struct {
 	answer func(call int, text string) keywordReply
 }
 
-func (k *keywordRecorder) Respond(context.Context, string, any) error { return nil }
-
 func (k *keywordRecorder) Call(_ context.Context, method string, params, result any) error {
 	if method != "dalgona/keywords/match" {
 		return nil

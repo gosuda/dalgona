@@ -242,12 +242,12 @@ func (p *fakePort) request(link client.Link, ordinal uint64, thread, id string) 
 	p.mu.Lock()
 	ctx := p.contexts[link]
 	p.mu.Unlock()
-	p.owner.Arrived(link, rpc.MethodRequest, params)
 	out := make(chan answer, 1)
 	go func() {
 		result, err := p.owner.Requested(ctx, link, rpc.MethodRequest, params)
 		out <- answer{result: result, err: err}
 	}()
+	synctest.Wait()
 	return out
 }
 

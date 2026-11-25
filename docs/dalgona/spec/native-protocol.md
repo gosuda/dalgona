@@ -67,7 +67,7 @@ Neither panel may fall back to host `fs/*` or `command/exec` for a remote thread
 All members use camelCase. Required members cannot be null.
 An omitted optional member differs from an empty value where the field contract says so.
 Unknown response members remain ignorable under the core compatibility policy.
-The authenticated connection supplies endpoint scope, so `EndpointID` MUST NOT become a redundant wire routing member.
+The authenticated connection supplies endpoint scope. `EndpointID` MUST NOT become a redundant wire routing member.
 Client indexes for wire identifiers and content references MUST include their owning `EndpointID`.
 
 Every text field MUST follow [Input text](../../dal/spec/input-text.md), including exact preservation and validation before effects.
@@ -176,8 +176,7 @@ The new `dalgona/capabilities/read {}` method returns:
 `workspace:1` includes explicit workspace release. `terminal:1` includes resize replay, final-output retention, and attachment detach.
 All listed feature versions are required for the complete native release.
 A missing feature or unsupported checkpoint version makes that endpoint incompatible.
-The GUI MUST mark only that endpoint incompatible and offer its backend update.
-Other endpoint sessions MUST remain unchanged.
+The GUI MUST mark only that endpoint incompatible and offer its backend update, leaving other endpoint sessions unchanged.
 
 Negotiation applies to one connection only.
 Clients that omit the native capability retain existing notifications and response schemas.
@@ -263,16 +262,9 @@ This is an internal ordering boundary, not another wire event or journal record.
 The client applies the concatenated text once and advances to `lastOrdinal`.
 
 A gap, overlap, wrong stream identifier, or impossible range invalidates the live projection.
-The GUI MUST reconnect only that endpoint and obtain a new snapshot.
-Other endpoint streams MUST continue without interruption.
-It MUST NOT guess missing text or continue from `thread/status/changed.seq`.
+The GUI MUST reconnect only that endpoint and obtain a new snapshot without guessing missing text or continuing from `thread/status/changed.seq`. Other endpoint streams MUST continue without interruption.
 
-The native stream uses a fresh connection ordinal, not a durable journal cursor.
-`thread/status/changed.seq` retains its existing status-only meaning.
-Reconnect always establishes a new stream and authoritative snapshot.
-It does not request replay by an old ordinal.
-
-The server writer queue retains the core 4096-message bound and adds a 16 MiB encoded byte bound.
+The native stream uses a fresh connection ordinal, not a durable journal cursor. `thread/status/changed.seq` retains its existing status-only meaning. Reconnect always establishes a new stream and authoritative snapshot without requesting replay by an old ordinal.
 A full queue closes the connection.
 The session worker MUST treat this closure as recoverable state loss with uncertain dispatched mutations.
 
@@ -793,8 +785,7 @@ The server validates every entry before an atomic user-settings write.
 The server uses the settings revision and preserved values from the snapshot that it checks against `expectedVersion`.
 If the settings change before the write, the server returns `stale_revision`.
 Its result is `{version, restartRequiredServers}`.
-The write stops each changed or removed user server before its replacement starts.
-It also stops a workspace server that a new user entry shadows.
+The write stops each changed or removed user server before its replacement starts, and stops a workspace server that a new user entry shadows.
 `restartRequiredServers` names workspace servers that become effective but do not run until their workspace servers restart.
 The next turn in an open thread uses the replacement tools without a model change.
 `remove` applies only to an entry in `settings.toml`. An entry in `config.toml` returns `invalid_params`.

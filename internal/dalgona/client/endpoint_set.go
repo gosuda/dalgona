@@ -66,7 +66,6 @@ type (
 	Observer interface {
 		PhaseChanged(PhaseChange)
 		Notified(link Link, method string, params jsontext.Value)
-		Arrived(link Link, method string, params jsontext.Value)
 		Requested(ctx context.Context, link Link, method string, params jsontext.Value) (any, error)
 	}
 )
@@ -286,6 +285,22 @@ func (s *EndpointSet) CallOperation(ctx context.Context, link Link, op rpc.Opera
 	defer release()
 	op.Endpoint, op.Generation = string(link.Endpoint), uint64(link.Generation)
 	return conn.CallOperation(ctx, op, params, result)
+}
+
+func (s *EndpointSet) Respond(_ context.Context, link Link, requestID string, result any) error {
+	s.mu.Lock()
+	e, err := s.lookupLocked(link.Endpoint)
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	if e.link == nil || e.link.route.link != link {
+		s.mu.Unlock()
+		return fmt.Errorf("endpoint %s is %s: %w", e.spec.Label, e.phase, ErrStaleLink)
+	}
+	route := e.link.route
+	s.mu.Unlock()
+	return route.respond(requestID, result)
 }
 
 func (s *EndpointSet) Close() error {
@@ -608,10 +623,16 @@ func checkCapabilities(caps rpc.Capabilities) error {
 }
 
 type linkRoute struct {
-	link      Link
-	observer  Observer
-	ctx       context.Context
-	announced chan struct{}
+	link       Link
+	observer   Observer
+	ctx        context.Context
+	announced  chan struct{}
+	mu         sync.Mutex
+	responders map[string]keptResponder
+}
+
+type keptResponder struct {
+	respond func(any) error
 }
 
 func (r *linkRoute) Notification(method string, params jsontext.Value) {
@@ -624,7 +645,31 @@ func (r *linkRoute) Request(ctx context.Context, method string, params jsontext.
 	if !r.announcedLive() {
 		return nil, ErrStaleLink
 	}
+	r.keep(ctx)
 	return r.observer.Requested(ctx, r.link, method, params)
+}
+
+func (r *linkRoute) keep(ctx context.Context) {
+	id, err := rpc.ClientRequestID(ctx)
+	if err != nil || id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.responders == nil {
+		r.responders = map[string]keptResponder{}
+	}
+	r.responders[id] = keptResponder{respond: rpc.ClientResponder(ctx)}
+}
+
+func (r *linkRoute) respond(requestID string, result any) error {
+	r.mu.Lock()
+	kept, ok := r.responders[requestID]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("client: unknown request %q", requestID)
+	}
+	return kept.respond(result)
 }
 
 func (r *linkRoute) announcedLive() bool {

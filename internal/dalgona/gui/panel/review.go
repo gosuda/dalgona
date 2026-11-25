@@ -7,8 +7,8 @@ import (
 
 	"gioui.org/layout"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
@@ -24,8 +24,8 @@ const (
 )
 
 var (
-	linePolicy         = inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: lineLimit}}
-	instructionsPolicy = inputtext.Policy{Lines: inputtext.MultiLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: instructionsLimit}}
+	linePolicy         = textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: lineLimit}}
+	instructionsPolicy = textinput.Policy{Lines: textinput.MultiLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: instructionsLimit}}
 	branchGrammar      = regexp.MustCompile(`^[A-Za-z0-9._/][A-Za-z0-9._/-]*$`)
 	commitGrammar      = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
 	reviewKinds        = [...]struct{ kind, label string }{
@@ -63,7 +63,7 @@ func (r *reviewPanel) target() (rpc.ReviewTarget, string) {
 		return checked(rpc.ReviewTarget{Type: r.kind, SHA: r.commit.text()}, r.commit.text(), commitGrammar,
 			"Enter a commit id.", "A commit id is 4 to 64 hexadecimal digits.")
 	case reviewCustom:
-		if inputtext.Blank(r.instructions.text()) {
+		if textinput.VisuallyBlank(r.instructions.text()) {
 			return rpc.ReviewTarget{}, "Enter review instructions."
 		}
 		return rpc.ReviewTarget{Type: r.kind, Instructions: r.instructions.text()}, ""
@@ -72,7 +72,7 @@ func (r *reviewPanel) target() (rpc.ReviewTarget, string) {
 }
 
 func checked(t rpc.ReviewTarget, value string, grammar *regexp.Regexp, blank, malformed string) (rpc.ReviewTarget, string) {
-	if inputtext.Blank(value) {
+	if textinput.VisuallyBlank(value) {
 		return rpc.ReviewTarget{}, blank
 	}
 	if !grammar.MatchString(value) {

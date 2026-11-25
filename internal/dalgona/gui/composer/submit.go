@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/client"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/shell"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/state"
@@ -147,7 +147,7 @@ func (d *Dock) commit(env frame, kind submitKind, typed string) {
 		d.releaseChips()
 		d.draft.chips = nil
 	}
-	if d.setEditor(inputtext.Draft{}) == nil {
+	if d.setEditor(textinput.Draft{}) == nil {
 		d.recall.reset()
 		d.notice.clear()
 	}

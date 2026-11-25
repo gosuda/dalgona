@@ -4,9 +4,7 @@
 
 This suite defines the complete Go and Gio desktop client for dalgona.
 It is a required implementation contract.
-The first implementation stage adds `cmd/dalgona-gui` under the `gui` build tag.
-That stage holds the design tokens, the bundled fonts, the shell layout, and the close confirmation.
-It connects to no daemon yet and certifies no desktop acceptance result.
+The first implementation stage adds `cmd/dalgona-gui` under the `gui` build tag with the design tokens, the bundled fonts, the shell layout, and the close confirmation. It connects to no daemon yet. It certifies no desktop acceptance result.
 
 The source baseline is commit `2c036c60b379e7718255a23ebd2c5079d76ec50c`.
 The design uses the existing [web contract](web.md) and [visual system](../../../DESIGN.md).

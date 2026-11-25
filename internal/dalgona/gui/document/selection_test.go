@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type pages struct {
@@ -217,8 +217,8 @@ func TestFindSearchesEveryDocumentInScope(t *testing.T) {
 func TestUnitConversionsSeparateBytesScalarsAndUTF16(t *testing.T) {
 	d := markdown(t, "units", "**é😀** x")
 	p := positionAt(t, d, " x", 0, After)
-	_, bytes, _ := d.TextOffset(p, inputtext.Bytes)
-	key, units, err := d.TextOffset(p, inputtext.UTF16Units)
+	_, bytes, _ := d.TextOffset(p, textinput.Bytes)
+	key, units, err := d.TextOffset(p, textinput.UTF16Units)
 	if err != nil || bytes != len("é😀") || units != 3 || key != d.Block(0).Key {
 		t.Fatalf("offsets bytes %d utf16 %d key %+v (%v)", bytes, units, key, err)
 	}

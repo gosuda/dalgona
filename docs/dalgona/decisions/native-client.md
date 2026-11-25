@@ -59,9 +59,7 @@ Two complete process arrangements were compared against the current source.
 |Remote behavior|Uses the bridge's existing remote selection.|Moves that same remote selection into the shared package.|
 
 The selected arrangement is shared Go lifecycle code with direct IPC.
-The complete implementation request justifies extracting the existing policy once.
-This choice avoids adding a permanent proxy process solely for the desktop.
-It also gives the GUI typed restart, trust, compatibility, and connection failures.
+This choice avoids adding a permanent proxy process solely for the desktop and gives the GUI typed restart, trust, compatibility, and connection failures.
 
 The alternative contributes a constraint rather than an extra mode.
 The existing app-server behavior remains a compatibility consumer of the extracted policy.
@@ -96,7 +94,7 @@ The implementation must update `.golangci.yml` in the same change that introduce
 The `lifecycle-client` rule keeps `client` free of the agent core, journal, tools, server handlers, the daemon runtime, and thread runner binding.
 Core packages must continue to reject presentation imports.
 The GUI must not import journal or agent internals to bypass the wire.
-The `gui-imports` rule holds `internal/dalgona/gui` to `internal/dal/rpc`, `client`, `inputtext`, and the GUI packages.
+The `gui-imports` rule holds `internal/dalgona/gui` to `internal/dal/rpc`, `client`, `textinput`, and the GUI packages.
 The `gui-terminal-imports` rule also lets `internal/dalgona/gui/terminal` and the `manage` tests import `internal/dalgona/vtstate`.
 The `gui-root-imports` rule also lets `cmd/dalgona-gui` import `internal/dal/config` and `internal/dalgona/doctor`.
 The `gui-root-test-imports` rule also lets the `cmd/dalgona-gui` tests import `internal/dal/app` and `internal/dal/rpcserver` to start a daemon in the same process.

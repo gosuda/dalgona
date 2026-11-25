@@ -12,7 +12,7 @@ An inline text or raw JSON payload MUST NOT exceed 64 KiB. A larger payload MUST
 {"blob":"<64 lowercase hex>","bytes":123456}
 ```
 
-A field MUST NOT contain both an inline value and a blob reference. `prompt.base.content` and `memory.updated.content` MUST remain inline and MUST NOT use a blob reference. Their event rows state their size limits. `tool.completed.output` MUST use `spill` instead of a blob reference. Its spill object MUST contain `path`, `bytes`, and `sha256`. A new spill stores the complete masked output as the blob `blobs/<sha256>`, also for exec output that the runner keeps. Its `bytes` and `sha256` describe that masked blob, which are the bytes that paged output reads serve. With a spill, the output is a projection: at most 64 KiB of content plus the truncation notice, and in total at most 68 KiB.
+A field MUST NOT contain both an inline value and a blob reference. `prompt.base.content` and `memory.updated.content` MUST remain inline and MUST NOT use a blob reference. Their event rows state their size limits. `tool.completed.output` MUST use `spill` instead of a blob reference. Its spill object MUST contain `path`, `bytes`, and `sha256`. A new spill stores the complete masked output as the blob `blobs/<sha256>`, also for exec output that the runner keeps. Its `bytes` and `sha256` describe that masked blob served by paged output reads. With a spill, the output is a projection: at most 64 KiB of content plus the truncation notice, and in total at most 68 KiB.
 
 ## Event records
 

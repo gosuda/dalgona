@@ -14,7 +14,7 @@ The command MUST NOT start a daemon. The command MUST NOT run a command in the s
 
 Every detail MUST pass through the secret masker of the stored credentials. Every control character in a detail MUST become a space. A detail longer than 400 characters MUST end with `...`.
 
-The command and the `dalgona/diagnostics/run` protocol method use one row engine in `doctor.Diagnose`. The method returns the same rows in the same order and the same exit code. The method writes no output and no file.
+The command and the `dalgona/diagnostics/run` protocol method use one row engine in `doctor.Diagnose`. The method returns the same rows, order, and exit code. The method writes no output and no file.
 
 ## Modes
 

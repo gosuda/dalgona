@@ -20,9 +20,9 @@ import (
 	"github.com/gosuda/dalgona/internal/dal/auth"
 	"github.com/gosuda/dalgona/internal/dal/auth/oauth"
 	"github.com/gosuda/dalgona/internal/dal/config"
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
 	"github.com/gosuda/dalgona/internal/dal/rpcserver"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/mcp"
 	"github.com/gosuda/dalgona/internal/dalgona/report"
 )
@@ -898,8 +898,8 @@ func checkCallbackValue(flow string, mode jsontext.Value, callback bool, require
 }
 
 func checkAuthText(value string, limit int) error {
-	policy := inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Bytes, Max: limit}}
-	if err := inputtext.CheckRequest([]inputtext.Item{{Field: "response.value", Policy: policy, Text: value}}); err != nil {
+	policy := textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Bytes, Max: limit}}
+	if err := textinput.CheckRequest([]textinput.Item{{Field: "response.value", Policy: policy, Text: value}}); err != nil {
 		return nativeFailure(rpc.ErrorInvalidParams, err.Error())
 	}
 	if value == "" {

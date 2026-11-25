@@ -10,13 +10,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (m *model) executeSlash(name, argument string) tea.Cmd {
 	if cmd, handled := m.machineSlashCommand(name, argument); handled {
 		return cmd
 	}
-	if m.machineOffline() && name != "help" {
+	if name != "help" && m.machineOffline() {
 		return nil
 	}
 	if cmd, handled := m.slashPanelCommand(name, argument); handled {
@@ -267,41 +268,59 @@ const (
 	slashUnknown
 )
 
-func parseSlash(text string) (name, arg string, kind slashKind) {
-	if prompt, ok := strings.CutPrefix(text, "//"); ok {
-		return "", "/" + prompt, slashPrompt
+func (c editor) slashParts() (name, arg string, kind slashKind) {
+	start := slashStart(c.text)
+	if start < 0 {
+		return "", c.Expanded(), slashPrompt
 	}
-	name, arg, _ = strings.Cut(strings.TrimPrefix(text, "/"), " ")
+	if len(c.text) > start+1 && c.text[start+1] == '/' {
+		return "", c.expandRange(0, start) + c.expandRange(start+1, len(c.text)), slashPrompt
+	}
+	end := slashTokenEnd(c, start+1)
+	name = string(c.text[start+1 : end])
 	switch {
 	case strings.Contains(name, "/"):
-		return "", text, slashPrompt
-	case slices.ContainsFunc(commands, func(c command) bool { return c.name == name }):
-		return name, arg, slashCommand
-	default:
+		return "", c.Expanded(), slashPrompt
+	case !slices.ContainsFunc(commands, func(c command) bool { return c.name == name }):
 		return name, "", slashUnknown
 	}
+	rest, ok := slashArgument(c.text[end:])
+	if !ok {
+		return name, "", slashUnknown
+	}
+	return name, c.expandRange(len(c.text)-len(rest), len(c.text)), slashCommand
 }
 
-func (c editor) slashParts() (name, arg string, kind slashKind) {
-	start := c.slashStart()
-	end := c.slashEnd(start)
-	word := string(c.text[start:end])
-	name, _, kind = parseSlash(word)
-	switch kind {
-	case slashCommand:
-		if end < len(c.text) && c.text[end] == ' ' && !c.hasChipsAt(end) {
-			end++
+func slashTokenEnd(c editor, from int) int {
+	for i := from; i < len(c.text); i++ {
+		if textinput.IsWhiteSpace(c.text[i]) || c.hasChipsAt(i) {
+			return i
 		}
-		return name, c.expandRange(end, len(c.text)), kind
-	case slashPrompt:
-		if strings.HasPrefix(word, "//") {
-			return "", string(c.text[:start]) + c.expandRange(start+1, len(c.text)), kind
-		}
-		return "", c.Expanded(), kind
-	case slashUnknown:
-		return name, "", kind
 	}
-	return name, "", kind
+	return len(c.text)
+}
+
+func slashArgument(rest []rune) ([]rune, bool) {
+	switch {
+	case len(rest) == 0:
+		return nil, true
+	case rest[0] == ' ':
+		rest = rest[1:]
+	case textinput.IsWhiteSpace(rest[0]):
+		return nil, false
+	}
+	if textinput.Blank(string(rest)) {
+		return nil, true
+	}
+	return rest, true
+}
+
+func slashStart(text []rune) int {
+	start := slices.IndexFunc(text, func(r rune) bool { return !textinput.IsWhiteSpace(r) })
+	if start < 0 || text[start] != '/' {
+		return -1
+	}
+	return start
 }
 
 func (c editor) slashStart() int {

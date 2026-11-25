@@ -2,16 +2,16 @@
 
 package platform
 
-import "github.com/gosuda/dalgona/internal/dal/inputtext"
+import "github.com/gosuda/dalgona/internal/dal/textinput"
 
-func (v textView) length(unit inputtext.Unit) (int, error) {
+func (v textView) length(unit textinput.Unit) (int, error) {
 	if len(v.parts()) == 0 {
 		return 0, nil
 	}
 	return v.offset(v.whole().End, unit)
 }
 
-func (v textView) unitOffsets(r TextRange, unit inputtext.Unit) (int, int, error) {
+func (v textView) unitOffsets(r TextRange, unit textinput.Unit) (int, int, error) {
 	start, err := v.offset(r.Start, unit)
 	if err != nil {
 		return 0, 0, err
@@ -20,7 +20,7 @@ func (v textView) unitOffsets(r TextRange, unit inputtext.Unit) (int, int, error
 	return start, end, err
 }
 
-func (v textView) readUnits(start, end int, unit inputtext.Unit) (string, error) {
+func (v textView) readUnits(start, end int, unit textinput.Unit) (string, error) {
 	from, err := v.locate(start, unit, true)
 	if err != nil {
 		return "", err

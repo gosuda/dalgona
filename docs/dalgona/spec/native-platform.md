@@ -193,7 +193,7 @@ If that path cannot select the required axes, the build MUST generate static ins
 The packaged client MUST not require a font-conversion tool.
 Gio v0.10.3 selects no variable font axis.
 `just desktop-fonts` therefore makes static Bricolage Grotesque instances at 600, 650, and 700 and Hanken Grotesk instances at 400, 600, and 700.
-The Bricolage Grotesque instances use optical size 14 and width 100, because one static face serves every text size.
+The Bricolage Grotesque instances use optical size 14 and width 100.
 Pretendard ships unmodified static faces at 400, 600, and 700, so a 650 request uses the nearest Pretendard face.
 `internal/dalgona/gui/platform/fontfaces/SHA256SUMS` records the digest of each bundled face, and `THIRD_PARTY_NOTICES.md` records each source, license, and version.
 Changing the font catalog MUST invalidate shaped geometry without moving the document's logical anchor.
@@ -383,7 +383,6 @@ Actions MUST revalidate their target revision before changing state.
 Stale node identifiers MUST return an unavailable-element result rather than act on a reused identifier.
 
 The semantic model in `internal/dalgona/gui/platform` maps each role to one Gio semantic class.
-The following table is the contract for that mapping.
 
 | Semantic role | Gio class |
 |---|---|
@@ -470,8 +469,7 @@ The snapshot adapter MUST preserve both screens, scrollback, cursor, modes, marg
 The public VT emulator API MUST not be assumed to provide that complete serialization.
 Required checkpoint support MUST live outside the GUI package so the daemon does not import presentation code.
 A mismatch of the snapshot version or the engine version MUST fail explicitly and request a compatible attachment.
-If the complete scrollback does not fit in the 8 MiB checkpoint body, the checkpoint MUST drop the oldest scrollback rows.
-The checkpoint MUST report the number of dropped rows in `droppedScrollbackRows`.
+If the complete scrollback does not fit in the 8 MiB checkpoint body, the checkpoint MUST drop the oldest scrollback rows. It MUST report the number dropped in `droppedScrollbackRows`.
 The GUI MUST show that number at the retained-history boundary.
 
 Closing a window with active terminals MUST explain which terminal sessions will close and obtain the component's close decision.

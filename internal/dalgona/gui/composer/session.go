@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -32,7 +32,7 @@ func (g interruptGuard) armed(now time.Time) bool { return now.Before(g.until) }
 
 type recall struct {
 	browsing int
-	saved    inputtext.Draft
+	saved    textinput.Draft
 }
 
 func recallHistory(prompts, sent []string) []string {
@@ -52,35 +52,35 @@ func recallHistory(prompts, sent []string) []string {
 
 func (r *recall) idle() bool { return r.browsing < 0 }
 
-func (r *recall) older(history []string, current inputtext.Draft) (inputtext.Draft, bool) {
+func (r *recall) older(history []string, current textinput.Draft) (textinput.Draft, bool) {
 	at := r.browsing - 1
 	if r.idle() {
 		at = len(history) - 1
 	}
 	if at < 0 {
-		return inputtext.Draft{}, false
+		return textinput.Draft{}, false
 	}
 	if r.idle() {
 		r.saved = current
 	}
 	r.browsing = at
-	return inputtext.Draft{Text: history[at]}, true
+	return textinput.Draft{Text: history[at]}, true
 }
 
-func (r *recall) newer(history []string) (inputtext.Draft, bool) {
+func (r *recall) newer(history []string) (textinput.Draft, bool) {
 	if r.idle() {
-		return inputtext.Draft{}, false
+		return textinput.Draft{}, false
 	}
 	r.browsing++
 	if r.browsing < len(history) {
-		return inputtext.Draft{Text: history[r.browsing]}, true
+		return textinput.Draft{Text: history[r.browsing]}, true
 	}
 	saved := r.saved
 	r.reset()
 	return saved, true
 }
 
-func (r *recall) reset() { r.browsing, r.saved = -1, inputtext.Draft{} }
+func (r *recall) reset() { r.browsing, r.saved = -1, textinput.Draft{} }
 
 func shellChipName(n, exit, lines int, truncated bool) string {
 	unit := "lines"

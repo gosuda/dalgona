@@ -1,4 +1,4 @@
-import { parseQuestionRequest, parseQuestionWarning } from "./question";
+import { parseQuestionRequest } from "./question";
 import type {
 	ApprovalRequest,
 	JsonValue,
@@ -222,34 +222,22 @@ export class RpcClient {
 		}
 	}
 
-	private onNotificationMessage(
-		method: string,
-		params: JsonValue | undefined,
-	): void {
-		const warning = method === "warning" ? parseQuestionWarning(params) : null;
-		if (warning !== null) {
-			this.handlers.onQuestionWarning(warning);
-			return;
-		}
-		try {
-			const notification = parseNotification({ method, params });
-			if (notification !== null) {
-				this.handlers.onNotification(notification);
-			}
-		} catch (error) {
-			this.handlers.onError(
-				error instanceof Error ? error.message : "invalid notification",
-			);
-		}
-	}
-
 	private onIncoming(
 		method: string,
 		id: JsonValue | undefined,
 		params: JsonValue | undefined,
 	): void {
 		if (id === undefined) {
-			this.onNotificationMessage(method, params);
+			try {
+				const notification = parseNotification({ method, params });
+				if (notification !== null) {
+					this.handlers.onNotification(notification);
+				}
+			} catch (error) {
+				this.handlers.onError(
+					error instanceof Error ? error.message : "invalid notification",
+				);
+			}
 			return;
 		}
 		if (typeof id !== "number" && typeof id !== "string") {

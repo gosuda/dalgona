@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func rowsOf(kind Kind, text string) ([]Span, bool) {
@@ -58,7 +58,7 @@ func rowEnd(text string, start, limit int) int {
 	for !utf8.RuneStart(line[cut]) {
 		cut--
 	}
-	grapheme, err := inputtext.PaintRange(line, inputtext.Range{Start: cut, End: cut})
+	grapheme, err := textinput.PaintRange(line, textinput.Range{Start: cut, End: cut})
 	if err != nil {
 		return limit
 	}

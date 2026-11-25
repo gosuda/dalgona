@@ -20,7 +20,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/document"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/giodraw"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/platform"
@@ -372,7 +372,7 @@ func (p *pane) resolve(pos document.Position) (spot, bool) {
 	if !ok {
 		return spot{}, false
 	}
-	key, t, err := doc.TextOffset(pos, inputtext.Bytes)
+	key, t, err := doc.TextOffset(pos, textinput.Bytes)
 	if err != nil {
 		return spot{}, false
 	}

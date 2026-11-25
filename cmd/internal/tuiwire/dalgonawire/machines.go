@@ -99,8 +99,6 @@ func (o observer) Notified(link client.Link, method string, params jsontext.Valu
 	o.events.Notify(terminalLink(link), method, params)
 }
 
-func (observer) Arrived(client.Link, string, jsontext.Value) {}
-
 func (o observer) Requested(ctx context.Context, link client.Link, method string, params jsontext.Value) (any, error) {
 	return o.events.Request(ctx, terminalLink(link), method, params)
 }

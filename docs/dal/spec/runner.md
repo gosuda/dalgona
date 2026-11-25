@@ -155,14 +155,14 @@ File methods MUST be `ReadFile`, `WriteFile`, `Stat`, `ReadDir`, and `Remove`. `
 `Local`, `Remote`, and the dalgona box runner implement `Workspace(ctx, WorkspaceRequest)`.
 The request names an operation, an absolute root, and slash-separated relative paths.
 The operations are `stat`, `list`, `read`, `stage`, `publish`, `discard`, `mkdir`, `rename`, and `remove`.
-`Local` opens the root once as a Go `os.Root`. It reuses the pinned root for each request. Every path step stays inside the root, so a symbolic link that leaves the root fails with `ErrWorkspaceEscape`.
+`Local` opens the root once as a Go `os.Root`. It reuses that pinned root for each request, and a symlink leaving the root fails with `ErrWorkspaceEscape`.
 `read` opens without blocking, requires a regular file, returns at most 1 MiB, and fails with `StaleRevisionError` when the expected or post-read revision differs.
 `stage` writes a `.dalgona-upload-*` file with mode 0600 beside the target. `publish` checks the target revision and keeps the mode of an existing regular file, or uses 0644. It then renames the staging file over the target and syncs the parent directory.
 A failed `publish` removes its staging file. `rename` without `replace` refuses an existing destination. `remove` without `recursive` refuses a nonempty directory. `mkdir`, `rename`, and `remove` refuse the root itself.
 `list` returns at most 10000 entries sorted by name and skips names that are not valid UTF-8.
 The box runner retries a read operation once on a dead connection and never retries a mutation.
 
-An `exec` projection MUST keep the tail. A projection MUST retain masked output of 64 KiB or less whole.
+An `exec` projection MUST keep the tail, retaining masked output of 64 KiB or less whole.
 If the raw output exceeds 64 KiB, the daemon MUST read the recorded output in bounded pages.
 It MUST [mask](secrets.md) the pages as one logical input before projecting them.
 The projection MUST retain at most the last 64 KiB of masked output. The cut MUST fall on a UTF-8 rune boundary.
@@ -178,7 +178,7 @@ The daemon MUST mask that prefix before it records or publishes it.
 Every referenced placeholder MUST be recoverable before publication.
 A possible match can depend on later bytes, including bytes beyond a runner page.
 The daemon MUST defer the uncertain suffix to verified completion or spill output.
-It MUST NOT disable ordinary verified live output merely because masking is enabled.
+It MUST NOT disable ordinary verified live output because masking is enabled.
 Prefix verification MUST use the authenticated masking view at release.
 A changed masking view or a failed reload MUST stop further live deltas for that call.
 Completion MUST retain its normal credential reload behavior.

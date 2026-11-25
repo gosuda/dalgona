@@ -138,14 +138,6 @@ func (s *localMachine) Call(ctx context.Context, link Link, method string, param
 	return conn.Call(ctx, method, params, result)
 }
 
-func (s *localMachine) Respond(ctx context.Context, link Link, requestID string, result any) error {
-	conn, err := s.connection(link)
-	if err != nil {
-		return err
-	}
-	return conn.Respond(ctx, requestID, result)
-}
-
 func (s *localMachine) Notification(method string, params jsontext.Value) {
 	select {
 	case <-s.announced:

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func validTree() []SemanticNode {
@@ -114,7 +114,7 @@ func TestTextObjectsSplitAnOversizedGraphemeAtScalars(t *testing.T) {
 	text := "e" + strings.Repeat("\u0301", 40000)
 	checkTextObjects(t, text, []int{limit - 1, len(text)})
 	for _, o := range TextObjects(text) {
-		if _, err := inputtext.DecodeUTF8([]byte(text[o.Start:o.End])); err != nil {
+		if _, err := textinput.DecodeUTF8([]byte(text[o.Start:o.End])); err != nil {
 			t.Fatalf("object %+v splits a scalar", o)
 		}
 	}

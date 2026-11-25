@@ -45,7 +45,7 @@ describe("composer text", () => {
 		});
 	});
 
-	test("a leading ! is a shell line that keeps the rest exactly", () => {
+	test("a leading ! is a shell line that keeps its exact text", () => {
 		expect(parseComposerText("!  ls -la ")).toEqual({
 			kind: "shell",
 			command: "  ls -la ",

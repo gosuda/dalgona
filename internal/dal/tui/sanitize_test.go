@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func TestSanitizeTextStripsControlsAndEscapes(t *testing.T) {
@@ -49,7 +49,7 @@ func TestRenderSettledItemStripsEscapes(t *testing.T) {
 	}
 }
 
-func TestRenderApprovalStripsEscapes(t *testing.T) {
+func TestRenderApprovalShowsEveryEscape(t *testing.T) {
 	t.Parallel()
 	m := newModel(nil, Options{}, nil)
 	m.screen.width = 80
@@ -60,7 +60,7 @@ func TestRenderApprovalStripsEscapes(t *testing.T) {
 	if strings.ContainsAny(plain, "\x1b\x07") {
 		t.Fatalf("approval view kept escapes: %q", view)
 	}
-	for _, want := range []string{"│   $ secret echo hi", "│   reason: whynot"} {
+	for _, want := range []string{"│   $ <U+001B>[8msecret<U+001B>[0m echo hi", "│   reason: why<U+001B>]0;t<U+0007>not"} {
 		found := false
 		for line := range strings.SplitSeq(plain, "\n") {
 			if strings.TrimRight(line, " ") == want {
@@ -112,7 +112,7 @@ func TestDisplayTextIsIdempotent(t *testing.T) {
 
 func TestContainsNUL(t *testing.T) {
 	t.Parallel()
-	if !errors.Is(fieldPolicy.Check("a\x00b"), inputtext.DisallowedControl) {
+	if !errors.Is(fieldPolicy.Check("a\x00b"), textinput.DisallowedControl) {
 		t.Error("field policy missed an embedded NUL")
 	}
 	if err := fieldPolicy.Check("plain"); err != nil {

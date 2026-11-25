@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func TestAppKitPasteboardDecodesEachFormat(t *testing.T) {
@@ -33,8 +33,8 @@ func TestAppKitPasteboardRefusesUnsafeContent(t *testing.T) {
 		data   []byte
 		want   error
 	}{
-		{"text with NUL", ClipboardText, []byte("a\x00b"), inputtext.DisallowedControl},
-		{"malformed UTF-8", ClipboardText, []byte{'a', 0xC0, 0x80}, inputtext.InvalidEncoding},
+		{"text with NUL", ClipboardText, []byte("a\x00b"), textinput.DisallowedControl},
+		{"malformed UTF-8", ClipboardText, []byte{'a', 0xC0, 0x80}, textinput.InvalidEncoding},
 		{"oversize text", ClipboardText, make([]byte, transferLimit+1), ErrTransferTooLarge},
 		{"remote URL", ClipboardFiles, []byte("file:///tmp/a\r\nhttps://example.com/b\r\n"), ErrNotLocalFile},
 		{"empty image", ClipboardImage, nil, ErrUnsupportedPaste},

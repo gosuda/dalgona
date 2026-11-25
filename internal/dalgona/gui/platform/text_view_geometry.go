@@ -5,7 +5,7 @@ package platform
 import (
 	"image"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func (v textView) rangeBoxes(r TextRange) []image.Rectangle {
@@ -23,8 +23,8 @@ func (v textView) rangeBoxes(r TextRange) []image.Rectangle {
 	return boxes
 }
 
-func (r TextRange) portion(n SemanticNode) inputtext.Range {
-	span := inputtext.Range{End: len(n.Value)}
+func (r TextRange) portion(n SemanticNode) textinput.Range {
+	span := textinput.Range{End: len(n.Value)}
 	if r.Start.Node == n.ID {
 		span.Start = max(0, r.Start.offset(n))
 	}

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 func uiaTestSnapshot(t *testing.T, revision uint64, focus NodeID, nodes ...SemanticNode) *SemanticSnapshot {
@@ -319,7 +319,7 @@ func TestUIAChangesRaiseMicrosoftLearnEvents(t *testing.T) {
 			{kind: uiaPropertyChange, node: "name", id: 30045, previous: uiaText("Ada"), next: uiaText("Ada L")},
 			{kind: uiaRaise, node: "name", id: 20015},
 		}},
-		{"selection", edit(func(n []SemanticNode) []SemanticNode { n[1].Selection = inputtext.Range{Start: 1, End: 3}; return n }), "name", []uiaEvent{
+		{"selection", edit(func(n []SemanticNode) []SemanticNode { n[1].Selection = textinput.Range{Start: 1, End: 3}; return n }), "name", []uiaEvent{
 			{kind: uiaRaise, node: "name", id: 20014},
 		}},
 		{"toggle", edit(func(n []SemanticNode) []SemanticNode { n[2].Checked = true; return n }), "name", []uiaEvent{

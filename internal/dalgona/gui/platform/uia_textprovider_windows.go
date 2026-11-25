@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const (
@@ -21,11 +21,11 @@ type uiaTextRange struct {
 	refs    uiaReferences
 	element *uiaElement
 	mu      sync.Mutex
-	span    inputtext.Range
+	span    textinput.Range
 	logical TextRange
 }
 
-func newUIATextRange(el *uiaElement, span inputtext.Range) *uiaTextRange {
+func newUIATextRange(el *uiaElement, span textinput.Range) *uiaTextRange {
 	r := &uiaTextRange{element: el, span: span}
 	r.iface = uiaInterface{&uiaCallbacks.textRange[0], r}
 	return r
@@ -42,13 +42,13 @@ func (r *uiaTextRange) query(iid *windows.GUID) *uiaInterface {
 	return nil
 }
 
-func (r *uiaTextRange) current() inputtext.Range {
+func (r *uiaTextRange) current() textinput.Range {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.span
 }
 
-func (r *uiaTextRange) store(span inputtext.Range) {
+func (r *uiaTextRange) store(span textinput.Range) {
 	r.mu.Lock()
 	r.span = span
 	r.mu.Unlock()
@@ -58,7 +58,7 @@ type uiaRangeQuery struct {
 	uiaQuery
 	rng     *uiaTextRange
 	text    string
-	span    inputtext.Range
+	span    textinput.Range
 	logical TextRange
 }
 
@@ -95,10 +95,10 @@ func uiaEnterText(this *uiaInterface) (uiaQuery, uintptr) {
 	return q, uiaUnavailable
 }
 
-func (rq uiaRangeQuery) peer(p uintptr) (inputtext.Range, bool) {
+func (rq uiaRangeQuery) peer(p uintptr) (textinput.Range, bool) {
 	other, _ := uiaLookup(p).(*uiaTextRange)
 	if other == nil || other.element != rq.rng.element {
-		return inputtext.Range{}, false
+		return textinput.Range{}, false
 	}
 	return uiaSnapRange(rq.text, other.current()), true
 }
@@ -107,12 +107,12 @@ func (rq uiaRangeQuery) readOnly() bool {
 	return rq.node.Role != RoleTextField || rq.node.Disabled
 }
 
-func (q uiaQuery) handOutRange(out *uintptr, span inputtext.Range) uintptr {
+func (q uiaQuery) handOutRange(out *uintptr, span textinput.Range) uintptr {
 	r := newUIATextRange(q.element, span)
 	return uiaHandOut(out, r, &r.iface)
 }
 
-func (q uiaQuery) rangeArray(out *uintptr, span inputtext.Range) uintptr {
+func (q uiaQuery) rangeArray(out *uintptr, span textinput.Range) uintptr {
 	r := newUIATextRange(q.element, span)
 	return uiaObjectArray([]*uiaInterface{&r.iface}, out)
 }
@@ -144,7 +144,7 @@ func uiaTextVisibleRanges(this *uiaInterface, out *uintptr) uintptr {
 	if q.node.TextContainer {
 		return q.visibleRanges(out)
 	}
-	return q.rangeArray(out, inputtext.Range{End: len(q.node.Value)})
+	return q.rangeArray(out, textinput.Range{End: len(q.node.Value)})
 }
 
 func uiaRangeFromChild(this *uiaInterface, child uintptr, out *uintptr) uintptr {
@@ -184,7 +184,7 @@ func uiaRangeFromPoint(this *uiaInterface, x, y uintptr, out *uintptr) uintptr {
 		return q.handOutLogical(out, TextRange{Start: point, End: point})
 	}
 	at := uiaPointOffset(q.node, p)
-	return q.handOutRange(out, inputtext.Range{Start: at, End: at})
+	return q.handOutRange(out, textinput.Range{Start: at, End: at})
 }
 
 func uiaDocumentRange(this *uiaInterface, out *uintptr) uintptr {
@@ -202,7 +202,7 @@ func uiaDocumentRange(this *uiaInterface, out *uintptr) uintptr {
 	if q.node.TextGroup != "" {
 		return q.handOutLogical(out, partRange(q.node.ID))
 	}
-	return q.handOutRange(out, inputtext.Range{End: len(q.node.Value)})
+	return q.handOutRange(out, textinput.Range{End: len(q.node.Value)})
 }
 
 func uiaSupportedTextSelection(this *uiaInterface, out *int32) uintptr {

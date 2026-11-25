@@ -7,17 +7,17 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
 	"github.com/gosuda/dalgona/internal/dal/rpc"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 const keywordMatchLimit = 64 << 10
 
 type KeywordSpan struct {
 	Word  string
-	Bytes inputtext.Range
-	Runes inputtext.Range
-	Paint inputtext.Range
+	Bytes textinput.Range
+	Runes textinput.Range
+	Paint textinput.Range
 }
 
 func KeywordSpans(text string, matches []rpc.KeywordMatch) ([]KeywordSpan, bool) {
@@ -28,11 +28,11 @@ func KeywordSpans(text string, matches []rpc.KeywordMatch) ([]KeywordSpan, bool)
 	runes := runeCounter{text: text}
 	previous := 0
 	for _, m := range matches {
-		r := inputtext.Range{Start: m.ByteRange.Start, End: m.ByteRange.End}
+		r := textinput.Range{Start: m.ByteRange.Start, End: m.ByteRange.End}
 		if r.Start < previous || r.End <= r.Start {
 			return nil, false
 		}
-		paint, err := inputtext.PaintRange(text, r)
+		paint, err := textinput.PaintRange(text, r)
 		if err != nil {
 			return nil, false
 		}
@@ -41,8 +41,8 @@ func KeywordSpans(text string, matches []rpc.KeywordMatch) ([]KeywordSpan, bool)
 		spans = append(spans, KeywordSpan{
 			Word:  m.Word,
 			Bytes: r,
-			Runes: inputtext.Range{Start: start, End: end},
-			Paint: inputtext.Range{Start: paintStart, End: runes.at(paint.End)},
+			Runes: textinput.Range{Start: start, End: end},
+			Paint: textinput.Range{Start: paintStart, End: runes.at(paint.End)},
 		})
 		previous = r.End
 	}

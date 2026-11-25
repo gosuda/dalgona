@@ -19,7 +19,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 	"github.com/gosuda/dalgona/internal/dalgona/gui/clipboardimage"
 )
 
@@ -136,9 +136,9 @@ func TestWindowsClipboardKeepsExactUnicodeText(t *testing.T) {
 		units []uint16
 		want  error
 	}{
-		{"text after a NUL", []uint16{'a', 0, 'b', 0}, inputtext.DisallowedControl},
-		{"unpaired high surrogate", []uint16{'a', 0xD83D, 'b', 0}, inputtext.InvalidEncoding},
-		{"lone low surrogate", []uint16{0xDE00, 0}, inputtext.InvalidEncoding},
+		{"text after a NUL", []uint16{'a', 0, 'b', 0}, textinput.DisallowedControl},
+		{"unpaired high surrogate", []uint16{'a', 0xD83D, 'b', 0}, textinput.InvalidEncoding},
+		{"lone low surrogate", []uint16{0xDE00, 0}, textinput.InvalidEncoding},
 	}
 	for _, tc := range refused {
 		writeTestClipboard(t, unicodeTextEntry(tc.units...))

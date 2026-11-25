@@ -43,7 +43,7 @@ A triage job starts from an open issue. The issue must be created at or after th
 
 Before admission the service reads the issue events through the bot client. A closed issue admits no job. A fix job needs a current `daltoki` label. The last actor that applied the label MUST have push permission. A failed read, an unknown labeler, or a missing permission admits no job.
 
-The delivery receipt and its job record use one journal append. Each issue gets at most one triage job. Each issue has at most one fix job that is not blocked, completed, or failed. The job id derives from the delivery key, so a replayed delivery cannot create a second job.
+The delivery receipt and its job record use one journal append. Each issue gets at most one triage job. Each issue has at most one fix job that is not blocked, completed, or failed. The job id derives from the delivery key, preventing a replayed delivery from creating a second job.
 
 ## Dispatch and budgets
 

@@ -1250,6 +1250,27 @@ function requestResolvedNotice(params: Members): AppNotification | null {
 	};
 }
 
+function warningNotice(params: Members): AppNotification | null {
+	const { threadId, requestId, field, reason, message } = params;
+	if (
+		typeof threadId !== "string" ||
+		(typeof requestId !== "string" && typeof requestId !== "number") ||
+		typeof field !== "string" ||
+		typeof reason !== "string" ||
+		typeof message !== "string"
+	) {
+		return null;
+	}
+	return {
+		type: "requestWarning",
+		threadId,
+		requestId,
+		field,
+		reason,
+		message,
+	};
+}
+
 function loginCompletedNotice(params: Members): AppNotification | null {
 	const success = params["success"];
 	if (typeof success !== "boolean") {
@@ -1417,6 +1438,10 @@ const notifications: Readonly<Record<string, NotificationSpec>> = {
 	"account/login/completed": {
 		required: ["success"],
 		parse: loginCompletedNotice,
+	},
+	warning: {
+		required: ["message"],
+		parse: warningNotice,
 	},
 };
 

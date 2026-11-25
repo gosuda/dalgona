@@ -123,7 +123,7 @@ It MUST NOT set `service`, `image`, `template`, or `box_id`.
 
 The `url` MUST use `https` or `wss`, include a host, and exclude user information, a query, and a fragment.
 The client MUST join `/rpc` to the configured URL path.
-Both schemes select the same TLS-protected relay transport.
+Both schemes use the same TLS-protected relay transport.
 The connection MUST use TLS 1.3 as its minimum version and MUST NOT follow redirects.
 Trust MUST come from the system root pool plus the configured `tls_ca_file` when set.
 The client MUST read the token from a regular file with private permissions equivalent to mode 0600.

@@ -1,11 +1,11 @@
 # TUI
 
-The TUI is a protocol client. It MUST import only `internal/dal/rpc` and `internal/dal/inputtext` from this module, as [the input text decision](../decisions/input-text-sharing.md) records.
+The TUI is a protocol client. It MUST import only `internal/dal/rpc` and `internal/dal/textinput` from this module, as [the input text decision](../decisions/text-input.md) records.
 
 Text input MUST follow [input-text.md](input-text.md).
-That contract defines text preservation, grapheme editing, limits, and the distinction between input and display.
-The TUI applies field policy, grapheme boundaries, the answer quota, and eligibility checks through `internal/dal/inputtext`.
-No measured emulator geometry fixture under I09 and no real terminal and IME evidence under I12 exist yet, so those requirements remain unproven.
+That contract defines required changes, including text preservation, grapheme editing, limits, and the distinction between input and display.
+The TUI applies field policy, grapheme boundaries, the answer quota, and eligibility checks through `internal/dal/textinput`.
+These requirements do not assert that the existing TUI already conforms.
 
 ## Entry point
 
@@ -129,8 +129,7 @@ The `/machines` panel MUST list configured machines and their connection states.
 It MUST offer add, connect, select, disconnect, and status actions.
 Machine selection MUST NOT reconnect or disconnect another machine.
 An explicit remote flag MUST select the initial machine, not limit the catalog to that machine.
-The Dalgona status band MUST show the local display label or `@<name>` and the connection phase.
-It MUST show that identity even when a thread cannot start.
+The Dalgona status band MUST show the local display label or `@<name>` and the connection phase, even when a thread cannot start.
 An internal endpoint identifier or local home path MUST NOT replace the display label.
 Local restore commands MUST use `dalgona --local --resume <id>` so a configured remote cannot redirect them.
 
@@ -398,6 +397,11 @@ The caret MUST stay within the window width minus one cell, also after a chip th
 A multiline text adapter MUST fold CRLF and lone CR to LF once, as [input-text.md](input-text.md) requires.
 A paste containing a line break into a one-line field MUST fail atomically with a visible error.
 The field MUST retain its previous text and selection. The rejected candidate MUST remain recoverable without inserting a prefix.
+The notice MUST read `<field> takes one line; nothing was inserted`, where `<field>` is `Filter`, `Review target`, `Answer`, or `API key`.
+Text with NUL MUST fail the same way with `<field> cannot hold NUL; nothing was inserted`.
+Malformed UTF-8 MUST fail with `<field> needs valid UTF-8; nothing was inserted`.
+A prompt paste and a shell line paste name the field `Prompt` and `Shell command`.
+An answer edit past the 2000-scalar limit MUST fail with `Answer holds at most 2000 characters; nothing was inserted`.
 The one-line fields are the list filter, the review target, the answer line, and the API key field.
 A paste of fewer than 10 lines MUST be inserted as text.
 A paste of 10 or more lines MUST become one chip labelled `[Paste #n +L lines]`, where L counts its lines.
@@ -800,9 +804,6 @@ The Other row opens typing. Typing uses the input line with the label `answer: `
 A question card that becomes the oldest request MUST show only its own typed text on the input line.
 Typed answers MUST obey the shared 2000 Unicode-scalar limit. An over-limit candidate MUST remain recoverable and MUST NOT advance, truncate, or submit.
 An over-limit insertion MUST leave the current answer and caret unchanged.
-Alt+E MUST open the rejected candidate for editing.
-Enter MUST restore a corrected candidate to the answer input without advancing.
-Esc MUST discard the rejected candidate without changing the current answer.
 Whitespace-only eligibility checks MUST NOT trim accepted answer text.
 Selected options MUST send their original server labels or identifiers. Display escaping MUST NOT change those identities.
 
@@ -837,8 +838,14 @@ The client MUST keep ordinary recorded tool results separate from local submissi
 This behavior MUST NOT add question or answer events to the journal.
 
 After submitting, the card MUST retain its answers until `serverRequest/resolved` closes the request.
+Its hint row MUST read `Answer sent; waiting for the agent`, and its keys MUST send nothing.
 A validation warning for that request MUST restore editing and keep its original request ID, deadline, and complete answer text.
+The warning MUST open the question its `field` names, with the typed answer on the input line.
+The notice MUST read `Answer not accepted: <message>; edit it and submit again`.
+A warning for another thread or request MUST change no card.
+After this window sent an answer, an `answered` resolution MUST show `Question answered`.
 The card MUST NOT treat local submission as proof that the daemon accepted an answer.
+A replay of the same request MUST keep the card, its answers, and its attempt count, and MUST permit a new response.
 
 A question request that the TUI accepts MUST send a desktop notification `<product>: Waiting for your answer · <title>`, when notifications are on and the window is blurred.
 

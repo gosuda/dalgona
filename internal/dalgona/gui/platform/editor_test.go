@@ -20,7 +20,7 @@ import (
 	"gioui.org/text"
 	"gioui.org/unit"
 
-	"github.com/gosuda/dalgona/internal/dal/inputtext"
+	"github.com/gosuda/dalgona/internal/dal/textinput"
 )
 
 type editorRig struct {
@@ -31,7 +31,7 @@ type editorRig struct {
 	ime    gioIME
 }
 
-func newEditorRig(t *testing.T, policy inputtext.Policy, draft inputtext.Draft) *editorRig {
+func newEditorRig(t *testing.T, policy textinput.Policy, draft textinput.Draft) *editorRig {
 	t.Helper()
 	ed, err := NewEditor(policy, draft)
 	if err != nil {
@@ -82,7 +82,7 @@ func (r *editorRig) press(name key.Name, mods key.Modifiers) {
 	r.router.Queue(key.Event{Name: name, Modifiers: mods, State: key.Press})
 }
 
-func (r *editorRig) wantDraft(want inputtext.Draft) {
+func (r *editorRig) wantDraft(want textinput.Draft) {
 	r.t.Helper()
 	if got := r.editor.Draft(); got != want {
 		r.t.Fatalf("draft %+v, want %+v", got, want)
@@ -279,21 +279,21 @@ func (p *gioIME) waylandDone(u textInputDone) {
 }
 
 func TestEditorKoreanCompositionCommitsEachSyllableOnce(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	for _, preedit := range []string{"ㅎ", "하", "한"} {
 		rig.ime.windowsComposition(preedit)
 		if events := rig.frame(); len(events) != 0 {
 			t.Fatalf("preedit %q produced editor events %v", preedit, editorEventKinds(events))
 		}
 		rig.wantComposing(true)
-		rig.wantDraft(inputtext.Draft{})
+		rig.wantDraft(textinput.Draft{})
 		rig.wantShown(preedit)
 	}
 	rig.ime.windowsResult("한")
 	rig.ime.windowsComposition("ㄱ")
 	rig.frame()
 	rig.wantComposing(true)
-	rig.wantDraft(inputtext.Draft{Text: "한", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "한", Selection: caretAt(3)})
 	rig.wantShown("한ㄱ")
 	for _, preedit := range []string{"그", "글"} {
 		rig.ime.windowsComposition(preedit)
@@ -303,9 +303,9 @@ func TestEditorKoreanCompositionCommitsEachSyllableOnce(t *testing.T) {
 	rig.ime.windowsEndComposition()
 	rig.frame()
 	rig.wantComposing(false)
-	rig.wantDraft(inputtext.Draft{Text: "한글", Selection: caretAt(6)})
+	rig.wantDraft(textinput.Draft{Text: "한글", Selection: caretAt(6)})
 	rig.wantShown("한글")
-	for _, want := range []inputtext.Draft{{Text: "한", Selection: caretAt(3)}, {}, {}} {
+	for _, want := range []textinput.Draft{{Text: "한", Selection: caretAt(3)}, {}, {}} {
 		rig.press("Z", key.ModShortcut)
 		rig.frame()
 		rig.wantDraft(want)
@@ -314,28 +314,28 @@ func TestEditorKoreanCompositionCommitsEachSyllableOnce(t *testing.T) {
 }
 
 func TestEditorKeepsTheSelectionBehindTextInputV3Preedit(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "abc", Selection: inputtext.Range{Start: 0, End: 3}})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "abc", Selection: textinput.Range{Start: 0, End: 3}})
 	for _, preedit := range []string{"ㅎ", "하"} {
 		rig.ime.waylandDone(textInputDone{preedit: preedit, preeditSet: true})
 		rig.frame()
 		rig.wantComposing(true)
-		rig.wantDraft(inputtext.Draft{Text: "abc", Selection: inputtext.Range{Start: 0, End: 3}})
+		rig.wantDraft(textinput.Draft{Text: "abc", Selection: textinput.Range{Start: 0, End: 3}})
 		rig.wantShown(preedit)
 	}
 	rig.ime.waylandDone(textInputDone{commit: "한", commitSet: true, preedit: "ㄱ", preeditSet: true})
 	rig.frame()
 	rig.wantComposing(true)
-	rig.wantDraft(inputtext.Draft{Text: "한", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "한", Selection: caretAt(3)})
 	rig.wantShown("한ㄱ")
 	rig.ime.waylandDone(textInputDone{})
 	rig.frame()
 	rig.wantComposing(false)
-	rig.wantDraft(inputtext.Draft{Text: "한", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "한", Selection: caretAt(3)})
 	rig.wantShown("한")
 }
 
 func TestEditorJapaneseCancelRestoresTextAndSelection(t *testing.T) {
-	before := inputtext.Draft{Text: "東京は晴れ", Selection: inputtext.Range{Start: 9, End: 15}}
+	before := textinput.Draft{Text: "東京は晴れ", Selection: textinput.Range{Start: 9, End: 15}}
 	cancels := map[string]func(rig *editorRig){
 		"windows imm32": func(rig *editorRig) {
 			rig.editor.unmarkCommits = false
@@ -374,8 +374,8 @@ func TestEditorJapaneseCancelRestoresTextAndSelection(t *testing.T) {
 	}
 }
 
-func singleLinePolicy(maxScalars int) inputtext.Policy {
-	return inputtext.Policy{Lines: inputtext.SingleLine, Limit: inputtext.Limit{Unit: inputtext.Scalars, Max: maxScalars}}
+func singleLinePolicy(maxScalars int) textinput.Policy {
+	return textinput.Policy{Lines: textinput.SingleLine, Limit: textinput.Limit{Unit: textinput.Scalars, Max: maxScalars}}
 }
 
 func wantEditorRejection(t *testing.T, events []EditorEvent, want error) {
@@ -389,19 +389,19 @@ func wantEditorRejection(t *testing.T, events []EditorEvent, want error) {
 }
 
 func TestEditorMacUnmarkTextAcceptsTheMarkedText(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "東京は晴れ", Selection: inputtext.Range{Start: 9, End: 15}})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "東京は晴れ", Selection: textinput.Range{Start: 9, End: 15}})
 	rig.editor.unmarkCommits = true
 	rig.ime.macSetMarkedText("漢字")
 	rig.frame()
 	rig.ime.macUnmarkText()
 	rig.frame()
 	rig.wantComposing(false)
-	rig.wantDraft(inputtext.Draft{Text: "東京は漢字", Selection: caretAt(15)})
+	rig.wantDraft(textinput.Draft{Text: "東京は漢字", Selection: caretAt(15)})
 	rig.wantShown("東京は漢字")
 }
 
 func TestEditorReturnThatEndsCompositionDoesNotSubmit(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	rig.ime.macSetMarkedText("하")
 	rig.frame()
 	rig.ime.macInsertText("한")
@@ -409,17 +409,17 @@ func TestEditorReturnThatEndsCompositionDoesNotSubmit(t *testing.T) {
 	if events := rig.frame(); hasEditorEvent(events, EditorSubmit) {
 		t.Fatalf("the Return that ended the composition submitted: %v", editorEventKinds(events))
 	}
-	rig.wantDraft(inputtext.Draft{Text: "한", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "한", Selection: caretAt(3)})
 	rig.press(key.NameReturn, 0)
 	events := rig.frame()
 	if !hasEditorEvent(events, EditorSubmit) {
 		t.Fatalf("a Return in a later frame produced %v, want a submit", editorEventKinds(events))
 	}
-	rig.wantDraft(inputtext.Draft{Text: "한", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "한", Selection: caretAt(3)})
 }
 
 func TestEditorKeysDuringCompositionStayWithTheInputMethod(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "a", Selection: caretAt(1)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "a", Selection: caretAt(1)})
 	rig.ime.windowsComposition("ㅎ")
 	rig.press(key.NameReturn, 0)
 	if events := rig.frame(); len(events) != 0 {
@@ -432,26 +432,26 @@ func TestEditorKeysDuringCompositionStayWithTheInputMethod(t *testing.T) {
 		}
 		rig.wantComposing(true)
 		rig.wantShown("aㅎ")
-		rig.wantDraft(inputtext.Draft{Text: "a", Selection: caretAt(1)})
+		rig.wantDraft(textinput.Draft{Text: "a", Selection: caretAt(1)})
 	}
 }
 
 func TestEditorRejectsAnOverLimitCommitWhole(t *testing.T) {
-	rig := newEditorRig(t, prompt(4), inputtext.Draft{Text: "abc", Selection: caretAt(3)})
+	rig := newEditorRig(t, prompt(4), textinput.Draft{Text: "abc", Selection: caretAt(3)})
 	rig.ime.windowsComposition("한")
 	rig.frame()
 	rig.ime.windowsResult("한")
 	rig.ime.windowsComposition("ㄱ")
 	rig.frame()
-	rig.wantDraft(inputtext.Draft{Text: "abc한", Selection: caretAt(6)})
+	rig.wantDraft(textinput.Draft{Text: "abc한", Selection: caretAt(6)})
 	rig.ime.windowsComposition("글")
 	rig.frame()
 	rig.ime.windowsResult("글")
 	rig.ime.windowsEndComposition()
 	events := rig.frame()
-	wantEditorRejection(t, events, inputtext.TextTooLarge)
+	wantEditorRejection(t, events, textinput.TextTooLarge)
 	rig.wantComposing(false)
-	rig.wantDraft(inputtext.Draft{Text: "abc한", Selection: caretAt(6)})
+	rig.wantDraft(textinput.Draft{Text: "abc한", Selection: caretAt(6)})
 	rig.wantShown("abc한")
 	if got := rig.editor.TakeRejected(); got != "글" {
 		t.Fatalf("recoverable candidate %q, want the whole commit", got)
@@ -462,29 +462,29 @@ func TestEditorRejectsAnOverLimitCommitWhole(t *testing.T) {
 }
 
 func TestEditorAcceptsACommitThatJoinsTheAdjacentGrapheme(t *testing.T) {
-	rig := newEditorRig(t, prompt(2), inputtext.Draft{Text: "e", Selection: caretAt(1)})
+	rig := newEditorRig(t, prompt(2), textinput.Draft{Text: "e", Selection: caretAt(1)})
 	rig.ime.macInsertText("\u0301")
 	if events := rig.frame(); hasEditorEvent(events, EditorRejected) {
 		t.Fatalf("the joining commit was refused: %+v", events)
 	}
-	rig.wantDraft(inputtext.Draft{Text: "e\u0301", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "e\u0301", Selection: caretAt(3)})
 	rig.ime.macInsertText("x")
-	wantEditorRejection(t, rig.frame(), inputtext.TextTooLarge)
-	rig.wantDraft(inputtext.Draft{Text: "e\u0301", Selection: caretAt(3)})
+	wantEditorRejection(t, rig.frame(), textinput.TextTooLarge)
+	rig.wantDraft(textinput.Draft{Text: "e\u0301", Selection: caretAt(3)})
 	rig.wantShown("e\u0301")
 }
 
 func TestEditorConvertsCommittedLineEndingsOnce(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	rig.ime.macInsertText("a\r\nb\rc\n")
 	rig.frame()
-	rig.wantDraft(inputtext.Draft{Text: "a\nb\nc\n", Selection: caretAt(6)})
+	rig.wantDraft(textinput.Draft{Text: "a\nb\nc\n", Selection: caretAt(6)})
 	rig.wantShown("a\nb\nc\n")
 
-	single := newEditorRig(t, singleLinePolicy(100), inputtext.Draft{Text: "x", Selection: caretAt(1)})
+	single := newEditorRig(t, singleLinePolicy(100), textinput.Draft{Text: "x", Selection: caretAt(1)})
 	single.ime.macInsertText("a\r\nb")
-	wantEditorRejection(t, single.frame(), inputtext.LineBreakNotAllowed)
-	single.wantDraft(inputtext.Draft{Text: "x", Selection: caretAt(1)})
+	wantEditorRejection(t, single.frame(), textinput.LineBreakNotAllowed)
+	single.wantDraft(textinput.Draft{Text: "x", Selection: caretAt(1)})
 	single.wantShown("x")
 	if got := single.editor.TakeRejected(); got != "a\r\nb" {
 		t.Fatalf("recoverable candidate %q, want the source commit", got)
@@ -492,8 +492,8 @@ func TestEditorConvertsCommittedLineEndingsOnce(t *testing.T) {
 }
 
 func TestEditorUndoRestoresThePreCommitTextAndSelection(t *testing.T) {
-	before := inputtext.Draft{Text: "東京", Selection: inputtext.Range{Start: 0, End: 6}}
-	after := inputtext.Draft{Text: "한", Selection: caretAt(3)}
+	before := textinput.Draft{Text: "東京", Selection: textinput.Range{Start: 0, End: 6}}
+	after := textinput.Draft{Text: "한", Selection: caretAt(3)}
 	rig := newEditorRig(t, prompt(100), before)
 	for _, preedit := range []string{"ㅎ", "하", "한"} {
 		rig.ime.windowsComposition(preedit)
@@ -514,7 +514,7 @@ func TestEditorUndoRestoresThePreCommitTextAndSelection(t *testing.T) {
 }
 
 func TestEditorAnswersSnippetRequestsWithTheShownText(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "hello", Selection: caretAt(5)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "hello", Selection: caretAt(5)})
 	rig.router.Queue(key.SnippetEvent{Start: 1, End: 4})
 	rig.frame()
 	want := key.Snippet{Range: key.Range{Start: 1, End: 4}, Text: "ell"}
@@ -529,11 +529,11 @@ func TestEditorAnswersSnippetRequestsWithTheShownText(t *testing.T) {
 	if got := rig.router.EditorState().Snippet; got != want {
 		t.Fatalf("snippet during composition %+v, want %+v", got, want)
 	}
-	rig.wantDraft(inputtext.Draft{Text: "hello", Selection: caretAt(5)})
+	rig.wantDraft(textinput.Draft{Text: "hello", Selection: caretAt(5)})
 }
 
 func TestEditorPublishesCompositionBoundsWhileComposing(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "ab", Selection: caretAt(2)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "ab", Selection: caretAt(2)})
 	rig.ime.windowsComposition("ㅎ")
 	rig.frame()
 	sel := rig.router.EditorState().Selection
@@ -566,19 +566,19 @@ func pasteThroughGio(rig *editorRig, data string) (*trackedStream, []EditorEvent
 func TestEditorPasteRefusesInvalidTextWithoutEditing(t *testing.T) {
 	cases := []struct {
 		name   string
-		policy inputtext.Policy
+		policy textinput.Policy
 		data   string
 		want   error
 		kept   string
 	}{
-		{"nul", prompt(100), "a\x00b", inputtext.DisallowedControl, ""},
-		{"malformed utf-8", prompt(100), "a\xffb", inputtext.InvalidEncoding, ""},
-		{"multiline into one line", singleLinePolicy(100), "a\nb", inputtext.LineBreakNotAllowed, "a\nb"},
-		{"over the field limit", singleLinePolicy(3), "abc", inputtext.TextTooLarge, "abc"},
+		{"nul", prompt(100), "a\x00b", textinput.DisallowedControl, ""},
+		{"malformed utf-8", prompt(100), "a\xffb", textinput.InvalidEncoding, ""},
+		{"multiline into one line", singleLinePolicy(100), "a\nb", textinput.LineBreakNotAllowed, "a\nb"},
+		{"over the field limit", singleLinePolicy(3), "abc", textinput.TextTooLarge, "abc"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			before := inputtext.Draft{Text: "x", Selection: caretAt(1)}
+			before := textinput.Draft{Text: "x", Selection: caretAt(1)}
 			rig := newEditorRig(t, tc.policy, before)
 			revision := rig.editor.Revision()
 			stream, events := pasteThroughGio(rig, tc.data)
@@ -596,10 +596,10 @@ func TestEditorPasteRefusesInvalidTextWithoutEditing(t *testing.T) {
 }
 
 func TestEditorPasteIsOneUndoableEdit(t *testing.T) {
-	before := inputtext.Draft{Text: "ab", Selection: inputtext.Range{Start: 1, End: 2}}
+	before := textinput.Draft{Text: "ab", Selection: textinput.Range{Start: 1, End: 2}}
 	rig := newEditorRig(t, prompt(100), before)
 	pasteThroughGio(rig, "x\r\ny\n")
-	rig.wantDraft(inputtext.Draft{Text: "ax\ny\n", Selection: caretAt(5)})
+	rig.wantDraft(textinput.Draft{Text: "ax\ny\n", Selection: caretAt(5)})
 	rig.wantShown("ax\ny\n")
 	rig.press("Z", key.ModShortcut)
 	rig.frame()
@@ -608,7 +608,7 @@ func TestEditorPasteIsOneUndoableEdit(t *testing.T) {
 }
 
 func TestEditorDiscardsAPasteThatArrivesDuringComposition(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "a", Selection: caretAt(1)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "a", Selection: caretAt(1)})
 	rig.press("V", key.ModShortcut)
 	rig.frame()
 	rig.ime.windowsComposition("ㅎ")
@@ -618,7 +618,7 @@ func TestEditorDiscardsAPasteThatArrivesDuringComposition(t *testing.T) {
 	wantEditorRejection(t, rig.frame(), ErrPasteStale)
 	rig.wantComposing(true)
 	rig.wantShown("aㅎ")
-	rig.wantDraft(inputtext.Draft{Text: "a", Selection: caretAt(1)})
+	rig.wantDraft(textinput.Draft{Text: "a", Selection: caretAt(1)})
 }
 
 type scriptedClipboard struct {
@@ -660,11 +660,11 @@ func pasteFrom(rig *editorRig, reader *scriptedClipboard, between func()) []Edit
 }
 
 func TestEditorAsksForTheClipboardReaderAtPasteTime(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	var current ClipboardReader
 	rig.editor.Clipboard = func() ClipboardReader { return current }
 	pasteThroughGio(rig, "g")
-	rig.wantDraft(inputtext.Draft{Text: "g", Selection: caretAt(1)})
+	rig.wantDraft(textinput.Draft{Text: "g", Selection: caretAt(1)})
 	reader := &scriptedClipboard{content: ClipboardContent{Text: "n"}, release: make(chan struct{})}
 	current = reader
 	pasteFrom(rig, reader, func() {
@@ -672,40 +672,40 @@ func TestEditorAsksForTheClipboardReaderAtPasteTime(t *testing.T) {
 			t.Fatal("Ctrl+V asked Gio for the clipboard although a native reader appeared")
 		}
 	})
-	rig.wantDraft(inputtext.Draft{Text: "gn", Selection: caretAt(2)})
+	rig.wantDraft(textinput.Draft{Text: "gn", Selection: caretAt(2)})
 }
 
 func TestEditorNativePasteValidatesAndBindsItsTarget(t *testing.T) {
-	single := newEditorRig(t, singleLinePolicy(100), inputtext.Draft{})
-	wantEditorRejection(t, pasteThroughReader(single, ClipboardContent{Text: "a\nb"}, func() {}), inputtext.LineBreakNotAllowed)
-	single.wantDraft(inputtext.Draft{})
+	single := newEditorRig(t, singleLinePolicy(100), textinput.Draft{})
+	wantEditorRejection(t, pasteThroughReader(single, ClipboardContent{Text: "a\nb"}, func() {}), textinput.LineBreakNotAllowed)
+	single.wantDraft(textinput.Draft{})
 	if got := single.editor.TakeRejected(); got != "a\nb" {
 		t.Fatalf("recoverable candidate %q, want the clipboard text", got)
 	}
 	wantEditorRejection(t, pasteThroughReader(single, ClipboardContent{Image: []byte("\x89PNG"), ImageType: "image/png"}, func() {}), ErrUnsupportedPaste)
 
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	stale := pasteThroughReader(rig, ClipboardContent{Text: "late"}, func() {
 		rig.ime.insert("q")
 		rig.frame()
 	})
 	wantEditorRejection(t, stale, ErrPasteStale)
-	rig.wantDraft(inputtext.Draft{Text: "q", Selection: caretAt(1)})
+	rig.wantDraft(textinput.Draft{Text: "q", Selection: caretAt(1)})
 	pasteThroughReader(rig, ClipboardContent{Text: "z"}, func() {})
-	rig.wantDraft(inputtext.Draft{Text: "qz", Selection: caretAt(2)})
+	rig.wantDraft(textinput.Draft{Text: "qz", Selection: caretAt(2)})
 }
 
 func TestEditorNativePasteLosesToSameFrameInput(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "a", Selection: caretAt(1)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "a", Selection: caretAt(1)})
 	stale := pasteThroughReader(rig, ClipboardContent{Text: "late"}, func() {
 		rig.ime.insert("q")
 	})
 	wantEditorRejection(t, stale, ErrPasteStale)
-	rig.wantDraft(inputtext.Draft{Text: "aq", Selection: caretAt(2)})
+	rig.wantDraft(textinput.Draft{Text: "aq", Selection: caretAt(2)})
 }
 
 func TestEditorFocusLossCancelsTheComposition(t *testing.T) {
-	before := inputtext.Draft{Text: "東京は晴れ", Selection: inputtext.Range{Start: 9, End: 15}}
+	before := textinput.Draft{Text: "東京は晴れ", Selection: textinput.Range{Start: 9, End: 15}}
 	rig := newEditorRig(t, prompt(100), before)
 	rig.ime.windowsComposition("漢字")
 	rig.frame()
@@ -718,21 +718,21 @@ func TestEditorFocusLossCancelsTheComposition(t *testing.T) {
 }
 
 func TestEditorShowsTheSoftKeyboardOnFocus(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{})
 	if got := rig.router.TextInputState(); got != input.TextInputOpen {
 		t.Fatalf("text input state %v after focus, want Open", got)
 	}
 }
 
 func TestEditorRefusesProgrammaticEditsDuringComposition(t *testing.T) {
-	before := inputtext.Draft{Text: "ab", Selection: caretAt(2)}
+	before := textinput.Draft{Text: "ab", Selection: caretAt(2)}
 	rig := newEditorRig(t, prompt(100), before)
 	rig.ime.windowsComposition("ㅎ")
 	rig.frame()
 	edits := map[string]func() error{
 		"replace":   func() error { return rig.editor.Replace(caretAt(0), "x") },
 		"select":    func() error { return rig.editor.Select(caretAt(0)) },
-		"set draft": func() error { return rig.editor.SetDraft(inputtext.Draft{}) },
+		"set draft": func() error { return rig.editor.SetDraft(textinput.Draft{}) },
 	}
 	for name, edit := range edits {
 		if err := edit(); !errors.Is(err, ErrComposing) {
@@ -745,17 +745,17 @@ func TestEditorRefusesProgrammaticEditsDuringComposition(t *testing.T) {
 }
 
 func TestEditorProgrammaticReplaceUndoesInOneStepAndSetDraftClearsHistory(t *testing.T) {
-	before := inputtext.Draft{Text: "ab", Selection: caretAt(2)}
+	before := textinput.Draft{Text: "ab", Selection: caretAt(2)}
 	rig := newEditorRig(t, prompt(100), before)
-	if err := rig.editor.Replace(inputtext.Range{Start: 0, End: 2}, "xyz"); err != nil {
+	if err := rig.editor.Replace(textinput.Range{Start: 0, End: 2}, "xyz"); err != nil {
 		t.Fatal(err)
 	}
-	rig.wantDraft(inputtext.Draft{Text: "xyz", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "xyz", Selection: caretAt(3)})
 	rig.wantShown("xyz")
 	rig.press("Z", key.ModShortcut)
 	rig.frame()
 	rig.wantDraft(before)
-	adopted := inputtext.Draft{Text: "q", Selection: caretAt(1)}
+	adopted := textinput.Draft{Text: "q", Selection: caretAt(1)}
 	if err := rig.editor.SetDraft(adopted); err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +768,7 @@ func TestEditorProgrammaticReplaceUndoesInOneStepAndSetDraftClearsHistory(t *tes
 }
 
 func TestEditorReportsEnterEscapeAndClaimedKeysOutsideComposition(t *testing.T) {
-	rig := newEditorRig(t, prompt(100), inputtext.Draft{Text: "ab", Selection: caretAt(2)})
+	rig := newEditorRig(t, prompt(100), textinput.Draft{Text: "ab", Selection: caretAt(2)})
 	rig.editor.Claim(key.NameUpArrow)
 	rig.frame()
 	cases := []struct {
@@ -792,7 +792,7 @@ func TestEditorReportsEnterEscapeAndClaimedKeysOutsideComposition(t *testing.T) 
 	if events := rig.frame(); hasEditorEvent(events, EditorSubmit) {
 		t.Fatalf("Shift+Return in a multiline field submitted: %v", editorEventKinds(events))
 	}
-	rig.wantDraft(inputtext.Draft{Text: "ab\n", Selection: caretAt(3)})
+	rig.wantDraft(textinput.Draft{Text: "ab\n", Selection: caretAt(3)})
 	rig.editor.Claim()
 	rig.frame()
 	rig.press(key.NameUpArrow, 0)
@@ -800,7 +800,7 @@ func TestEditorReportsEnterEscapeAndClaimedKeysOutsideComposition(t *testing.T) 
 		t.Fatalf("an unclaimed arrow was reported: %v", editorEventKinds(events))
 	}
 
-	single := newEditorRig(t, singleLinePolicy(100), inputtext.Draft{})
+	single := newEditorRig(t, singleLinePolicy(100), textinput.Draft{})
 	single.press(key.NameReturn, key.ModShift)
 	events := single.frame()
 	if len(events) != 1 || events[0] != (EditorEvent{Kind: EditorSubmit, Name: key.NameReturn, Modifiers: key.ModShift}) {
@@ -809,27 +809,27 @@ func TestEditorReportsEnterEscapeAndClaimedKeysOutsideComposition(t *testing.T) 
 }
 
 func TestEditorValidatesEachTypedEdit(t *testing.T) {
-	rig := newEditorRig(t, singleLinePolicy(3), inputtext.Draft{})
+	rig := newEditorRig(t, singleLinePolicy(3), textinput.Draft{})
 	revision := rig.editor.Revision()
 	rig.ime.insert("a")
 	if events := rig.frame(); !hasEditorEvent(events, EditorChange) || rig.editor.Revision() == revision {
 		t.Fatalf("typing produced %v at revision %d, want a change and a new revision", editorEventKinds(events), rig.editor.Revision())
 	}
-	rig.wantDraft(inputtext.Draft{Text: "a", Selection: caretAt(1)})
+	rig.wantDraft(textinput.Draft{Text: "a", Selection: caretAt(1)})
 	rig.ime.insert("\x00")
-	wantEditorRejection(t, rig.frame(), inputtext.DisallowedControl)
-	rig.wantDraft(inputtext.Draft{Text: "a", Selection: caretAt(1)})
+	wantEditorRejection(t, rig.frame(), textinput.DisallowedControl)
+	rig.wantDraft(textinput.Draft{Text: "a", Selection: caretAt(1)})
 	rig.wantShown("a")
 	rig.ime.insert("bc")
 	rig.frame()
 	rig.ime.insert("d")
-	wantEditorRejection(t, rig.frame(), inputtext.TextTooLarge)
-	rig.wantDraft(inputtext.Draft{Text: "abc", Selection: caretAt(3)})
+	wantEditorRejection(t, rig.frame(), textinput.TextTooLarge)
+	rig.wantDraft(textinput.Draft{Text: "abc", Selection: caretAt(3)})
 	rig.wantShown("abc")
 }
 
 func TestEditorMaskedFieldKeepsTheSecretOffTheClipboard(t *testing.T) {
-	rig := newEditorRig(t, singleLinePolicy(100), inputtext.Draft{Text: "secret", Selection: inputtext.Range{Start: 0, End: 6}})
+	rig := newEditorRig(t, singleLinePolicy(100), textinput.Draft{Text: "secret", Selection: textinput.Range{Start: 0, End: 6}})
 	rig.editor.Mask = '•'
 	rig.frame()
 	for _, name := range []key.Name{"C", "X"} {
@@ -839,11 +839,11 @@ func TestEditorMaskedFieldKeepsTheSecretOffTheClipboard(t *testing.T) {
 			t.Fatalf("Ctrl+%s copied %q out of a masked field", name, content)
 		}
 	}
-	rig.wantDraft(inputtext.Draft{Text: "secret", Selection: inputtext.Range{Start: 0, End: 6}})
-	if err := rig.editor.SetDraft(inputtext.Draft{}); err != nil {
+	rig.wantDraft(textinput.Draft{Text: "secret", Selection: textinput.Range{Start: 0, End: 6}})
+	if err := rig.editor.SetDraft(textinput.Draft{}); err != nil {
 		t.Fatal(err)
 	}
 	rig.press("Z", key.ModShortcut)
 	rig.frame()
-	rig.wantDraft(inputtext.Draft{})
+	rig.wantDraft(textinput.Draft{})
 }
