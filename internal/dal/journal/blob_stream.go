@@ -33,24 +33,45 @@ func (s *Store) PutBlobStream(ctx context.Context, expected *BlobIdentity, produ
 	if err := writeBlobStream(&stream, produce); err != nil {
 		return "", 0, err
 	}
-	return stream.publish(expected, dir)
+	return s.publishBlob(&stream, expected, dir)
 }
 
-func (s *blobStream) publish(expected *BlobIdentity, dir string) (string, int64, error) {
-	if err := context.Cause(s.ctx); err != nil {
+func (s *Store) publishBlob(stream *blobStream, expected *BlobIdentity, dir string) (string, int64, error) {
+	if err := context.Cause(stream.ctx); err != nil {
 		return "", 0, err
 	}
-	sha := hex.EncodeToString(s.hash.Sum(nil))
-	if expected != nil && (expected.SHA256 != sha || expected.Bytes != s.size) {
+	sha := hex.EncodeToString(stream.hash.Sum(nil))
+	if expected != nil && (expected.SHA256 != sha || expected.Bytes != stream.size) {
 		return "", 0, ErrBlobIdentity
 	}
-	if err := os.Rename(s.stage.Name(), filepath.Join(dir, sha)); err != nil {
+	dest := filepath.Join(dir, sha)
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	stored, err := blobAlreadyStored(dest)
+	if err != nil {
+		return "", 0, err
+	}
+	if stored {
+		return sha, stream.size, nil
+	}
+	if err := os.Rename(stream.stage.Name(), dest); err != nil {
 		return "", 0, err
 	}
 	if err := syncDir(dir); err != nil {
 		return "", 0, err
 	}
-	return sha, s.size, nil
+	return sha, stream.size, nil
+}
+
+func blobAlreadyStored(dest string) (bool, error) {
+	info, err := os.Stat(dest)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !info.IsDir(), nil
 }
 
 func removeBlobStage(path string) error {

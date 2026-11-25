@@ -71,6 +71,7 @@ type Store struct {
 	syncfsRoot string
 	dirSync    func(string) error
 	mu         sync.Mutex
+	blobMu     sync.Mutex
 	backupStop chan struct{}
 	backupWg   sync.WaitGroup
 	closed     bool
@@ -582,6 +583,8 @@ func (s *Store) PutBlob(data []byte) (string, error) {
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
 	path := filepath.Join(s.blobsDir(), sha)
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
 	if _, err := os.Stat(path); err == nil {
 		return sha, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
