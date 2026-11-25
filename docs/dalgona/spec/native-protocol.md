@@ -80,7 +80,7 @@ Method-specific grammars retain their declared parameter errors.
 | --- | --- |
 | `Id` | Opaque nonempty UTF-8 string, at most 128 bytes. |
 | `Handle` | At least 128 random bits encoded as unpadded base64url, at most 128 bytes. |
-| `Revision` | Opaque nonempty string, at most 128 bytes. Equality is its only client operation. |
+| `Revision` | Opaque nonempty string, at most 128 bytes. Equality is its only client operation. A file revision MUST change when the file content changes, whatever the file size and the time stamps. |
 | `Offset` | Decimal string representing an unsigned 64-bit byte offset. |
 | `Ordinal` | Decimal string representing an unsigned 64-bit event position. |
 | `OperationId` | UUIDv7 with its creation timestamp. |
