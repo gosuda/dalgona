@@ -71,7 +71,7 @@ func (s sheet) await(ctx context.Context) (platform.DialogResult, error) {
 	})
 	var paths *C.uint8_t
 	var length C.size_t
-	status := C.dalgona_dialog_wait(s.handle, &paths, &length)
+	status := C.dalgona_dialog_wait(s.handle, &paths, &length) //nolint:gocritic // cgo writes the pointer check of this call as a comparison of two equal constants
 	if !stop() {
 		<-cancelled
 	}
