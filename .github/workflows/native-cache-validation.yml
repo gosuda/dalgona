@@ -1,0 +1,76 @@
+name: Native Go cache handoff validation
+
+on:
+  push:
+    branches: [ci/native-cache-validation-20261126]
+    paths: [.github/workflows/native-cache-validation.yml]
+
+permissions:
+  contents: read
+
+env:
+  GOENV: "off"
+  GOCACHEPROG: ""
+
+jobs:
+  cache-handoff:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [depot-macos-latest, depot-windows-2025-8]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Resolve Go cache paths
+        id: cache_paths
+        uses: ./.github/actions/go-cache-paths
+      - name: Restore with the native directory outputs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ${{ steps.cache_paths.outputs.build }}
+            ${{ steps.cache_paths.outputs.module }}
+            ${{ runner.temp }}/golangci-lint
+          key: go-path-handoff-${{ github.sha }}-${{ runner.os }}
+      - name: Verify both effective paths survived the handoff
+        env:
+          BUILD_PATH: ${{ steps.cache_paths.outputs.build }}
+          MODULE_PATH: ${{ steps.cache_paths.outputs.module }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $build = ([string](& go env GOCACHE)).Trim()
+          $module = ([string](& go env GOMODCACHE)).Trim()
+          if ($env:BUILD_PATH -cne $build -or $env:MODULE_PATH -cne $module) {
+            throw 'Composite outputs differ from the effective Go configuration'
+          }
+          foreach ($path in @($env:BUILD_PATH, $env:MODULE_PATH)) {
+            if (-not [System.IO.Path]::IsPathRooted($path)) { throw "Cache path is not absolute: $path" }
+            [void][System.IO.Directory]::CreateDirectory($path)
+          }
+          if ($build -ceq $module) { throw 'Build and module caches unexpectedly share one directory' }
+          [ordered]@{
+            source = $env:GITHUB_SHA
+            runner = $env:RUNNER_OS
+            build = $build
+            module = $module
+            goenv = ([string](& go env GOENV)).Trim()
+            cacheProgram = ([string](& go env GOCACHEPROG)).Trim()
+          } | ConvertTo-Json | Tee-Object -FilePath "$env:RUNNER_TEMP/cache-handoff.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: ${{ always() }}
+        with:
+          name: native-cache-handoff-${{ runner.os }}-${{ github.sha }}
+          path: ${{ runner.temp }}/cache-handoff.json
+          if-no-files-found: error
+          retention-days: 2
