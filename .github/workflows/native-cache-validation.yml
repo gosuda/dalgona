@@ -31,19 +31,22 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Inspect native shell cache configuration
+      - name: Clear the runner cache program
         shell: bash
         run: |
-          printf 'go command kind: %s\n' "$(type -t go)"
-          printf 'go executable path: %s\n' "$(command -v go)"
-          printf 'process GOCACHEPROG length: %s\n' "${#GOCACHEPROG}"
-          effective="$(go env GOCACHEPROG)"
-          printf 'initial effective GOCACHEPROG length: %s\n' "${#effective}"
-          if [[ "$effective" =~ ^[[:space:]]*$ ]]; then echo 'initial effective value is whitespace only'; fi
           export GOCACHEPROG= GOENV=off
+          printf 'GOCACHEPROG=\nGOENV=off\n' >> "$GITHUB_ENV"
+          test -z "$(go env GOCACHEPROG)"
+          test -z "$(go env GOENV)"
+      - name: Verify the next Bash process remains isolated
+        shell: bash
+        run: |
           effective="$(go env GOCACHEPROG)"
-          printf 'explicitly cleared effective GOCACHEPROG length: %s\n' "${#effective}"
-          if [[ "$effective" =~ ^[[:space:]]*$ ]]; then echo 'cleared effective value is whitespace only'; fi
+          printf 'next-process GOCACHEPROG length: %s\n' "${#effective}"
+          if [[ -n "$effective" || "${GOENV:-}" != off || -n "$(go env GOENV)" ]]; then
+            echo '::error::Go cache isolation did not survive the process boundary'
+            exit 1
+          fi
       - name: Resolve Go cache paths
         id: cache_paths
         uses: ./.github/actions/go-cache-paths
@@ -62,6 +65,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          $cacheProgram = ([string](& go env GOCACHEPROG)).Trim()
+          $goenv = ([string](& go env GOENV)).Trim()
+          if ($cacheProgram.Length -ne 0 -or $goenv.Length -ne 0 -or $env:GOENV -cne 'off') {
+            throw 'Go cache isolation did not survive the PowerShell process boundary'
+          }
           $build = ([string](& go env GOCACHE)).Trim()
           $module = ([string](& go env GOMODCACHE)).Trim()
           if ($env:BUILD_PATH -cne $build -or $env:MODULE_PATH -cne $module) {
@@ -78,7 +86,7 @@ jobs:
             build = $build
             module = $module
             goenv = ([string](& go env GOENV)).Trim()
-            cacheProgram = ([string](& go env GOCACHEPROG)).Trim()
+            cacheProgram = 'empty'
           } | ConvertTo-Json | Tee-Object -FilePath "$env:RUNNER_TEMP/cache-handoff.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: ${{ always() }}
@@ -87,3 +95,4 @@ jobs:
           path: ${{ runner.temp }}/cache-handoff.json
           if-no-files-found: error
           retention-days: 2
+
