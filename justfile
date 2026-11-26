@@ -206,6 +206,33 @@ desktop-check:
     fi
     go build -tags "$tags" -trimpath -o /dev/null ./cmd/dalgona-gui
 
+# CI-only split of desktop-check for the Windows cells. desktop-check-static
+# proves the gui-tagged static analysis; desktop-check-gui proves native GUI
+# execution. Together with the packaging validation in CI they prove exactly
+# what desktop-check proves; the Linux and macOS jobs keep desktop-check.
+desktop-check-static:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tags=$("{{just_executable()}}" --justfile "{{justfile()}}" desktop-tags)
+    echo "desktop-check-static: tags $tags"
+    go tool golangci-lint fmt --diff
+    go vet -tags "$tags" ./...
+    go tool golangci-lint run --build-tags "$tags" ./...
+    go tool govulncheck -tags "$tags" ./...
+
+desktop-check-gui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tags=$("{{just_executable()}}" --justfile "{{justfile()}}" desktop-tags)
+    echo "desktop-check-gui: tags $tags"
+    go test -race -count=1 -tags "$tags" ./cmd/dalgona-gui/... ./internal/dalgona/gui/...
+    (cd internal/dalgona/gui/platform/fontfaces && sha256sum --check --quiet SHA256SUMS)
+    if go list -deps ./cmd/dal ./cmd/dalgona | grep -q '^gioui\.org'; then
+        echo "desktop-check-gui: a headless binary imports gioui.org" >&2
+        exit 1
+    fi
+    go build -tags "$tags" -trimpath -o /dev/null ./cmd/dalgona-gui
+
 [positional-arguments]
 desktop-smoke backend:
     #!/usr/bin/env bash

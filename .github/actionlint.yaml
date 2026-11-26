@@ -4,4 +4,5 @@ self-hosted-runner:
     - depot-macos-latest
     - depot-windows-latest
     - depot-windows-2025-4
+    - depot-windows-2025-8
     - depot-windows-2022

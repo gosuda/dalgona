@@ -98,10 +98,10 @@ jobs:
       - run: just desktop-check
       - run: just desktop-build
 
-  desktop-windows:
+  desktop-windows-static:
     permissions:
       contents: read
-    runs-on: depot-windows-2025-4
+    runs-on: depot-windows-2025-8
     timeout-minutes: 40
     defaults:
       run:
@@ -128,6 +128,74 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Record native target
         run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+      - name: Static GUI proof
+        run: just desktop-check-static
+
+  desktop-windows-gui:
+    permissions:
+      contents: read
+    runs-on: depot-windows-2025-8
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~\AppData\Local\go-build
+            ~/.cache/golangci-lint
+            ~\AppData\Local\golangci-lint
+          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - name: Record native target
+        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+      - name: Native GUI execution proof
+        run: just desktop-check-gui
+
+  desktop-windows:
+    permissions:
+      contents: read
+    # The verdict job: it reports only when both halves are done, and fails
+    # loudly instead of skipping when a half failed.
+    needs: [desktop-windows-static, desktop-windows-gui]
+    if: ${{ !cancelled() }}
+    runs-on: depot-windows-2025-8
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~\AppData\Local\go-build
+            ~/.cache/golangci-lint
+            ~\AppData\Local\golangci-lint
+          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Validate MSI inputs without signing
         shell: powershell
         run: |
@@ -142,8 +210,14 @@ jobs:
               $package.Scope -ne 'perMachine' -or [int]$package.InstallerVersion -lt 500) {
               throw 'The MSI manifest must declare the WiX schema, per-machine scope and installer version >= 500.'
           }
-      - run: just desktop-check
-      - run: just desktop-build
+      - name: Build the desktop binary
+        run: just desktop-build
+      - name: Desktop verdict
+        run: |
+          if [ "${{ needs.desktop-windows-static.result }}" != success ] || [ "${{ needs.desktop-windows-gui.result }}" != success ]; then
+            echo 'desktop-windows: a required half failed' >&2
+            exit 1
+          fi
 
   go:
     permissions:
@@ -173,7 +247,7 @@ jobs:
             # Native proof is vet, build and tests without the race detector.
           - check: Verify (windows-latest)
             lane: windows
-            runner: depot-windows-2025-4
+            runner: depot-windows-2025-8
             # Native proof is vet, build and tests without the race detector.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -220,13 +294,17 @@ jobs:
           key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+      # Python is only needed by the Linux lanes (spec checks) and the web
+      # job; native lanes run compiled Go proof and skip the interpreter.
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        if: ${{ startsWith(matrix.lane, 'linux') }}
         with:
           version: "0.13.9"
           python-version: "3.15"
           require-checksums: true
           enable-cache: false
       - run: uv python install 3.15
+        if: ${{ startsWith(matrix.lane, 'linux') }}
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       # GOCACHE stays at its default so the cached build outputs above are
       # reused; the old per-run temporary GOCACHE forced a cold build.
