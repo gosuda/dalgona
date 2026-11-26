@@ -189,19 +189,27 @@ desktop-build:
     go build -tags "$tags" -trimpath -o bin/ ./cmd/dalgona-gui
     echo "desktop-build: bin/dalgona-gui built with tags $tags"
 
-desktop-check:
+desktop-check: desktop-check-static desktop-check-gui
+
+desktop-check-static:
     #!/usr/bin/env bash
     set -euo pipefail
     tags=$("{{just_executable()}}" --justfile "{{justfile()}}" desktop-tags)
-    echo "desktop-check: tags $tags"
+    echo "desktop-check-static: tags $tags"
     go tool golangci-lint fmt --diff
     go vet -tags "$tags" ./...
     go tool golangci-lint run --build-tags "$tags" ./...
-    go test -race -count=1 -tags "$tags" ./cmd/dalgona-gui/... ./internal/dalgona/gui/...
     go tool govulncheck -tags "$tags" ./...
+
+desktop-check-gui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tags=$("{{just_executable()}}" --justfile "{{justfile()}}" desktop-tags)
+    echo "desktop-check-gui: tags $tags"
+    go test -race -count=1 -tags "$tags" ./cmd/dalgona-gui/... ./internal/dalgona/gui/...
     (cd internal/dalgona/gui/platform/fontfaces && sha256sum --check --quiet SHA256SUMS)
     if go list -deps ./cmd/dal ./cmd/dalgona | grep -q '^gioui\.org'; then
-        echo "desktop-check: a headless binary imports gioui.org" >&2
+        echo "desktop-check-gui: a headless binary imports gioui.org" >&2
         exit 1
     fi
     go build -tags "$tags" -trimpath -o /dev/null ./cmd/dalgona-gui
@@ -443,6 +451,12 @@ desktop-package:
     echo "desktop-package: $out assembled; install, upgrade, launch and uninstall tests need a clean Ubuntu 24.04 system and did not run"
 
 verify-go: fmt-check vet lint test vuln
+
+verify-native-build:
+    go build ./...
+
+verify-native-test:
+    go test -count=1 ./...
 
 verify-shared: hashline-model spec-style docs-links web-check cf-check
 

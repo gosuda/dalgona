@@ -57,7 +57,7 @@ func (h *dialogWindow) loop(t *testing.T) {
 	var ops op.Ops
 	for {
 		e := h.window.Event()
-		if err := h.desktop.Handle(context.Background(), e); err != nil {
+		if err := h.desktop.HandleEvent(context.Background(), e); err != nil {
 			t.Errorf("handle %T: %v", e, err)
 		}
 		switch e := e.(type) {

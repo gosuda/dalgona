@@ -42,7 +42,7 @@ func New(w *app.Window, tree *platform.AccessibilityTree) *Window {
 	return &Window{window: w, native: newNative(w, tree), outcomes: make(chan DialogOutcome, 1)}
 }
 
-func (d *Window) Handle(ctx context.Context, e event.Event) error {
+func (d *Window) HandleEvent(ctx context.Context, e event.Event) error {
 	switch e := e.(type) {
 	case app.ViewEvent:
 		if !e.Valid() {
