@@ -29,6 +29,15 @@ runs:
         printf 'GOENV override: %s\n' "${GOENV:-unset}"
         printf 'Effective GOENV file: %s\n' "$effective_goenv"
         go env -json GOENV GOCACHE GOMODCACHE
+        # TEMP-DIAGNOSTIC: ground truth for GOCACHEPROG resolution on Depot runners.
+        printf 'Probe shell GOCACHEPROG: <%s>\n' "${GOCACHEPROG-unset}"
+        printf 'Probe go binary: %s\n' "$(command -v go)"
+        go version
+        printf 'Probe GOROOT: %s\n' "$(go env GOROOT)"
+        if [[ -f "$(go env GOROOT)/go.env" ]]; then grep -E '^GOCACHEPROG=' "$(go env GOROOT)/go.env" || echo 'Probe: GOCACHEPROG absent from GOROOT/go.env'; else echo 'Probe: no GOROOT/go.env'; fi
+        printf 'Probe GOENV file content:\n'
+        cat "$goenv_file"
+        printf 'Probe effective GOCACHEPROG: <%s>\n' "$cache_program"
         if [[ -n "$cache_program" ]]; then
           echo '::error title=Go cache configuration::GOCACHEPROG must be empty; a remote cache program is still configured.'
           exit 1
