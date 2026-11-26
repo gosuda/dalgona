@@ -1,0 +1,32 @@
+name: Resolve isolated Go cache paths
+description: Verify the effective Go cache configuration and expose its local paths.
+
+outputs:
+  build:
+    description: Effective Go build cache directory.
+    value: ${{ steps.paths.outputs.build }}
+  module:
+    description: Effective Go module cache directory.
+    value: ${{ steps.paths.outputs.module }}
+
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      run: |
+        effective_goenv="$(go env GOENV)"
+        cache_program="$(go env GOCACHEPROG)"
+        printf 'GOENV override: %s\n' "${GOENV:-unset}"
+        go env -json GOENV GOCACHE GOMODCACHE
+        if [[ "${GOENV:-}" != off || -n "$effective_goenv" ]]; then
+          echo '::error title=Go cache configuration::GOENV must be off and the effective Go environment file must be empty.'
+          exit 1
+        fi
+        if [[ -n "$cache_program" ]]; then
+          echo '::error title=Go cache configuration::GOCACHEPROG must be empty; a remote cache program is still configured.'
+          exit 1
+        fi
+        echo 'Effective GOCACHEPROG: empty'
+        printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+        printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
