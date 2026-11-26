@@ -31,6 +31,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Inspect native shell cache configuration
+        shell: bash
+        run: |
+          printf 'go command kind: %s\n' "$(type -t go)"
+          printf 'go executable path: %s\n' "$(command -v go)"
+          printf 'process GOCACHEPROG length: %s\n' "${#GOCACHEPROG}"
+          effective="$(go env GOCACHEPROG)"
+          printf 'initial effective GOCACHEPROG length: %s\n' "${#effective}"
+          if [[ "$effective" =~ ^[[:space:]]*$ ]]; then echo 'initial effective value is whitespace only'; fi
+          export GOCACHEPROG= GOENV=off
+          effective="$(go env GOCACHEPROG)"
+          printf 'explicitly cleared effective GOCACHEPROG length: %s\n' "${#effective}"
+          if [[ "$effective" =~ ^[[:space:]]*$ ]]; then echo 'cleared effective value is whitespace only'; fi
       - name: Resolve Go cache paths
         id: cache_paths
         uses: ./.github/actions/go-cache-paths
