@@ -1,3 +1,6 @@
 self-hosted-runner:
   labels:
     - depot-ubuntu-24.04
+    - depot-macos-latest
+    - depot-windows-latest
+    - depot-windows-2022

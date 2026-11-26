@@ -62,7 +62,7 @@ jobs:
   desktop-macos:
     permissions:
       contents: read
-    runs-on: macos-latest
+    runs-on: depot-macos-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -101,7 +101,7 @@ jobs:
   desktop-windows:
     permissions:
       contents: read
-    runs-on: windows-latest
+    runs-on: depot-windows-latest
     timeout-minutes: 40
     defaults:
       run:
@@ -169,11 +169,11 @@ jobs:
             recipes: vuln
           - check: Verify (macos-latest)
             lane: macos
-            runner: macos-latest
+            runner: depot-macos-latest
             # Native proof is vet, build and tests without the race detector.
           - check: Verify (windows-latest)
             lane: windows
-            runner: windows-latest
+            runner: depot-windows-latest
             # Native proof is vet, build and tests without the race detector.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
