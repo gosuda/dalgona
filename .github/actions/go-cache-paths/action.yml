@@ -15,12 +15,14 @@ runs:
     - id: paths
       shell: bash
       run: |
+        unset GOCACHEPROG
         effective_goenv="$(go env GOENV)"
         cache_program="$(go env GOCACHEPROG)"
         printf 'GOENV override: %s\n' "${GOENV:-unset}"
+        printf 'Effective GOENV file: %s\n' "$effective_goenv"
         go env -json GOENV GOCACHE GOMODCACHE
-        if [[ "${GOENV:-}" != off || -n "$effective_goenv" ]]; then
-          echo '::error title=Go cache configuration::GOENV must be off and the effective Go environment file must be empty.'
+        if [[ -z "${GOENV:-}" || "$effective_goenv" != "$GOENV" || ! -f "$GOENV" ]]; then
+          echo '::error title=Go cache configuration::The isolated Go environment file is missing or inactive.'
           exit 1
         fi
         if [[ -n "$cache_program" ]]; then

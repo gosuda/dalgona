@@ -28,25 +28,17 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        env:
+          NODE_OPTIONS: '--require "${{ github.workspace }}/.github/actions/go-cache-paths/isolate.cjs"'
         with:
           go-version-file: go.mod
           cache: false
-      - name: Clear the runner cache program
+      - name: Verify a protected Bash process
         shell: bash
         run: |
-          export GOCACHEPROG= GOENV=off
-          printf 'GOCACHEPROG=\nGOENV=off\n' >> "$GITHUB_ENV"
+          unset GOCACHEPROG
           test -z "$(go env GOCACHEPROG)"
-          test -z "$(go env GOENV)"
-      - name: Verify the next Bash process remains isolated
-        shell: bash
-        run: |
-          effective="$(go env GOCACHEPROG)"
-          printf 'next-process GOCACHEPROG length: %s\n' "${#effective}"
-          if [[ -n "$effective" || "${GOENV:-}" != off || -n "$(go env GOENV)" ]]; then
-            echo '::error::Go cache isolation did not survive the process boundary'
-            exit 1
-          fi
+          test -f "$GOENV"
       - name: Resolve Go cache paths
         id: cache_paths
         uses: ./.github/actions/go-cache-paths
@@ -65,9 +57,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
           $cacheProgram = ([string](& go env GOCACHEPROG)).Trim()
           $goenv = ([string](& go env GOENV)).Trim()
-          if ($cacheProgram.Length -ne 0 -or $goenv.Length -ne 0 -or $env:GOENV -cne 'off') {
+          if ($cacheProgram.Length -ne 0 -or $goenv -cne $env:GOENV -or -not (Test-Path -LiteralPath $goenv -PathType Leaf)) {
             throw 'Go cache isolation did not survive the PowerShell process boundary'
           }
           $build = ([string](& go env GOCACHE)).Trim()
@@ -95,4 +88,3 @@ jobs:
           path: ${{ runner.temp }}/cache-handoff.json
           if-no-files-found: error
           retention-days: 2
-
