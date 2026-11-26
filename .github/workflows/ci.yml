@@ -101,7 +101,7 @@ jobs:
   desktop-windows:
     permissions:
       contents: read
-    runs-on: depot-windows-latest
+    runs-on: depot-windows-2025-4
     timeout-minutes: 40
     defaults:
       run:
@@ -173,7 +173,7 @@ jobs:
             # Native proof is vet, build and tests without the race detector.
           - check: Verify (windows-latest)
             lane: windows
-            runner: depot-windows-latest
+            runner: depot-windows-2025-4
             # Native proof is vet, build and tests without the race detector.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45

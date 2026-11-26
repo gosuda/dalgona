@@ -3,4 +3,5 @@ self-hosted-runner:
     - depot-ubuntu-24.04
     - depot-macos-latest
     - depot-windows-latest
+    - depot-windows-2025-4
     - depot-windows-2022
