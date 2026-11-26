@@ -29,16 +29,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
           cache: false
       - name: Resolve Go cache paths
         id: cache_paths
-        shell: bash
-        run: |
-          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        uses: ./.github/actions/go-cache-paths
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -49,7 +48,9 @@ jobs:
           restore-keys: |
             go-v2-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ github.job }}-
       - name: Record native target
-        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+        run: |
+          unset GOCACHEPROG
+          echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"
       - name: Gio Linux packages
         run: |
           sudo apt-get update
@@ -59,8 +60,12 @@ jobs:
           curl -fsSLo /tmp/just.tar.gz https://github.com/casey/just/releases/download/1.59.0/just-1.59.0-x86_64-unknown-linux-musl.tar.gz
           echo "409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e  /tmp/just.tar.gz" | sha256sum --check
           sudo tar -xzf /tmp/just.tar.gz -C /usr/local/bin just
-      - run: just desktop-check
-      - run: just desktop-build
+      - run: |
+          unset GOCACHEPROG
+          just desktop-check
+      - run: |
+          unset GOCACHEPROG
+          just desktop-build
 
   desktop-macos:
     if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) }}
@@ -71,16 +76,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
           cache: false
       - name: Resolve Go cache paths
         id: cache_paths
-        shell: bash
-        run: |
-          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        uses: ./.github/actions/go-cache-paths
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -92,9 +96,12 @@ jobs:
             go-v2-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ github.job }}-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Record native target
-        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+        run: |
+          unset GOCACHEPROG
+          echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"
       - name: Validate DMG inputs without signing
         run: |
+          unset GOCACHEPROG
           bash -n deploy/desktop/package-macos.sh
           plutil -lint deploy/desktop/Info.plist
           if output=$(env -u DALGONA_MACOS_SIGN_IDENTITY -u DALGONA_MACOS_NOTARY_PROFILE just desktop-package 2>&1); then
@@ -102,8 +109,12 @@ jobs:
             exit 1
           fi
           grep -F 'set DALGONA_MACOS_SIGN_IDENTITY' <<<"$output"
-      - run: just desktop-check
-      - run: just desktop-build
+      - run: |
+          unset GOCACHEPROG
+          just desktop-check
+      - run: |
+          unset GOCACHEPROG
+          just desktop-build
 
   desktop-windows:
     permissions:
@@ -117,16 +128,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
           cache: false
       - name: Resolve Go cache paths
         id: cache_paths
-        shell: bash
-        run: |
-          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        uses: ./.github/actions/go-cache-paths
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -152,11 +162,17 @@ jobs:
               throw 'The MSI manifest must declare the WiX schema, per-machine scope and installer version >= 500.'
           }
       - name: Static GUI proof
-        run: just desktop-check-static
+        run: |
+          unset GOCACHEPROG
+          just desktop-check-static
       - name: Native GUI execution proof
-        run: just desktop-check-gui
+        run: |
+          unset GOCACHEPROG
+          just desktop-check-gui
       - name: Build the desktop binary
-        run: just desktop-build
+        run: |
+          unset GOCACHEPROG
+          just desktop-build
 
   go:
     permissions:
@@ -207,16 +223,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev pkg-config
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
           cache: false
       - name: Resolve Go cache paths
         id: cache_paths
-        shell: bash
-        run: |
-          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        uses: ./.github/actions/go-cache-paths
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -235,7 +250,9 @@ jobs:
       - run: uv python install 3.15
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Verify Go contracts
-        run: just ${{ matrix.recipes }}
+        run: |
+          unset GOCACHEPROG
+          just ${{ matrix.recipes }}
 
   native:
     permissions:
@@ -275,16 +292,15 @@ jobs:
           path: internal/dalgona/webui/dist
           digest-mismatch: error
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
           cache: false
       - name: Resolve Go cache paths
         id: cache_paths
-        shell: bash
-        run: |
-          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+        uses: ./.github/actions/go-cache-paths
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -296,11 +312,17 @@ jobs:
             go-v2-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ github.job }}-${{ matrix.lane }}-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Vet native packages
-        run: just vet
+        run: |
+          unset GOCACHEPROG
+          just vet
       - name: Build native packages
-        run: just verify-native-build
+        run: |
+          unset GOCACHEPROG
+          just verify-native-build
       - name: Test native packages without the race detector
-        run: just verify-native-test
+        run: |
+          unset GOCACHEPROG
+          just verify-native-test
   web:
     permissions:
       contents: read
