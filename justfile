@@ -444,6 +444,16 @@ desktop-package:
 
 verify-go: fmt-check vet lint test vuln
 
+# CI-only native-runner proof. fmt-check, lint and vuln are
+# platform-independent and stay on the Linux lanes; the race detector stays
+# on the Linux test lane. Native runners prove vet, compilation and a test
+# pass on their own operating system.
+verify-native-build:
+    go build ./...
+
+verify-native-test:
+    go test -count=1 ./...
+
 verify-shared: hashline-model spec-style docs-links web-check cf-check
 
 verify: verify-go verify-shared

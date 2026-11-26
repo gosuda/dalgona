@@ -170,11 +170,11 @@ jobs:
           - check: Verify (macos-latest)
             lane: macos
             runner: macos-latest
-            recipes: verify-go
+            # Native proof is vet, build and tests without the race detector.
           - check: Verify (windows-latest)
             lane: windows
             runner: windows-latest
-            recipes: verify-go
+            # Native proof is vet, build and tests without the race detector.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -230,8 +230,21 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       # GOCACHE stays at its default so the cached build outputs above are
       # reused; the old per-run temporary GOCACHE forced a cold build.
+      # Linux lanes run their recipe list; native lanes run only what the
+      # native runner alone can prove. Cheap gates run first so a broken
+      # change fails fast, and each recipe gets its own timing.
       - name: Verify Go contracts
+        if: ${{ startsWith(matrix.lane, 'linux') }}
         run: just ${{ matrix.recipes }}
+      - name: Vet native packages
+        if: ${{ matrix.lane == 'macos' || matrix.lane == 'windows' }}
+        run: just vet
+      - name: Build native packages
+        if: ${{ matrix.lane == 'macos' || matrix.lane == 'windows' }}
+        run: just verify-native-build
+      - name: Test native packages without the race detector
+        if: ${{ matrix.lane == 'macos' || matrix.lane == 'windows' }}
+        run: just verify-native-test
   web:
     permissions:
       contents: read
