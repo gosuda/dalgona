@@ -15,11 +15,10 @@ runs:
     - id: paths
       shell: bash
       run: |
-        # An empty GOCACHEPROG environment value does not clear a persisted
-        # backend: the go command treats empty as unset and falls back to its
-        # configuration files, and GOENV=off disables only the user file while
-        # the toolchain GOROOT/go.env is still read. Pin GOCACHEPROG empty in
-        # an isolated GOENV file so the effective program is empty.
+        # Depot runners force a non-empty GOCACHEPROG into every step process,
+        # and empty workflow values do not clear it. Unset it in this shell so
+        # the go command falls back to the isolated GOENV file below.
+        unset GOCACHEPROG
         goenv_file="${RUNNER_TEMP}/dalgona-go.env"
         printf '# Isolated Go environment for CI: mask any persisted cache program.\nGOCACHEPROG=\n' > "$goenv_file"
         export GOENV="$goenv_file"
@@ -29,15 +28,6 @@ runs:
         printf 'GOENV override: %s\n' "${GOENV:-unset}"
         printf 'Effective GOENV file: %s\n' "$effective_goenv"
         go env -json GOENV GOCACHE GOMODCACHE
-        # TEMP-DIAGNOSTIC: ground truth for GOCACHEPROG resolution on Depot runners.
-        printf 'Probe shell GOCACHEPROG: <%s>\n' "${GOCACHEPROG-unset}"
-        printf 'Probe go binary: %s\n' "$(command -v go)"
-        go version
-        printf 'Probe GOROOT: %s\n' "$(go env GOROOT)"
-        if [[ -f "$(go env GOROOT)/go.env" ]]; then grep -E '^GOCACHEPROG=' "$(go env GOROOT)/go.env" || echo 'Probe: GOCACHEPROG absent from GOROOT/go.env'; else echo 'Probe: no GOROOT/go.env'; fi
-        printf 'Probe GOENV file content:\n'
-        cat "$goenv_file"
-        printf 'Probe effective GOCACHEPROG: <%s>\n' "$cache_program"
         if [[ -n "$cache_program" ]]; then
           echo '::error title=Go cache configuration::GOCACHEPROG must be empty; a remote cache program is still configured.'
           exit 1

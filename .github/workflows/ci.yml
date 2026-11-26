@@ -56,8 +56,12 @@ jobs:
           curl -fsSLo /tmp/just.tar.gz https://github.com/casey/just/releases/download/1.59.0/just-1.59.0-x86_64-unknown-linux-musl.tar.gz
           echo "409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e  /tmp/just.tar.gz" | sha256sum --check
           sudo tar -xzf /tmp/just.tar.gz -C /usr/local/bin just
-      - run: just desktop-check
-      - run: just desktop-build
+      - run: |
+          unset GOCACHEPROG
+          just desktop-check
+      - run: |
+          unset GOCACHEPROG
+          just desktop-build
 
   desktop-macos:
     if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) }}
@@ -96,8 +100,12 @@ jobs:
             exit 1
           fi
           grep -F 'set DALGONA_MACOS_SIGN_IDENTITY' <<<"$output"
-      - run: just desktop-check
-      - run: just desktop-build
+      - run: |
+          unset GOCACHEPROG
+          just desktop-check
+      - run: |
+          unset GOCACHEPROG
+          just desktop-build
 
   desktop-windows:
     permissions:
@@ -143,11 +151,17 @@ jobs:
               throw 'The MSI manifest must declare the WiX schema, per-machine scope and installer version >= 500.'
           }
       - name: Static GUI proof
-        run: just desktop-check-static
+        run: |
+          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
+          just desktop-check-static
       - name: Native GUI execution proof
-        run: just desktop-check-gui
+        run: |
+          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
+          just desktop-check-gui
       - name: Build the desktop binary
-        run: just desktop-build
+        run: |
+          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
+          just desktop-build
 
   go:
     permissions:
@@ -223,7 +237,9 @@ jobs:
       - run: uv python install 3.15
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Verify Go contracts
-        run: just ${{ matrix.recipes }}
+        run: |
+          unset GOCACHEPROG
+          just ${{ matrix.recipes }}
 
   native:
     permissions:
@@ -281,11 +297,17 @@ jobs:
             go-v2-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ github.job }}-${{ matrix.lane }}-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Vet native packages
-        run: just vet
+        run: |
+          unset GOCACHEPROG
+          just vet
       - name: Build native packages
-        run: just verify-native-build
+        run: |
+          unset GOCACHEPROG
+          just verify-native-build
       - name: Test native packages without the race detector
-        run: just verify-native-test
+        run: |
+          unset GOCACHEPROG
+          just verify-native-test
   web:
     permissions:
       contents: read
