@@ -50,7 +50,11 @@ An index failure is exit status 1 whose output names an unusable index or a corr
 
 When a grep call counts at least `indexRebuildBytes` uncovered bytes, Search MUST start one build for the workspace.
 
-The search call MUST NOT wait for a build. A build that runs longer than 10 minutes MUST be killed. Any build failure MUST kill the build child and wait for its exit. The generation MUST be removed only after that exit is confirmed.
+The search call MUST NOT wait for a build. A build that runs longer than 10 minutes MUST be killed. Any build failure MUST kill the build child and wait for its exit.
+
+Kill delivery MUST have a separate 1-second deadline. It MUST still run when the build context is canceled. After kill delivery, cleanup MUST wait for the exit record for the greater of 30 seconds and the time remaining before the build deadline. The wait MUST still run when the build context is canceled.
+
+The generation MUST be removed only after the child exit is confirmed. An unconfirmed exit MUST leave the generation in place.
 
 A workspace MUST have at most one build start in each process, even when that build fails.
 

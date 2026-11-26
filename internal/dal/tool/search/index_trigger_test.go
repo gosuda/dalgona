@@ -333,7 +333,7 @@ func TestBuildIsKilledAtDeadline(t *testing.T) {
 	buildWG.Add(1)
 	runBuild(local, t.TempDir(), root, runner.Sandbox{Mode: runner.SandboxWorkspaceWrite})
 	spec := <-log.specs
-	requireBuildChildExited(t, local, spec.ID)
+	requireBuildChildKilled(t, local, spec.ID)
 	requirePublishOutcome(t, root, 1)
 	if buildBlocked(root, time.Now()) {
 		t.Fatal("a build killed at its deadline wrote a backoff file; the backoff is only for unusable indexes")
