@@ -26,8 +26,10 @@ Depot runners force a non-empty `GOCACHEPROG` into every step process.
 An empty environment value does not clear it.
 Every step that invokes the go command MUST unset `GOCACHEPROG` in its shell first.
 PowerShell steps MUST remove it from `Env:`.
-The shared `go-cache-paths` action MUST unset the variable and verify that effective `go env GOCACHEPROG` is empty before restoring caches.
-It MUST write the isolated file and export it for later steps.
+The pinned Go setup action MUST preload `go-cache-paths/isolate.cjs` before invoking Go.
+The preload MUST remove the runner's cache program and select an isolated `GOENV` file containing an explicit empty `GOCACHEPROG` entry.
+It MUST export that file for later steps, so neither user settings nor toolchain defaults select a remote backend.
+The shared `go-cache-paths` action MUST unset the variable and verify the isolated file is active and effective `go env GOCACHEPROG` is empty before restoring caches.
 It MUST log the effective Go cache paths and report a named error when a configuration check fails.
 Neither a persisted Go setting nor Depot's automatic remote Go cache bypasses the explicit ref partition.
 It MUST discover the module and build cache paths through `go env`.
@@ -108,5 +110,7 @@ Workflow cancellation MUST still cancel the native jobs.
 `just box-dist` MUST build only `dalgona` for Linux amd64 and arm64, with CGO disabled.
 Both recipes MUST copy `THIRD_PARTY_NOTICES.md` beside their binaries.
 The box image workflow and `just box-image` MUST use `box-dist`.
+The image workflow MUST use the same isolated Go setup preload and cache-path guard as CI.
+It MUST disable setup-go caching and unset `GOCACHEPROG` before compiling box binaries.
 The image MUST retain both Linux architectures.
 The box image publish job MUST use the GitHub Actions runner `depot-ubuntu-24.04`.

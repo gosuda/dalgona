@@ -29,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
@@ -46,7 +48,9 @@ jobs:
           restore-keys: |
             go-v2-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ github.job }}-
       - name: Record native target
-        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+        run: |
+          unset GOCACHEPROG
+          echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"
       - name: Gio Linux packages
         run: |
           sudo apt-get update
@@ -72,6 +76,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
@@ -90,9 +96,12 @@ jobs:
             go-v2-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ github.job }}-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Record native target
-        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
+        run: |
+          unset GOCACHEPROG
+          echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"
       - name: Validate DMG inputs without signing
         run: |
+          unset GOCACHEPROG
           bash -n deploy/desktop/package-macos.sh
           plutil -lint deploy/desktop/Info.plist
           if output=$(env -u DALGONA_MACOS_SIGN_IDENTITY -u DALGONA_MACOS_NOTARY_PROFILE just desktop-package 2>&1); then
@@ -119,6 +128,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
@@ -152,15 +163,15 @@ jobs:
           }
       - name: Static GUI proof
         run: |
-          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
+          unset GOCACHEPROG
           just desktop-check-static
       - name: Native GUI execution proof
         run: |
-          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
+          unset GOCACHEPROG
           just desktop-check-gui
       - name: Build the desktop binary
         run: |
-          Remove-Item Env:GOCACHEPROG -ErrorAction SilentlyContinue
+          unset GOCACHEPROG
           just desktop-build
 
   go:
@@ -212,6 +223,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev libxcursor-dev libxfixes-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev pkg-config
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
@@ -279,6 +292,8 @@ jobs:
           path: internal/dalgona/webui/dist
           digest-mismatch: error
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: '--require ./.github/actions/go-cache-paths/isolate.cjs'
         id: go
         with:
           go-version-file: go.mod
