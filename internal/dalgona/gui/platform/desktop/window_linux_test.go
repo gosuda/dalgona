@@ -134,7 +134,7 @@ func TestWindowDialogFollowsTheViewGeneration(t *testing.T) {
 	if err := w.ShowDialog(attach[0]); !errors.Is(err, ErrNoView) {
 		t.Fatalf("dialog before a view: %v, want ErrNoView", err)
 	}
-	_ = w.Handle(t.Context(), x11View())
+	_ = w.HandleEvent(t.Context(), x11View())
 	if err := w.ShowDialog(attach[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -165,13 +165,13 @@ func TestWindowCloseCancelsItsDialog(t *testing.T) {
 	t.Setenv("DISPLAY", "")
 	chooser := serveHeldChooser(t, address)
 	w := New(new(app.Window), platform.NewAccessibilityTree(4, nil))
-	_ = w.Handle(t.Context(), x11View())
+	_ = w.HandleEvent(t.Context(), x11View())
 	if err := w.ShowDialog(platform.DialogRequest{Kind: platform.DialogChooseFolder, Title: "Choose workspace folder"}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.After(10 * time.Second)
 	waitPortalRequest(t, chooser, deadline)
-	_ = w.Handle(t.Context(), app.X11ViewEvent{})
+	_ = w.HandleEvent(t.Context(), app.X11ViewEvent{})
 	expectPortalClosed(t, chooser, deadline)
 	expectNoDialogOutcome(t, w, chooser)
 }
@@ -218,18 +218,18 @@ func TestWindowPublishesDialogHandlesAtomically(t *testing.T) {
 	t.Setenv("AT_SPI_BUS_ADDRESS", address)
 	t.Setenv("DISPLAY", "")
 	w := New(new(app.Window), platform.NewAccessibilityTree(4, nil))
-	_ = w.Handle(t.Context(), x11View())
+	_ = w.HandleEvent(t.Context(), x11View())
 	var racers sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		racers.Add(2)
-		go func() { defer racers.Done(); _ = w.Handle(t.Context(), x11View()) }()
+		go func() { defer racers.Done(); _ = w.HandleEvent(t.Context(), x11View()) }()
 		go func() {
 			defer racers.Done()
 			_ = w.ShowDialog(platform.DialogRequest{Kind: platform.DialogOpenFiles, Title: "Attach files"})
 		}()
 	}
 	racers.Wait()
-	_ = w.Handle(t.Context(), app.X11ViewEvent{})
+	_ = w.HandleEvent(t.Context(), app.X11ViewEvent{})
 	for {
 		select {
 		case <-w.DialogOutcomes():
