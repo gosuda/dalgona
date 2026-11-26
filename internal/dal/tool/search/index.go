@@ -214,16 +214,16 @@ func runBuilder(run runner.Runner, job buildJob) error {
 		if errors.Is(context.Cause(ctx), errBuildDeadline) {
 			err = errBuildDeadline
 		}
-		return stopBuilder(run, id, err)
+		return stopBuilder(ctx, run, id, err)
 	}
 	return nil
 }
 
-func stopBuilder(run runner.Runner, id string, cause error) error {
+func stopBuilder(ctx context.Context, run runner.Runner, id string, cause error) error {
 	if _, ok := errors.AsType[exitError](cause); ok {
 		return cause
 	}
-	killCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	killCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
 	if err := run.Signal(killCtx, id, runner.SignalKill); err != nil {
 		if errors.Is(err, runner.ErrProcessNotFound) {
@@ -231,10 +231,20 @@ func stopBuilder(run runner.Runner, id string, cause error) error {
 		}
 		return errors.Join(errChildRunning, cause, fmt.Errorf("search: kill index build: %w", err))
 	}
-	if err := runner.AwaitExit(context.Background(), run, id, 5*time.Second); err != nil {
+	if err := runner.AwaitExit(context.WithoutCancel(ctx), run, id, killExitGrace(ctx)); err != nil {
 		return errors.Join(errChildRunning, cause, fmt.Errorf("search: wait for index build exit: %w", err))
 	}
 	return cause
+}
+
+func killExitGrace(ctx context.Context) time.Duration {
+	const minKillExitGrace = 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > minKillExitGrace {
+			return remaining
+		}
+	}
+	return minKillExitGrace
 }
 
 func abandonBuild(root, dir string, cause error) {
