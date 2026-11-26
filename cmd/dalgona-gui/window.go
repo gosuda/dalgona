@@ -163,7 +163,7 @@ func (win *window) closeSessions() {
 }
 
 func (win *window) handle(e event.Event) (bool, error) {
-	if err := win.native.Handle(win.ctx, e); err != nil {
+	if err := win.native.HandleEvent(win.ctx, e); err != nil {
 		slog.Warn("desktop integration", "window", win.id, "error", err)
 	}
 	switch e := e.(type) {
