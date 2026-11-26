@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func (r failingRunner) Signal(ctx context.Context, id string, signal runner.Sign
 	return r.Runner.Signal(ctx, id, signal)
 }
 
-func requireBuildChildExited(t *testing.T, run runner.Runner, id string) {
+func requireBuildChildKilled(t *testing.T, run runner.Runner, id string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -46,6 +47,13 @@ func requireBuildChildExited(t *testing.T, run runner.Runner, id string) {
 	}
 	if out.Alive || out.Exit == nil {
 		t.Fatalf("build child %s is still running after runBuild", id)
+	}
+	if runtime.GOOS == "windows" {
+		if out.Exit.Code != 137 {
+			t.Fatalf("build child %s exit = %+v, want the kill exit code 137", id, out.Exit)
+		}
+	} else if out.Exit.Signal != "killed" {
+		t.Fatalf("build child %s exit = %+v, want the kill signal", id, out.Exit)
 	}
 }
 
@@ -64,7 +72,7 @@ func TestBuildIsKilledWhenReadFails(t *testing.T) {
 	buildWG.Add(1)
 	runBuild(failingRunner{Runner: local, readFailed: new(atomic.Bool)}, t.TempDir(), root, runner.Sandbox{Mode: runner.SandboxWorkspaceWrite})
 	spec := <-log.specs
-	requireBuildChildExited(t, local, spec.ID)
+	requireBuildChildKilled(t, local, spec.ID)
 	requirePublishOutcome(t, root, 1)
 }
 
