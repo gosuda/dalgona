@@ -38,6 +38,10 @@ jobs:
         id: cache_paths
         shell: bash
         run: |
+          test "$GOENV" = off
+          test -z "$(go env GOENV)"
+          test -z "$(go env GOCACHEPROG)"
+          go env -json GOENV GOCACHEPROG GOCACHE GOMODCACHE
           printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -80,6 +84,10 @@ jobs:
         id: cache_paths
         shell: bash
         run: |
+          test "$GOENV" = off
+          test -z "$(go env GOENV)"
+          test -z "$(go env GOCACHEPROG)"
+          go env -json GOENV GOCACHEPROG GOCACHE GOMODCACHE
           printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -126,6 +134,10 @@ jobs:
         id: cache_paths
         shell: bash
         run: |
+          test "$GOENV" = off
+          test -z "$(go env GOENV)"
+          test -z "$(go env GOCACHEPROG)"
+          go env -json GOENV GOCACHEPROG GOCACHE GOMODCACHE
           printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -216,6 +228,10 @@ jobs:
         id: cache_paths
         shell: bash
         run: |
+          test "$GOENV" = off
+          test -z "$(go env GOENV)"
+          test -z "$(go env GOCACHEPROG)"
+          go env -json GOENV GOCACHEPROG GOCACHE GOMODCACHE
           printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -284,6 +300,10 @@ jobs:
         id: cache_paths
         shell: bash
         run: |
+          test "$GOENV" = off
+          test -z "$(go env GOENV)"
+          test -z "$(go env GOCACHEPROG)"
+          go env -json GOENV GOCACHEPROG GOCACHE GOMODCACHE
           printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
           printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

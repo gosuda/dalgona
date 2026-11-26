@@ -24,7 +24,9 @@ Go setup MUST disable its shared cache. Explicit cache keys and restore prefixes
 They MUST also include the job and matrix lane so concurrent checks can save their own build and lint outputs.
 The workflow MUST set `GOENV=off` and clear `GOCACHEPROG` so neither a persisted Go setting nor Depot's automatic remote Go cache bypasses the explicit ref partition.
 Cached compiler output MUST NOT cross target architectures.
-Each job MUST discover the Go module and build cache paths through `go env`.
+Each job MUST verify that `GOENV` is `off` and that `go env GOENV` and `go env GOCACHEPROG` are empty before restoring caches.
+It MUST log the effective Go cache configuration and discover the module and build cache paths through `go env`.
+The explicit cache action MUST restore those resolved paths.
 It MUST set the linter cache path explicitly under the runner temporary directory.
 A new merge-group ref MUST start with an isolated cache instead of restoring another ref's compiler output.
 
