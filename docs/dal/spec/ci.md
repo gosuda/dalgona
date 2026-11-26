@@ -2,11 +2,12 @@
 
 ## Triggers
 
-The CI workflow MUST run for pull requests, pushes to `main`, tag pushes, and merge queue groups.
+The CI workflow MUST run for pull requests, tag pushes, and merge queue groups.
+Main and feature branch pushes MUST use their pull request or merge queue verification instead of starting a second CI run.
 It MUST support manual runs.
-Feature branch pushes MUST use their pull request run instead of starting a second CI run.
 CI MUST NOT filter changed paths because checks read files across package boundaries.
-A newer run for the same ref MUST cancel the older run.
+A newer pull request run for the same ref MUST cancel the older run.
+Tag, merge queue, manual, and scheduled runs MUST NOT cancel one another.
 The workflow MUST also run its scheduled verification each Monday at 03:00 UTC.
 The workflow MUST use a concurrency group per ref.
 The concurrency group MUST cover tag pushes as well.
@@ -15,11 +16,12 @@ The concurrency group MUST cover tag pushes as well.
 
 CI MUST run as one GitHub Actions workflow, `.github/workflows/ci.yml`.
 A second CI provider MUST NOT run the same jobs, because the web and Cloudflare tests run once.
-The lint, test, vuln, and web CI jobs MUST run on Depot `depot-ubuntu-24.04` runners.
+Every CI job MUST run on a Depot runner.
+Linux jobs MUST use `depot-ubuntu-24.04`, macOS jobs MUST use `depot-macos-latest`, and Windows jobs MUST use `depot-windows-2025-8`.
 Latchkey MUST NOT run CI.
 A job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
-Go setup MUST disable its shared cache. Each Go lane MUST use a build cache path
-scoped to the workflow run, attempt, and lane.
+Go setup MUST disable its shared cache. Explicit cache keys and restore prefixes MUST include the current ref, runner operating system, architecture, and Go version.
+Cached compiler output MUST NOT cross target architectures.
 
 ## Verification
 
@@ -32,13 +34,15 @@ The CI jobs MUST together run every check from the full verification command.
 | `test` | `test` |
 | `vuln` | `vuln` |
 | `web` | `hashline-model`, `spec-style`, `docs-links`, `web-check`, `cf-check` |
-| `Verify (macos-latest)` | `verify-go` |
-| `Verify (windows-latest)` | `verify-go` |
+| `Verify (macos-latest)` | `vet`, `verify-native-build`, `verify-native-test` on scheduled, manual, and tag runs |
+| `Verify (windows-latest)` | `vet`, `verify-native-build`, `verify-native-test` on scheduled, manual, and tag runs |
 
 The Go matrix MUST preserve these check names and MUST disable fail-fast.
 Linux Go lanes MUST install the graphics development packages needed to build the native client.
 
-Go tests MUST keep the race detector and `-count=1`.
+The Linux `test` job MUST keep the race detector and `-count=1`.
+Native tests MUST keep `-count=1`.
+The Linux lane supplies race detection.
 The `test` job MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
 A failing job MUST NOT cancel the other jobs.
 
@@ -62,10 +66,14 @@ One `web` job run then lists every failing check that does not depend on a faile
 
 ## Native lanes
 
-The macOS and Windows lanes MUST use the `macos-latest` and `windows-latest` GitHub-hosted runners.
+macOS and Windows Go and desktop jobs MUST run only on scheduled, manual, and tag runs.
+Routine pull requests and merge queue groups MUST run the Linux desktop job and all four Linux verification lanes.
+The weekly native runs supply operating system checks that routine pull request runs do not execute.
+Windows desktop static checks, GUI tests, packaging validation, and the binary build MUST share one job and one dependency setup.
 The `web` job uploads its `dist` artifact for the native jobs to download before Go verification.
-Each native host MUST run its own Go lint, vet, tests, and vulnerability checks.
-Each native host MUST install `uv` with Python 3.15 for the Go tests that compare against CPython.
+Each native Go host MUST run vet, build, and tests.
+The Linux lint and vulnerability jobs supply shared static and advisory checks.
+Each native desktop host MUST retain its GUI-specific checks and packaging validation.
 A failing native job MUST NOT cancel the other native jobs.
 
 The `web` job MUST upload `internal/dalgona/webui/dist` only after all its checks pass.

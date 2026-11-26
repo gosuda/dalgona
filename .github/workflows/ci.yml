@@ -2,7 +2,6 @@ name: CI
 
 "on":
   push:
-    branches: [main]
     tags: ["**"]
   pull_request:
   merge_group:
@@ -42,9 +41,9 @@ jobs:
             ~\AppData\Local\go-build
             ~/.cache/golangci-lint
             ~\AppData\Local\golangci-lint
-          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+            go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
       - name: Record native target
         run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
       - name: Gio Linux packages
@@ -60,6 +59,7 @@ jobs:
       - run: just desktop-build
 
   desktop-macos:
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) }}
     permissions:
       contents: read
     runs-on: depot-macos-latest
@@ -80,9 +80,9 @@ jobs:
             ~\AppData\Local\go-build
             ~/.cache/golangci-lint
             ~\AppData\Local\golangci-lint
-          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+            go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Record native target
         run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
@@ -98,79 +98,10 @@ jobs:
       - run: just desktop-check
       - run: just desktop-build
 
-  desktop-windows-static:
-    permissions:
-      contents: read
-    runs-on: depot-windows-2025-8
-    timeout-minutes: 40
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        id: go
-        with:
-          go-version-file: go.mod
-          cache: false
-      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
-          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: |
-            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
-      - name: Record native target
-        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
-      - name: Static GUI proof
-        run: just desktop-check-static
-
-  desktop-windows-gui:
-    permissions:
-      contents: read
-    runs-on: depot-windows-2025-8
-    timeout-minutes: 40
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        id: go
-        with:
-          go-version-file: go.mod
-          cache: false
-      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
-          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
-          restore-keys: |
-            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
-      - name: Record native target
-        run: 'echo "native execution: $(go env GOOS)/$(go env GOARCH) CGO_ENABLED=$(go env CGO_ENABLED)"'
-      - name: Native GUI execution proof
-        run: just desktop-check-gui
-
   desktop-windows:
     permissions:
       contents: read
-    # The verdict job: it reports only when both halves are done, and fails
-    # loudly instead of skipping when a half failed.
-    needs: [desktop-windows-static, desktop-windows-gui]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: depot-windows-2025-8
     timeout-minutes: 40
     defaults:
@@ -192,9 +123,9 @@ jobs:
             ~\AppData\Local\go-build
             ~/.cache/golangci-lint
             ~\AppData\Local\golangci-lint
-          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+            go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Validate MSI inputs without signing
         shell: powershell
@@ -210,14 +141,12 @@ jobs:
               $package.Scope -ne 'perMachine' -or [int]$package.InstallerVersion -lt 500) {
               throw 'The MSI manifest must declare the WiX schema, per-machine scope and installer version >= 500.'
           }
+      - name: Static GUI proof
+        run: just desktop-check-static
+      - name: Native GUI execution proof
+        run: just desktop-check-gui
       - name: Build the desktop binary
         run: just desktop-build
-      - name: Desktop verdict
-        run: |
-          if [ "${{ needs.desktop-windows-static.result }}" != success ] || [ "${{ needs.desktop-windows-gui.result }}" != success ]; then
-            echo 'desktop-windows: a required half failed' >&2
-            exit 1
-          fi
 
   go:
     permissions:
@@ -241,14 +170,6 @@ jobs:
             lane: linux-vuln
             runner: depot-ubuntu-24.04
             recipes: vuln
-          - check: Verify (macos-latest)
-            lane: macos
-            runner: depot-macos-latest
-            # Native proof is vet, build and tests without the race detector.
-          - check: Verify (windows-latest)
-            lane: windows
-            runner: depot-windows-2025-8
-            # Native proof is vet, build and tests without the race detector.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -291,37 +212,84 @@ jobs:
             ~\AppData\Local\go-build
             ~/.cache/golangci-lint
             ~\AppData\Local\golangci-lint
-          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
-            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
-      # Python is only needed by the Linux lanes (spec checks) and the web
-      # job; native lanes run compiled Go proof and skip the interpreter.
+            go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        if: ${{ startsWith(matrix.lane, 'linux') }}
         with:
           version: "0.13.9"
           python-version: "3.15"
           require-checksums: true
           enable-cache: false
       - run: uv python install 3.15
-        if: ${{ startsWith(matrix.lane, 'linux') }}
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
-      # GOCACHE stays at its default so the cached build outputs above are
-      # reused; the old per-run temporary GOCACHE forced a cold build.
-      # Linux lanes run their recipe list; native lanes run only what the
-      # native runner alone can prove. Cheap gates run first so a broken
-      # change fails fast, and each recipe gets its own timing.
       - name: Verify Go contracts
-        if: ${{ startsWith(matrix.lane, 'linux') }}
         run: just ${{ matrix.recipes }}
+
+  native:
+    permissions:
+      contents: read
+    name: ${{ matrix.check }}
+    needs: web
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: Verify (macos-latest)
+            lane: macos
+            runner: depot-macos-latest
+            # Native proof is vet, build and tests without the race detector.
+          - check: Verify (windows-latest)
+            lane: windows
+            runner: depot-windows-2025-8
+            # Native proof is vet, build and tests without the race detector.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Require verified shared assets
+        env:
+          SHARED_RESULT: ${{ needs.web.result }}
+        run: |
+          if [ "$SHARED_RESULT" != success ]; then
+            printf 'Web verification ended with %s. Re-run the web job before Go verification.\n' "$SHARED_RESULT" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download this run's verified web assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verified-web-assets
+          path: internal/dalgona/webui/dist
+          digest-mismatch: error
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Lockfile-keyed Go and linter caches shared by every Go job. The key
+      # keeps the operating system and architecture, so only native build
+      # outputs are reused; restore-keys fall back to the previous lockfile.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~\AppData\Local\go-build
+            ~/.cache/golangci-lint
+            ~\AppData\Local\golangci-lint
+          key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: |
+            go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Vet native packages
-        if: ${{ matrix.lane == 'macos' || matrix.lane == 'windows' }}
         run: just vet
       - name: Build native packages
-        if: ${{ matrix.lane == 'macos' || matrix.lane == 'windows' }}
         run: just verify-native-build
       - name: Test native packages without the race detector
-        if: ${{ matrix.lane == 'macos' || matrix.lane == 'windows' }}
         run: just verify-native-test
   web:
     permissions:
