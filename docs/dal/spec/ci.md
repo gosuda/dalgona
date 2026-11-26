@@ -22,10 +22,14 @@ Latchkey MUST NOT run CI.
 A job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
 Go setup MUST disable its shared cache. Explicit cache keys and restore prefixes MUST include the current ref, runner operating system, architecture, and Go version.
 They MUST also include the job and matrix lane so concurrent checks can save their own build and lint outputs.
-The workflow MUST set `GOENV=off` and clear `GOCACHEPROG` so neither a persisted Go setting nor Depot's automatic remote Go cache bypasses the explicit ref partition.
+The workflow MUST generate an isolated `GOENV` file that pins `GOCACHEPROG` empty.
+An empty environment value alone does not clear a persisted backend.
+The explicit file entry masks toolchain and user defaults.
+Neither a persisted Go setting nor Depot's automatic remote Go cache bypasses the explicit ref partition.
 Cached compiler output MUST NOT cross target architectures.
-Each job MUST verify that `GOENV` is `off` and that `go env GOENV` and `go env GOCACHEPROG` are empty before restoring caches.
-The shared `go-cache-paths` action MUST log the effective Go cache paths and report a named error when a configuration check fails.
+Each job MUST verify that effective `go env GOCACHEPROG` is empty before restoring caches.
+The shared `go-cache-paths` action MUST write the isolated file and export it for later steps.
+It MUST log the effective Go cache paths and report a named error when a configuration check fails.
 It MUST discover the module and build cache paths through `go env`.
 The explicit cache action MUST restore those resolved paths.
 It MUST set the linter cache path explicitly under the runner temporary directory.
