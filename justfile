@@ -189,27 +189,8 @@ desktop-build:
     go build -tags "$tags" -trimpath -o bin/ ./cmd/dalgona-gui
     echo "desktop-build: bin/dalgona-gui built with tags $tags"
 
-desktop-check:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tags=$("{{just_executable()}}" --justfile "{{justfile()}}" desktop-tags)
-    echo "desktop-check: tags $tags"
-    go tool golangci-lint fmt --diff
-    go vet -tags "$tags" ./...
-    go tool golangci-lint run --build-tags "$tags" ./...
-    go test -race -count=1 -tags "$tags" ./cmd/dalgona-gui/... ./internal/dalgona/gui/...
-    go tool govulncheck -tags "$tags" ./...
-    (cd internal/dalgona/gui/platform/fontfaces && sha256sum --check --quiet SHA256SUMS)
-    if go list -deps ./cmd/dal ./cmd/dalgona | grep -q '^gioui\.org'; then
-        echo "desktop-check: a headless binary imports gioui.org" >&2
-        exit 1
-    fi
-    go build -tags "$tags" -trimpath -o /dev/null ./cmd/dalgona-gui
+desktop-check: desktop-check-static desktop-check-gui
 
-# CI-only split of desktop-check for the Windows cells. desktop-check-static
-# proves the gui-tagged static analysis; desktop-check-gui proves native GUI
-# execution. Together with the packaging validation in CI they prove exactly
-# what desktop-check proves; the Linux and macOS jobs keep desktop-check.
 desktop-check-static:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -471,10 +452,6 @@ desktop-package:
 
 verify-go: fmt-check vet lint test vuln
 
-# CI-only native-runner proof. fmt-check, lint and vuln are
-# platform-independent and stay on the Linux lanes; the race detector stays
-# on the Linux test lane. Native runners prove vet, compilation and a test
-# pass on their own operating system.
 verify-native-build:
     go build ./...
 

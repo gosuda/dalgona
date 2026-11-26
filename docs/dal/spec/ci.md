@@ -9,8 +9,8 @@ CI MUST NOT filter changed paths because checks read files across package bounda
 A newer pull request run for the same ref MUST cancel the older run.
 Tag, merge queue, manual, and scheduled runs MUST NOT cancel one another.
 The workflow MUST also run its scheduled verification each Monday at 03:00 UTC.
-The workflow MUST use a concurrency group per ref.
-The concurrency group MUST cover tag pushes as well.
+Pull request runs MUST use a concurrency group per ref.
+Other events MUST use a group per run id so a pending run is not replaced.
 
 ## Provider
 
@@ -21,7 +21,11 @@ Linux jobs MUST use `depot-ubuntu-24.04`, macOS jobs MUST use `depot-macos-lates
 Latchkey MUST NOT run CI.
 A job MUST NOT restore a build cache written by another branch. Depot Cache shares entries across the branches of the base repository without isolation.
 Go setup MUST disable its shared cache. Explicit cache keys and restore prefixes MUST include the current ref, runner operating system, architecture, and Go version.
+The workflow MUST clear `GOCACHEPROG` so Depot's automatic remote Go cache does not bypass the explicit ref partition.
 Cached compiler output MUST NOT cross target architectures.
+Each job MUST discover the Go module and build cache paths through `go env`.
+It MUST set the linter cache path explicitly under the runner temporary directory.
+A new merge-group ref MUST start with an isolated cache instead of restoring another ref's compiler output.
 
 ## Verification
 
@@ -68,12 +72,13 @@ One `web` job run then lists every failing check that does not depend on a faile
 
 macOS and Windows Go and desktop jobs MUST run only on scheduled, manual, and tag runs.
 Routine pull requests and merge queue groups MUST run the Linux desktop job and all four Linux verification lanes.
-The weekly native runs supply operating system checks that routine pull request runs do not execute.
+The weekly native runs supply operating system checks that routine pull request and merge-queue runs do not execute.
 Windows desktop static checks, GUI tests, packaging validation, and the binary build MUST share one job and one dependency setup.
 The `web` job uploads its `dist` artifact for the native jobs to download before Go verification.
 Each native Go host MUST run vet, build, and tests.
 The Linux lint and vulnerability jobs supply shared static and advisory checks.
 Each native desktop host MUST retain its GUI-specific checks and packaging validation.
+The `desktop-check` recipe MUST compose `desktop-check-static` and `desktop-check-gui` without copying their commands.
 A failing native job MUST NOT cancel the other native jobs.
 
 The `web` job MUST upload `internal/dalgona/webui/dist` only after all its checks pass.

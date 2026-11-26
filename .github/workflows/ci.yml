@@ -13,11 +13,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
+  group: "${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   GOPROXY: https://proxy.golang.org|https://goproxy.io|direct
+  GOCACHEPROG: ""
 
 jobs:
   desktop:
@@ -32,15 +33,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
+      - name: Resolve Go cache paths
+        id: cache_paths
+        shell: bash
+        run: |
+          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
+            ${{ steps.cache_paths.outputs.build }}
+            ${{ steps.cache_paths.outputs.module }}
+            ${{ runner.temp }}/golangci-lint
           key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
@@ -71,15 +75,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
+      - name: Resolve Go cache paths
+        id: cache_paths
+        shell: bash
+        run: |
+          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
+            ${{ steps.cache_paths.outputs.build }}
+            ${{ steps.cache_paths.outputs.module }}
+            ${{ runner.temp }}/golangci-lint
           key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
@@ -114,15 +121,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # Lockfile-keyed Go and linter caches; see the go job for the key rules.
+      - name: Resolve Go cache paths
+        id: cache_paths
+        shell: bash
+        run: |
+          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
+            ${{ steps.cache_paths.outputs.build }}
+            ${{ steps.cache_paths.outputs.module }}
+            ${{ runner.temp }}/golangci-lint
           key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
@@ -201,17 +211,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # Lockfile-keyed Go and linter caches shared by every Go job. The key
-      # keeps the operating system and architecture, so only native build
-      # outputs are reused; restore-keys fall back to the previous lockfile.
+      - name: Resolve Go cache paths
+        id: cache_paths
+        shell: bash
+        run: |
+          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
+            ${{ steps.cache_paths.outputs.build }}
+            ${{ steps.cache_paths.outputs.module }}
+            ${{ runner.temp }}/golangci-lint
           key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
@@ -239,11 +250,9 @@ jobs:
           - check: Verify (macos-latest)
             lane: macos
             runner: depot-macos-latest
-            # Native proof is vet, build and tests without the race detector.
           - check: Verify (windows-latest)
             lane: windows
             runner: depot-windows-2025-8
-            # Native proof is vet, build and tests without the race detector.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -270,17 +279,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # Lockfile-keyed Go and linter caches shared by every Go job. The key
-      # keeps the operating system and architecture, so only native build
-      # outputs are reused; restore-keys fall back to the previous lockfile.
+      - name: Resolve Go cache paths
+        id: cache_paths
+        shell: bash
+        run: |
+          printf 'build=%s\nmodule=%s\n' "$(go env GOCACHE)" "$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          printf 'GOLANGCI_LINT_CACHE=%s/golangci-lint\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~\AppData\Local\go-build
-            ~/.cache/golangci-lint
-            ~\AppData\Local\golangci-lint
+            ${{ steps.cache_paths.outputs.build }}
+            ${{ steps.cache_paths.outputs.module }}
+            ${{ runner.temp }}/golangci-lint
           key: go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: |
             go-v1-${{ github.ref }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-ci-
