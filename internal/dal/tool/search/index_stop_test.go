@@ -71,7 +71,11 @@ func TestStopBuilderKeepsUnconfirmedChildAfterCleanupBudget(t *testing.T) {
 		cancel()
 		run := &delayedBuildExit{delay: 31 * time.Second}
 		cause := errors.New("read failed")
+		started := time.Now()
 		err := stopBuilder(ctx, run, "index-build", cause)
+		if elapsed := time.Since(started); elapsed != 30*time.Second {
+			t.Fatalf("cleanup lasted %s, want the 30-second floor", elapsed)
+		}
 		if !errors.Is(err, cause) || !errors.Is(err, errChildRunning) || !errors.Is(err, runner.ErrExitTimeout) {
 			t.Fatalf("stopBuilder = %v, want the original failure and an unconfirmed child", err)
 		}
