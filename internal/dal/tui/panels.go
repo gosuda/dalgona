@@ -66,6 +66,7 @@ type panelView struct {
 type listItem struct {
 	id      string
 	label   string
+	preview string
 	date    string
 	detail  string
 	snippet string

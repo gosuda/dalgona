@@ -339,9 +339,9 @@ func (m *model) activateClosed(kind string, item listItem) tea.Cmd {
 		params := rpc.ThreadLeafSetParams{ThreadID: m.thread.id, TurnID: item.id}
 		return m.call("leaf", "dalgona/thread/leaf/set", params, nil, "")
 	case "revert":
-		m.openRevert(item.id, item.label)
+		m.openRevert(item.id, cmp.Or(item.preview, item.label))
 	case "rewind":
-		m.openRewind(item.id, item.label)
+		m.openRewind(item.id, cmp.Or(item.preview, item.label))
 	case "fork":
 		params := rpc.ThreadForkParams{ThreadID: m.thread.id, LastTurnID: item.id}
 		return m.callSeq(m.resetPendingResume(""), "fork", "thread/fork", params, new(rpc.ThreadForkResponse))
@@ -471,7 +471,7 @@ func (m *model) applyTree(op string, value any) tea.Cmd {
 		if op != "tree" && !turn.Active {
 			continue
 		}
-		items = append(items, listItem{id: sanitizeText(turn.TurnID), label: singleLine(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
+		items = append(items, listItem{id: sanitizeText(turn.TurnID), label: singleLine(turn.Preview), preview: sanitizeText(turn.Preview), detail: sanitizeText(turn.TurnID), active: turn.Active})
 	}
 	if op == "forkTree" || op == "rewindTree" {
 		slices.Reverse(items)
