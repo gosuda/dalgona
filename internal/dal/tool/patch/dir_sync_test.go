@@ -331,3 +331,41 @@ func requireCleanupSyncFailure(t *testing.T, style Style) {
 		t.Fatalf("b.txt = %q, want the concurrent writer's bytes", actual)
 	}
 }
+
+func TestDirectorySyncFailureAfterRecreatedBackupsReportsUnconfirmed(t *testing.T) {
+	for _, style := range profileStyles {
+		t.Run("IO-05/cleanup sync failure then resync failure/"+string(style), func(t *testing.T) {
+			requireRecreatedBackupUnconfirmed(t, style)
+		})
+	}
+}
+
+func requireRecreatedBackupUnconfirmed(t *testing.T, style Style) {
+	t.Helper()
+	f := newOutcomeFixture(t)
+	twoFiles(t, f)
+	calls := 0
+	stubDirectorySync(t, func(*dirPin) error {
+		calls++
+		if calls == 3 {
+			writeFixture(t, f.cwd, "b.txt", "b-other\n")
+			return errInjectedDirSync
+		}
+		if calls == 5 {
+			return errInjectedDirSync
+		}
+		return nil
+	})
+	err := f.run(t, style, twoFileEdit)
+	if err == nil {
+		t.Fatal("the call succeeded although its cleanup sync failed")
+	}
+	text := err.Error()
+	for _, backup := range [][2]string{{"a.txt", "a-before\n"}, {"b.txt", "b-before\n"}} {
+		requireBackupHolds(t, text, backup[0], backup[1])
+		mark := "patch: cannot confirm the retention of the backup for " + backup[0] + ": "
+		if !strings.Contains(text, mark) {
+			t.Fatalf("error does not report the unconfirmed backup of %s:\n%s", backup[0], text)
+		}
+	}
+}
