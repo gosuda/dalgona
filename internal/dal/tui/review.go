@@ -38,6 +38,10 @@ func (m *model) openReview() {
 	if m.review != nil {
 		return
 	}
+	if m.confirm != nil && len(m.approvals) == 0 {
+		m.openConfirmReview()
+		return
+	}
 	live := m.liveEntry()
 	if live == nil && len(m.out.entries) == 0 {
 		m.noticef("nothing to review yet")

@@ -211,3 +211,20 @@ func TestConfirmPanelCountsTheRowsBelow(t *testing.T) {
 		t.Fatalf("last body row = %q, want it to start with %q:\n%s", body[len(body)-1], want, content)
 	}
 }
+
+func TestConfirmCtrlOShowsFullNotice(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 24, Height: 8})
+	m.thread.id = "t1"
+	m.openRevert("turn-9", "work")
+	m, _ = drive(t, m, press('o', tea.ModCtrl, ""))
+	if m.review == nil {
+		t.Fatal("ctrl+o on the open confirm did not open the review")
+	}
+	entries := m.reviewEntries()
+	got := entries[len(entries)-1].text
+	if !strings.Contains(got, "Revert to before this turn?") || !strings.Contains(got, revertNotice) {
+		t.Fatalf("review shows %q, want the confirm title and the full notice", got)
+	}
+}
