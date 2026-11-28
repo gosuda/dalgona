@@ -67,6 +67,23 @@ func TestEscEscRewindRestoresPrompt(t *testing.T) {
 	}
 }
 
+func TestEscEscRewindRestoresMultilinePrompt(t *testing.T) {
+	t.Parallel()
+	preview := "Show this:\n hello"
+	caller := &treeCaller{tree: rpc.ThreadTreeResponse{Turns: []rpc.TreeTurn{{TurnID: "turn-1", Preview: preview, Active: true}}}}
+	m := idleRewindModel(caller)
+	m, _ = drive(t, m, press(tea.KeyEscape, 0, ""))
+	m, command := drive(t, m, press(tea.KeyEscape, 0, ""))
+	m = runCommand(t, m, command, "second esc produced no command")
+	assertContains(t, m.View().Content, "Show this: hello")
+	m, _ = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m, command = drive(t, m, press(tea.KeyEnter, 0, ""))
+	m = runCommand(t, m, command, "confirm produced no command")
+	if got := m.input.composer.Value(); got != preview {
+		t.Fatalf("prompt after rewind = %q, want the turn preview %q", got, preview)
+	}
+}
+
 func TestRewindHintInLiveRow(t *testing.T) {
 	t.Parallel()
 	m := rawUpdate(t, idleRewindModel(nil), tea.WindowSizeMsg{Width: 100, Height: 12})

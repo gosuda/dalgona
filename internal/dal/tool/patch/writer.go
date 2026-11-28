@@ -150,18 +150,25 @@ func syncFailureAfterCleanup(ctx context.Context, env tool.Env, files []*stagedF
 	var out strings.Builder
 	out.WriteString(head)
 	if outcome.Commit == tool.CommitUnknown {
-		kept, failures := retainCleanupBackups(ctx, env, states)
+		kept, failures, recreated := retainCleanupBackups(ctx, env, states)
 		for _, backup := range kept {
 			fmt.Fprintf(&out, "\nRetained backup for %s: %s", backup.path, backup.file)
 		}
 		for _, failure := range failures {
 			fmt.Fprintf(&out, "\n%s", failure)
 		}
+		if recreated {
+			if err := syncStates(states); err != nil {
+				for _, backup := range kept {
+					fmt.Fprintf(&out, "\npatch: cannot confirm the retention of the backup for %s: %v", backup.path, err)
+				}
+			}
+		}
 	}
 	return outcome, errors.New(out.String())
 }
 
-func retainCleanupBackups(ctx context.Context, env tool.Env, states []*writeState) (kept []keptBackup, failures []string) {
+func retainCleanupBackups(ctx context.Context, env tool.Env, states []*writeState) (kept []keptBackup, failures []string, recreated bool) {
 	for _, state := range states {
 		if state.backup == "" {
 			continue
@@ -171,6 +178,7 @@ func retainCleanupBackups(ctx context.Context, env tool.Env, states []*writeStat
 				failures = append(failures, fmt.Sprintf("patch: cannot restore the backup for %s: %v", state.file.path, err))
 				continue
 			}
+			recreated = true
 		}
 		if backupPresent(ctx, env, state) {
 			kept = append(kept, keptBackup{path: state.file.path, file: state.backup})
@@ -178,7 +186,7 @@ func retainCleanupBackups(ctx context.Context, env tool.Env, states []*writeStat
 		}
 		failures = append(failures, fmt.Sprintf("patch: cannot restore the backup for %s", state.file.path))
 	}
-	return kept, failures
+	return kept, failures, recreated
 }
 
 func backupPresent(ctx context.Context, env tool.Env, state *writeState) bool {

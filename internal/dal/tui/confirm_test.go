@@ -140,13 +140,24 @@ func checkConfirmBody(t *testing.T, tc confirmCase, width, height int) {
 	m.thread.id = "t1"
 	tc.open(&m)
 	var seen []string
+	var frames [][]string
 	for range 20 {
 		shown, hint := confirmFrameRows(t, m, tc, width, height)
 		seen = mergeScrolled(seen, shown)
+		frames = append(frames, slices.Clone(shown))
 		if !hint {
 			break
 		}
 		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	for i := len(frames) - 1; i >= 0; i-- {
+		shown, _ := confirmFrameRows(t, m, tc, width, height)
+		if !slices.Equal(shown, frames[i]) {
+			t.Fatalf("%s at %dx%d: body after scrolling back reads %q, want the row before it %q", tc.name, width, height, shown, frames[i])
+		}
+		if i > 0 {
+			m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+		}
 	}
 	got := strings.Fields(strings.Join(seen, " "))
 	want := append(slices.Clone(tc.lead), strings.Fields(tc.notice)...)
@@ -198,5 +209,22 @@ func TestConfirmPanelCountsTheRowsBelow(t *testing.T) {
 	const want = "↓ 2 more lines"
 	if !strings.HasPrefix(body[len(body)-1], want) {
 		t.Fatalf("last body row = %q, want it to start with %q:\n%s", body[len(body)-1], want, content)
+	}
+}
+
+func TestConfirmCtrlOShowsFullNotice(t *testing.T) {
+	t.Parallel()
+	m := newTestModel(new(fakeCaller), Options{})
+	m, _ = drive(t, m, tea.WindowSizeMsg{Width: 24, Height: 8})
+	m.thread.id = "t1"
+	m.openRevert("turn-9", "work")
+	m, _ = drive(t, m, press('o', tea.ModCtrl, ""))
+	if m.review == nil {
+		t.Fatal("ctrl+o on the open confirm did not open the review")
+	}
+	entries := m.reviewEntries()
+	got := entries[len(entries)-1].text
+	if !strings.Contains(got, "Revert to before this turn?") || !strings.Contains(got, revertNotice) {
+		t.Fatalf("review shows %q, want the confirm title and the full notice", got)
 	}
 }

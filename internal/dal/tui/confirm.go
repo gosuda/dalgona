@@ -43,6 +43,29 @@ func (m *model) openRewind(turnID, preview string) {
 	m.openConfirm(confirmation{kind: confirmRewind, id: turnID, title: "Rewind to before this turn?", preview: preview, action: "[enter] rewind  [esc] keep"})
 }
 
+func (m *model) confirmReviewLines(c *confirmation) []string {
+	lines := []string{c.title}
+	if c.kind != confirmRevert && c.kind != confirmRewind {
+		return append(lines, c.lines...)
+	}
+	if c.kind == confirmRevert {
+		flat := strings.Join(strings.Fields(c.preview), " ")
+		lines = append(lines, "`"+flat+"`")
+		return append(lines, revertNotice)
+	}
+	return append(lines, rewindNotice)
+}
+
+func (m *model) openConfirmReview() {
+	if m.review != nil {
+		return
+	}
+	c := *m.confirm
+	snapshot := newEntry("confirm:"+c.id, m.confirmReviewLines(&c))
+	m.review = &reviewState{live: &snapshot, view: newReviewView()}
+	m.setReviewEntry(len(m.reviewEntries()) - 1)
+}
+
 func (m *model) confirmPanel() panelView {
 	c := m.confirm
 	return panelView{

@@ -38,11 +38,9 @@ func identityServe(build string, pid int, retireCancel func()) func(context.Cont
 				return jsontext.Value(reply), nil
 			}
 		}
-		if retireCancel != nil {
-			extensions[client.MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
-				retireCancel()
-				return jsontext.Value("{}"), nil
-			}
+		extensions[client.MethodRetire] = func(context.Context, jsontext.Value) (jsontext.Value, error) {
+			retireCancel()
+			return jsontext.Value("{}"), nil
 		}
 		return rpcserver.ServeWith(ctx, conn, host, rpcserver.ServeOptions{Extensions: extensions})
 	}

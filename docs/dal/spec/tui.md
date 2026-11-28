@@ -321,7 +321,7 @@ The client cannot see a failed write to the terminal. A write that fails is ther
 
 ## Review
 
-`ctrl+o` MUST open the review on the newest entry. The review MUST show the full text of an entry, not its cut form.
+`ctrl+o` MUST open the review on the newest entry. The review MUST show the full text of an entry, not its cut form. When a confirm panel is open and no decision card waits, `ctrl+o` MUST show the full confirm body in the review instead of the transcript.
 The review MUST close only on `esc`, `q`, or `ctrl+o`. A quit or suspend key MUST close the review first.
 Rows that finish while the review is open MUST wait, and they MUST print after the review closes.
 In a window of three rows or more, the review header MUST show the count of waiting rows. In a window of four rows or more, the footer MUST name the scroll keys and the entry keys.

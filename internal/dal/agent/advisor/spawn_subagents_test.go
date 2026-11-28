@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/gosuda/dalgona/internal/dal/agent"
@@ -91,18 +92,31 @@ func seedTaskCall(t *testing.T, parent *agent.Thread, callID string) {
 	}
 }
 
+func holdAdvisorReview(t *testing.T, h *harness, first response) func() {
+	t.Helper()
+	gate := make(chan struct{})
+	release := sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	h.model.push(roleAdvisor, gated(first, gate), text("done"))
+	return release
+}
+
 func TestSpawnedChildWithGlobalOptInGetsReview(t *testing.T) {
 	t.Parallel()
 	h, registry := hookedHarness(t, func(cfg *config.Config) {
 		cfg.Advisor.Subagents = true
 	})
-	h.model.push(roleAdvisor, calls(advise("n1", "check the error path", "nit")), text("done"))
+	release := holdAdvisorReview(t, h, calls(advise("n1", "check the error path", "nit")))
 	child := spawnChild(t, h, "call-1", agent.TaskRequest{Prompt: "do the work"})
 	rt := registry.Get(child)
 	if rt == nil {
 		t.Fatal("advisor runtime is missing for a globally opted-in subagent child")
 	}
-	requireAdvisorStates(t, rt, map[string]State{config.DefaultAdvisorName: StateIdle})
+	h.waitFor("the default advisor review to start", func() bool {
+		return advisorStates(t, rt)[config.DefaultAdvisorName] == StateReviewing
+	})
+	requireAdvisorStates(t, rt, map[string]State{config.DefaultAdvisorName: StateReviewing})
+	release()
 	h.waitFor("the subagent review note", func() bool {
 		return len(notesIn(journalEvents(t, h.store, child))) == 1
 	})
@@ -114,15 +128,19 @@ func TestSpawnedChildWithEntryOptInGetsReview(t *testing.T) {
 		cfg.Advisor.Subagents = false
 		cfg.Advisors = subagentsRoster()
 	})
-	h.model.push(roleAdvisor, calls(advise("n1", "check the error path", "nit")), text("done"))
+	release := holdAdvisorReview(t, h, calls(advise("n1", "check the error path", "nit")))
 	child := spawnChild(t, h, "call-1", agent.TaskRequest{Prompt: "do the work"})
 	rt := registry.Get(child)
 	if rt == nil {
 		t.Fatal("advisor runtime is missing for an entry opted-in subagent child")
 	}
-	requireAdvisorStates(t, rt, map[string]State{
-		"force": StateIdle, "off": StateDisabled, "inherit": StateDisabled,
+	h.waitFor("the force advisor review to start", func() bool {
+		return advisorStates(t, rt)["force"] == StateReviewing
 	})
+	requireAdvisorStates(t, rt, map[string]State{
+		"force": StateReviewing, "off": StateDisabled, "inherit": StateDisabled,
+	})
+	release()
 	h.waitFor("the entry review note", func() bool {
 		return len(notesIn(journalEvents(t, h.store, child))) == 1
 	})
