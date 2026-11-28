@@ -140,13 +140,24 @@ func checkConfirmBody(t *testing.T, tc confirmCase, width, height int) {
 	m.thread.id = "t1"
 	tc.open(&m)
 	var seen []string
+	var frames [][]string
 	for range 20 {
 		shown, hint := confirmFrameRows(t, m, tc, width, height)
 		seen = mergeScrolled(seen, shown)
+		frames = append(frames, slices.Clone(shown))
 		if !hint {
 			break
 		}
 		m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+	for i := len(frames) - 1; i >= 0; i-- {
+		shown, _ := confirmFrameRows(t, m, tc, width, height)
+		if !slices.Equal(shown, frames[i]) {
+			t.Fatalf("%s at %dx%d: body after scrolling back reads %q, want the row before it %q", tc.name, width, height, shown, frames[i])
+		}
+		if i > 0 {
+			m, _ = drive(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
+		}
 	}
 	got := strings.Fields(strings.Join(seen, " "))
 	want := append(slices.Clone(tc.lead), strings.Fields(tc.notice)...)
