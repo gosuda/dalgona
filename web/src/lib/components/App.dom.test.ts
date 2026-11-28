@@ -243,6 +243,21 @@ describe("file completion across threads", () => {
 			await fireEvent.keyDown(field, { key: "Tab" });
 			expect(field.value).toBe("@new.go ");
 			expect(submitted).toEqual([]);
+
+			await fireEvent.click(
+				sidebar.getByRole("button", { name: /^Old thread/ }),
+			);
+			await vi.waitFor(() => expect(session.activeThreadId).toBe("old"));
+			await fireEvent.input(field, { target: { value: "@mod" } });
+			expect((await screen.findByRole("option")).textContent).toContain(
+				"old.go",
+			);
+			expect(searches).toHaveLength(4);
+			expect(searches[3]).toEqual({
+				query: "mod",
+				roots: ["/old"],
+				cancellationToken: "composer",
+			});
 		} finally {
 			session.stop();
 		}
